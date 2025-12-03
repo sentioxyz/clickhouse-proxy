@@ -1,0 +1,9 @@
+# Binaries and build artifacts
+/ck_remote_proxy
+/bin/
+/.cache/
+.ck_runtime/
+
+# Editor/OS noise
+*.swp
+*.DS_Store
