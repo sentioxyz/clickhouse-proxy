@@ -351,7 +351,7 @@ func summarizePrintable(b []byte, maxLen int) string {
 	spaces := 0
 	for i := 0; i < limit && buf.Len() < maxLen; i++ {
 		c := b[i]
-		if c >= 32 && c <= 126 {
+		if c >= 32 && c <= 126 && c != ' ' {
 			if spaces > 0 && buf.Len() > 0 {
 				buf.WriteByte(' ')
 				spaces = 0
