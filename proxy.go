@@ -9,9 +9,13 @@ import (
 	"io"
 	"log"
 	"net"
+	"regexp"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/ClickHouse/ch-go/proto"
 )
 
 // Known client -> server packet types in ClickHouse native protocol.
@@ -77,6 +81,148 @@ func newProxy(cfg Config, v Validator) *proxy {
 		cfg:       cfg,
 		stats:     newPacketStats(),
 		validator: v,
+	}
+}
+
+// countingReader wraps an io.Reader and counts bytes read.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
+}
+
+// queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies.
+// It assumes the buffer starts on a packet boundary; for unknown packet types it drops the buffer.
+type queryParser struct {
+	version int
+	buf     []byte
+}
+
+func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int, error) {
+	cr := &countingReader{r: bytes.NewReader(data)}
+	r := proto.NewReader(cr)
+
+	// QueryID
+	if _, err := r.Str(); err != nil {
+		return "", cr.n, err
+	}
+
+	if proto.FeatureClientWriteInfo.In(version) {
+		var info proto.ClientInfo
+		if err := info.DecodeAware(r, version); err != nil {
+			return "", cr.n, err
+		}
+	}
+
+	if !proto.FeatureSettingsSerializedAsStrings.In(version) && !forceSettings {
+		return "", cr.n, errors.New("settings not serialized as strings")
+	}
+
+	for {
+		var s proto.Setting
+		if err := s.Decode(r); err != nil {
+			return "", cr.n, err
+		}
+		if s.Key == "" {
+			break
+		}
+	}
+
+	if proto.FeatureInterServerSecret.In(version) {
+		if _, err := r.Str(); err != nil {
+			return "", cr.n, err
+		}
+	}
+
+	if _, err := r.UVarInt(); err != nil { // Stage
+		return "", cr.n, err
+	}
+	if _, err := r.UVarInt(); err != nil { // Compression
+		return "", cr.n, err
+	}
+
+	body, err := r.Str()
+	if err != nil {
+		return "", cr.n, err
+	}
+
+	if proto.FeatureParameters.In(version) {
+		for {
+			var p proto.Parameter
+			if err := p.Decode(r); err != nil {
+				return "", cr.n, err
+			}
+			if p.Key == "" {
+				break
+			}
+		}
+	}
+
+	return body, cr.n, nil
+}
+
+func (p *queryParser) feed(chunk []byte) ([]string, error) {
+	p.buf = append(p.buf, chunk...)
+	var out []string
+	var decodeErr error
+	for {
+		typ, n := binary.Uvarint(p.buf)
+		if n <= 0 {
+			return out, decodeErr
+		}
+
+		switch typ {
+		case 0: // Hello
+			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
+			r := proto.NewReader(cr)
+			var hello proto.ClientHello
+			if err := hello.Decode(r); err != nil {
+				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+					return out, decodeErr
+				}
+				decodeErr = err
+				p.buf = p.buf[:0]
+				return out, decodeErr
+			}
+			p.version = hello.ProtocolVersion
+			consumed := n + cr.n
+			p.buf = p.buf[consumed:]
+		case 1: // Query
+			if p.version == 0 {
+				p.buf = p.buf[:0]
+				return out, decodeErr
+			}
+			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
+			r := proto.NewReader(cr)
+			var q proto.Query
+			if err := q.DecodeAware(r, p.version); err != nil {
+				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
+					return out, decodeErr
+				}
+				// Try permissive decode ignoring settings flag.
+				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
+				if derr == nil {
+					out = append(out, body)
+					p.buf = p.buf[n+consumed:]
+					continue
+				}
+				decodeErr = err
+				p.buf = p.buf[:0]
+				return out, decodeErr
+			}
+			out = append(out, q.Body)
+			consumed := n + cr.n
+			p.buf = p.buf[consumed:]
+		default:
+			// Unknown packet type; reset to avoid buffer growth.
+			p.buf = p.buf[:0]
+			return out, decodeErr
+		}
 	}
 }
 
@@ -252,6 +398,7 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 
 func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, upstreamConn net.Conn) {
 	buf := make([]byte, 64*1024)
+	parser := &queryParser{}
 	for {
 		if p.cfg.IdleTimeout.Duration > 0 {
 			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -261,7 +408,25 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			chunk := buf[:n]
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
-			p.logPacket(id, pkt, chunk)
+
+			// Feed all chunks to parser to capture Hello + Query accurately.
+			if p.cfg.LogQueries {
+				sqls, perr := parser.feed(chunk)
+				if perr != nil {
+					log.Printf("[conn %d] query decode warning: %v", id, perr)
+				}
+				for _, sql := range sqls {
+					log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
+					log.Printf("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
+				}
+				// Fallback summary if Query detected but no SQL decoded yet.
+				if pkt == "Query" && len(sqls) == 0 {
+					p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
+				}
+			}
+			if p.cfg.LogData && pkt == "Data" {
+				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
+			}
 
 			if pkt == "Query" {
 				meta := QueryMeta{
@@ -294,15 +459,16 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 	}
 }
 
-func (p *proxy) logPacket(id int64, pktType string, chunk []byte) {
+func (p *proxy) logPacket(id int64, clientAddr string, pktType string, chunk []byte) {
 	switch pktType {
 	case "Query":
 		if p.cfg.LogQueries {
-			log.Printf("[conn %d] Query packet (%d bytes): %s", id, len(chunk), summarizePrintable(chunk, p.cfg.MaxQueryLogBytes))
+			summary := extractQuerySummary(chunk, p.cfg.MaxQueryLogBytes)
+			log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientAddr, p.cfg.Upstream, summary)
 		}
 	case "Data":
 		if p.cfg.LogData {
-			log.Printf("[conn %d] Data packet (%d bytes): %s", id, len(chunk), summarizePrintable(chunk, p.cfg.MaxDataLogBytes))
+			log.Printf("[conn %d %s -> %s] Data packet (%d bytes): %s", id, clientAddr, p.cfg.Upstream, len(chunk), summarizePrintable(chunk, p.cfg.MaxDataLogBytes))
 		}
 	default:
 	}
@@ -362,4 +528,33 @@ func summarizePrintable(b []byte, maxLen int) string {
 		}
 	}
 	return buf.String()
+}
+
+// extractQuerySummary cleans a raw Query packet payload into a readable SQL snippet.
+// It strips leading metadata and keeps only a substring starting from the first
+// recognizable SQL keyword.
+func extractQuerySummary(chunk []byte, maxLen int) string {
+	clean := summarizePrintable(chunk, maxLen*4)
+	lower := strings.ToLower(clean)
+	keywords := []string{"select", "insert", "create", "drop", "alter", "optimize", "show", "desc", "describe", "explain", "truncate"}
+
+	idx := len(clean)
+	for _, kw := range keywords {
+		if pos := strings.Index(lower, kw); pos >= 0 && pos < idx {
+			idx = pos
+		}
+	}
+
+	if idx < len(clean) {
+		clean = clean[idx:]
+	} else {
+		// Fallback: match USE if no other keyword found.
+		if loc := regexp.MustCompile(`(?i)\buse\b`).FindStringIndex(clean); len(loc) == 2 {
+			clean = clean[loc[0]:]
+		}
+	}
+	if len(clean) > maxLen {
+		clean = clean[:maxLen]
+	}
+	return strings.TrimSpace(clean)
 }

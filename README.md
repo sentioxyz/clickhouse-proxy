@@ -5,6 +5,7 @@
 ## 运行
 
 ### 配置
+本地双实例+双 proxy 行为测试可参考 `local/` 目录的示例配置（A/B 各一份）。
 
 可以放置一个 `config.json`（默认为当前目录，如果不存在则使用内置默认值和 `CK_LISTEN` / `CK_UPSTREAM` 环境变量）：
 ```json
@@ -32,6 +33,25 @@ GOCACHE=/workspace/clickhouse-proxy-demo/.cache/go-build \
 go run . -config config.json
 ```
 默认每 10s 打印统计，Ctrl+C 会打印最终统计。未提供配置文件时，使用内置默认值与 `CK_LISTEN` / `CK_UPSTREAM` 环境变量。
+
+### 本地双实例 + 双 proxy 验证示例
+
+准备两份 CK 配置：
+- A: `local/ck-a-config.xml`（端口 http 18123 / tcp 19000 / interserver 19009，数据目录 `.ck_runtime/a`）
+- B: `local/ck-b-config.xml`（端口 http 28123 / tcp 29000 / interserver 29009，数据目录 `.ck_runtime/b`）
+
+示意启动（先准备目录权限，注意端口占用）：
+```bash
+# 启动 CK A / CK B（需要 clickhouse-server 可用，并允许监听端口）
+clickhouse server --config-file local/ck-a-config.xml --daemon
+clickhouse server --config-file local/ck-b-config.xml --daemon
+
+# 启动各自 proxy
+go run . -config local/proxy-a.json   # listen 9001 -> upstream 19000
+go run . -config local/proxy-b.json   # listen 9002 -> upstream 29000
+```
+
+测试思路：用 Go SDK 连 proxy B（9002）做建表/插入/查询，再用 remote 函数指向 proxy A（9001）跨实例查询，确认两侧 proxy 均有统计/日志。
 
 ## ck-dev 侧示例
 

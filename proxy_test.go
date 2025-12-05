@@ -49,3 +49,12 @@ func TestSummarizePrintable(t *testing.T) {
 		t.Fatalf("summarizePrintable truncation = %q, want %q", got, "abcde")
 	}
 }
+
+func TestExtractQuerySummary(t *testing.T) {
+	raw := []byte("prefix stuff SELECT sum(id) FROM t")
+	got := extractQuerySummary(raw, 100)
+	want := "SELECT sum(id) FROM t"
+	if got != want {
+		t.Fatalf("extractQuerySummary = %q, want %q", got, want)
+	}
+}
