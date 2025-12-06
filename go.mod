@@ -26,6 +26,6 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-replace github.com/ClickHouse/ch-go => github.com/sentioxyz/ch-go v1.0.0
+replace github.com/ClickHouse/ch-go => /workspace/ch-go
 
 replace github.com/ClickHouse/clickhouse-go/v2 => github.com/sentioxyz/clickhouse-go/v2 v2.0.1

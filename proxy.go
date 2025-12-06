@@ -99,8 +99,88 @@ func (c *countingReader) Read(p []byte) (int, error) {
 // queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies.
 // It assumes the buffer starts on a packet boundary; for unknown packet types it drops the buffer.
 type queryParser struct {
-	version int
-	buf     []byte
+	version      int
+	buf          []byte
+	addendumDone bool
+}
+
+// skipAddendum attempts to consume the optional "addendum" section that
+// follows the Hello/handshake in newer protocol versions. It returns:
+//   - consumed > 0 and ok=true when the addendum was fully read,
+//   - ok=false when more bytes are needed (no state is changed),
+//   - err on hard parse errors.
+func (p *queryParser) skipAddendum() (consumed int, ok bool, err error) {
+	// The addendum layout mirrors Connection::sendAddendum in ClickHouse:
+	//   if (server_revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_QUOTA_KEY)
+	//       writeStringBinary(quota_key)
+	//   if (server_revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CHUNKED_PACKETS)
+	//       writeStringBinary(proto_send_chunked)
+	//       writeStringBinary(proto_recv_chunked)
+	//   if (server_revision >= DBMS_MIN_REVISION_WITH_VERSIONED_PARALLEL_REPLICAS_PROTOCOL)
+	//       writeVarUInt(DBMS_PARALLEL_REPLICAS_PROTOCOL_VERSION)
+	//
+	// We don't need the values themselves, only their lengths, so work
+	// directly on the raw buffer to avoid interference from bufio.Reader
+	// prefetching.
+	buf := p.buf
+	offset := 0
+
+	readString := func() (bool, error) {
+		l, n := binary.Uvarint(buf[offset:])
+		if n <= 0 {
+			return false, nil
+		}
+		if len(buf[offset+n:]) < int(l) {
+			return false, nil
+		}
+		offset += n + int(l)
+		return true, nil
+	}
+	readUVar := func() (bool, error) {
+		_, n := binary.Uvarint(buf[offset:])
+		if n <= 0 {
+			return false, nil
+		}
+		offset += n
+		return true, nil
+	}
+
+	if proto.FeatureQuotaKey.In(p.version) {
+		ok, err = readString()
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok {
+			return 0, false, nil
+		}
+	}
+	if proto.FeatureChunkedPackets.In(p.version) {
+		ok, err = readString()
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok {
+			return 0, false, nil
+		}
+		ok, err = readString()
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok {
+			return 0, false, nil
+		}
+	}
+	if proto.FeatureVersionedParallelReplicas.In(p.version) {
+		ok, err = readUVar()
+		if err != nil {
+			return 0, false, err
+		}
+		if !ok {
+			return 0, false, nil
+		}
+	}
+
+	return offset, true, nil
 }
 
 func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int, error) {
@@ -130,6 +210,12 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 		}
 		if s.Key == "" {
 			break
+		}
+	}
+
+	if proto.FeatureInterserverExternallyGrantedRoles.In(version) {
+		if _, err := r.Str(); err != nil {
+			return "", cr.n, err
 		}
 	}
 
@@ -171,6 +257,30 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 	var out []string
 	var decodeErr error
 	for {
+		// After we know the protocol version, ClickHouse will send a single
+		// "addendum" block as part of the handshake (quota key, chunked
+		// protocol negotiation, parallel replicas). This block does not
+		// start with a packet type varint, so if it gets coalesced with the
+		// first Query into a single TCP read, naive parsing will never see
+		// the Query. Explicitly skip addendum once per connection.
+		if p.version != 0 && !p.addendumDone && proto.FeatureAddendum.In(p.version) {
+			consumed, ok, err := p.skipAddendum()
+			if err != nil {
+				decodeErr = err
+				p.buf = p.buf[:0]
+				return out, decodeErr
+			}
+			if !ok {
+				// Need more bytes to complete addendum.
+				return out, decodeErr
+			}
+			p.addendumDone = true
+			p.buf = p.buf[consumed:]
+			if len(p.buf) == 0 {
+				return out, decodeErr
+			}
+		}
+
 		typ, n := binary.Uvarint(p.buf)
 		if n <= 0 {
 			return out, decodeErr
@@ -388,7 +498,7 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 			}
 		}
 		if err != nil {
-			if !errors.Is(err, io.EOF) && !isTimeout(err) {
+			if !errors.Is(err, io.EOF) && !isTimeout(err) && !errors.Is(err, net.ErrClosed) {
 				log.Printf("[conn %d] upstream->client read error: %v", id, err)
 			}
 			return
@@ -419,10 +529,6 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
 					log.Printf("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
 				}
-				// Fallback summary if Query detected but no SQL decoded yet.
-				if pkt == "Query" && len(sqls) == 0 {
-					p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
-				}
 			}
 			if p.cfg.LogData && pkt == "Data" {
 				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
@@ -451,7 +557,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			}
 		}
 		if readErr != nil {
-			if !errors.Is(readErr, io.EOF) && !isTimeout(readErr) {
+			if !errors.Is(readErr, io.EOF) && !isTimeout(readErr) && !errors.Is(readErr, net.ErrClosed) {
 				log.Printf("[conn %d] client->upstream read error: %v", id, readErr)
 			}
 			return
