@@ -519,33 +519,33 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
 
-			// Feed all chunks to parser to capture Hello + Query accurately.
-			if p.cfg.LogQueries {
-				sqls, perr := parser.feed(chunk)
-				if perr != nil {
-					log.Printf("[conn %d] query decode warning: %v", id, perr)
-				}
-				for _, sql := range sqls {
-					log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
-					log.Printf("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
-				}
+			// Feed all chunks to parser to capture Hello + Query accurately。
+			// 解析到的 SQL 会通过 Validator 做验证。
+			sqls, perr := parser.feed(chunk)
+			if perr != nil {
+				log.Printf("[conn %d] query decode warning: %v", id, perr)
 			}
-			if p.cfg.LogData && pkt == "Data" {
-				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
-			}
-
-			if pkt == "Query" {
+			for _, sql := range sqls {
 				meta := QueryMeta{
 					ConnID:       id,
 					ClientAddr:   clientConn.RemoteAddr().String(),
 					UpstreamAddr: p.cfg.Upstream,
-					QueryPreview: summarizePrintable(chunk, p.cfg.MaxQueryLogBytes),
+					QueryPreview: sql,
 					Raw:          append([]byte(nil), chunk...),
+					SQL:          sql,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Printf("[conn %d] query rejected: %v", id, err)
 					return
 				}
+				if p.cfg.LogQueries {
+					log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
+					log.Printf("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
+				}
+			}
+
+			if p.cfg.LogData && pkt == "Data" {
+				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
 			}
 
 			if p.cfg.IdleTimeout.Duration > 0 {
