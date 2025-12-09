@@ -1,38 +1,36 @@
-# 第一阶段：构建阶段
+# Stage 1: Build stage
 FROM golang:1.25-alpine AS builder
 
-# 设置工作目录
+# Set working directory
 WORKDIR /build
 
-# 复制 go mod 文件
+# Copy go mod files
 COPY go.mod go.sum ./
 
-# 下载依赖
+# Download dependencies
 RUN go mod download
 
-# 复制源代码
+# Copy source code
 COPY . .
 
-# 构建应用
+# Build application
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ck-proxy .
 
-# 第二阶段：运行阶段
+# Stage 2: Runtime stage
 FROM alpine:latest
 
-# 安装必要的运行时依赖（如果需要）
+# Install necessary runtime dependencies (if needed)
 RUN apk --no-cache add ca-certificates tzdata
 
-# 设置工作目录
+# Set working directory
 WORKDIR /app
 
-# 从构建阶段复制二进制文件
+# Copy binary from build stage
 COPY --from=builder /build/ck-proxy .
 
-# 使用 ENTRYPOINT 设置可执行文件，CMD 提供默认参数
-# 配置文件通过以下方式提供（按优先级）：
-# 1. Kubernetes ConfigMap 挂载（推荐用于生产环境）
-# 2. Volume 挂载: docker run -v /host/config.json:/app/config.json ck-proxy:latest -config /app/config.json
-# 3. 环境变量: docker run -e CK_CONFIG=/path/to/config.json ck-proxy:latest
-# 4. 命令行参数: docker run ck-proxy:latest -config /path/to/config.json
+# Use ENTRYPOINT to set executable, CMD provides default arguments
+# Configuration file can be provided in the following ways (in priority order):
+# 1. Kubernetes ConfigMap mount (recommended for production)
+# 2. Volume mount: docker run -v /host/config.json:/app/config.json ck-proxy:latest -config /app/config.json
 ENTRYPOINT ["./ck-proxy"]
 CMD ["-config", "/app/config.json"]
