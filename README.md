@@ -1,13 +1,13 @@
-# ck_remote_proxy demo 说明
+# ck_remote_proxy Demo
 
-一个简易 ClickHouse 原生协议代理，用于嗅探客户端→服务端方向的包类型并统计，支持转发。现在支持通过配置文件控制监听/上游等参数，并预留了 Query 校验入口（当前默认放行）。
+A simple ClickHouse native protocol proxy for sniffing and counting packet types in the client→server direction, with forwarding support. It now supports configuration file control for listen/upstream parameters and provides a Query validation entry point (currently defaults to allowing all queries).
 
-## 运行
+## Running
 
-### 配置
-本地双实例+双 proxy 行为测试可参考 `local/` 目录的示例配置（A/B 各一份）。
+### Configuration
+For local dual-instance + dual-proxy behavior testing, refer to the example configurations in the `local/` directory (one for A and one for B).
 
-可以放置一个 `config.json`（默认为当前目录，如果不存在则使用内置默认值和 `CK_LISTEN` / `CK_UPSTREAM` 环境变量）：
+You can place a `config.json` file (defaults to the current directory; if it doesn't exist, built-in defaults and `CK_LISTEN` / `CK_UPSTREAM` environment variables are used):
 ```json
 {
   "listen": "0.0.0.0:9001",
@@ -22,67 +22,67 @@
 }
 ```
 
-其他可选参数：`-config /path/to/config.json` 或环境变量 `CK_CONFIG` 指定配置文件路径。
+Other optional parameters: `-config /path/to/config.json` or use the `CK_CONFIG` environment variable to specify the config file path.
 
-### 启动
+### Startup
 
-在 proxy 容器里：
+In the proxy container:
 ```bash
 cd /workspace/clickhouse-proxy-demo
 GOCACHE=/workspace/clickhouse-proxy-demo/.cache/go-build \
 go run . -config config.json
 ```
-默认每 10s 打印统计，Ctrl+C 会打印最终统计。未提供配置文件时，使用内置默认值与 `CK_LISTEN` / `CK_UPSTREAM` 环境变量。
+Statistics are printed every 10s by default, Ctrl+C will print final statistics. When no config file is provided, built-in defaults and `CK_LISTEN` / `CK_UPSTREAM` environment variables are used.
 
-### 本地双实例 + 双 proxy 验证示例
+### Local Dual-Instance + Dual-Proxy Verification Example
 
-准备两份 CK 配置：
-- A: `local/ck-a-config.xml`（端口 http 18123 / tcp 19000 / interserver 19009，数据目录 `.ck_runtime/a`）
-- B: `local/ck-b-config.xml`（端口 http 28123 / tcp 29000 / interserver 29009，数据目录 `.ck_runtime/b`）
+Prepare two CK configurations:
+- A: `local/ck-a-config.xml` (ports: http 18123 / tcp 19000 / interserver 19009, data directory `.ck_runtime/a`)
+- B: `local/ck-b-config.xml` (ports: http 28123 / tcp 29000 / interserver 29009, data directory `.ck_runtime/b`)
 
-示意启动（先准备目录权限，注意端口占用）：
+Example startup (prepare directory permissions first, note port usage):
 ```bash
-# 启动 CK A / CK B（需要 clickhouse-server 可用，并允许监听端口）
+# Start CK A / CK B (requires clickhouse-server to be available and allowed to listen on ports)
 clickhouse server --config-file local/ck-a-config.xml --daemon
 clickhouse server --config-file local/ck-b-config.xml --daemon
 
-# 启动各自 proxy
+# Start respective proxies
 go run . -config local/proxy-a.json   # listen 9001 -> upstream 19000
 go run . -config local/proxy-b.json   # listen 9002 -> upstream 29000
 ```
 
-测试思路：用 Go SDK 连 proxy B（9002）做建表/插入/查询，再用 remote 函数指向 proxy A（9001）跨实例查询，确认两侧 proxy 均有统计/日志。
+Testing approach: Use Go SDK to connect to proxy B (9002) for table creation/insertion/querying, then use the remote function pointing to proxy A (9001) for cross-instance queries, confirming that both proxies have statistics/logs.
 
-## ck-dev 侧示例
+## ck-dev Side Example
 
-假设 proxy IP 为 `172.17.0.2`：
+Assuming proxy IP is `172.17.0.2`:
 
-建表（通过代理）：
+Create table (via proxy):
 ```sql
 CREATE TABLE default.t_mem (n UInt32) ENGINE=Memory;
 ```
 
-插入（Query + Data）：
+Insert (Query + Data):
 ```sql
 INSERT INTO FUNCTION remote('172.17.0.2:9001', 'default', 't_mem', 'default', '') VALUES (1),(2),(3);
 ```
 
-查询：
+Query:
 ```sql
 SELECT sum(n) FROM remote('172.17.0.2:9001', 'default', 't_mem', 'default', '');
 SELECT * FROM remote('172.17.0.2:9001', 'system', 'one', 'default', '');
 SELECT name FROM remote('172.17.0.2:9001', 'system', 'tables', 'default', '') WHERE database='default' LIMIT 5;
 ```
 
-## 线上扩展点
+## Production Extension Points
 
-- 所有 native TCP 流量（包含 remote/cluster 跳转）都会走代理；`Query` 包在转发前调用 `Validator.ValidateQuery`（见 `main.go`），当前实现为 noop，可在此补充鉴权/审计。
-- 监听/上游、超时（dial/idle）、统计周期与日志粒度均可通过配置文件调整；未配置时沿用默认值以保证服务能直接启动。
-- 保留 TCP keepalive、读写 deadline，避免长时间空闲导致连接泄漏。
+- All native TCP traffic (including remote/cluster hops) goes through the proxy; `Query` packets call `Validator.ValidateQuery` before forwarding (see `main.go`), current implementation is noop, can add authentication/auditing here.
+- Listen/upstream, timeouts (dial/idle), statistics interval and log granularity can all be adjusted via config file; defaults are used when not configured to ensure the service can start directly.
+- TCP keepalive and read/write deadlines are preserved to avoid connection leaks from prolonged idle time.
 
-## 示例结果（节选）
+## Example Results (Excerpt)
 
-包摘要日志（Query/Data）：
+Packet summary logs (Query/Data):
 ```
 [conn 1] Query packet ... DESC TABLE system.numbers ...
 [conn 1] Query packet ... SELECT sum(`__table1`.`number`) AS `sum(number)` FROM `system`.`numbers` ...
@@ -95,7 +95,7 @@ SELECT name FROM remote('172.17.0.2:9001', 'system', 'tables', 'default', '') WH
 [conn 7] Query packet ... SELECT `__table1`.`name` AS `name` FROM `system`.`tables` WHERE `database` = 'default' ...
 ```
 
-统计输出（最终一次）：
+Statistics output (final):
 ```
 ==== ck_remote_proxy stats ====
 Hello             : 14
@@ -112,6 +112,6 @@ unknown           : 0
 ===============================
 ```
 
-说明：
-- 未出现 unknown，常见包类型均被识别。
-- Query/Data 日志展示了 SQL 片段和数据块摘要，不影响转发。
+Notes:
+- No unknown types appeared, all common packet types were identified.
+- Query/Data logs show SQL fragments and data block summaries, do not affect forwarding.
