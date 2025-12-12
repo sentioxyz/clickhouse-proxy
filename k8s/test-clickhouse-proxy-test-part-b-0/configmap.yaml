@@ -1,13 +1,13 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: test-clickhouse-proxy-test-part-b
+  name: test-clickhouse-proxy-test-part-b-0
   namespace: clickhouse
 data:
   config.json: |
     {
       "listen": ":9000",
-      "upstream": "test-clickhouse-test-part-b:9000",
+      "upstream": "test-clickhouse-test-part-b-replica-0:9000",
       "stats_interval": "30s",
       "dial_timeout": "5s",
       "idle_timeout": "5m",
