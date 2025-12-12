@@ -1,0 +1,66 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: test-clickhouse-proxy-test-part-b
+  namespace: clickhouse
+  labels:
+    app: test-clickhouse-proxy-test-part-b
+    component: test-clickhouse-proxy
+spec:
+  replicas: 1 
+  serviceName: test-clickhouse-proxy-test-part-b
+  selector:
+    matchLabels:
+      app: test-clickhouse-proxy-test-part-b
+  template:
+    metadata:
+      labels:
+        app: test-clickhouse-proxy-test-part-b
+        component: test-clickhouse-proxy
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+      
+      containers:
+      - name: proxy
+        image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:v0.1.0
+        imagePullPolicy: Always
+        
+        volumeMounts:
+        - name: config
+          mountPath: /app/config.json
+          subPath: config.json
+        
+        ports:
+        - name: clickhouse
+          containerPort: 9000
+          protocol: TCP
+        
+        livenessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 3
+        readinessProbe:
+          tcpSocket:
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 2
+          failureThreshold: 2
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "128Mi"
+          limits:
+            cpu: "1000m"
+            memory: "512Mi"
+      
+      volumes:
+      - name: config
+        configMap:
+          name: test-clickhouse-proxy-test-part-b

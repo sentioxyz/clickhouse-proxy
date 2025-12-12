@@ -1,0 +1,24 @@
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <log>/workspace/clickhouse-proxy-demo/.ck_runtime/b/logs/clickhouse-server.log</log>
+        <errorlog>/workspace/clickhouse-proxy-demo/.ck_runtime/b/logs/clickhouse-server.err.log</errorlog>
+        <size>1000M</size>
+        <count>10</count>
+    </logger>
+
+    <path>/workspace/clickhouse-proxy-demo/.ck_runtime/b/data/</path>
+    <tmp_path>/workspace/clickhouse-proxy-demo/.ck_runtime/b/tmp/</tmp_path>
+    <user_files_path>/workspace/clickhouse-proxy-demo/.ck_runtime/b/user_files/</user_files_path>
+    <format_schema_path>/workspace/clickhouse-proxy-demo/.ck_runtime/b/format_schemas/</format_schema_path>
+    <users_config>/workspace/clickhouse-proxy-demo/users.xml</users_config>
+    <access_control_path>/workspace/clickhouse-proxy-demo/.ck_runtime/b/access/</access_control_path>
+
+    <listen_host>0.0.0.0</listen_host>
+
+    <http_port>28123</http_port>
+    <tcp_port>29000</tcp_port>
+    <mysql_port>29004</mysql_port>
+    <postgresql_port>29005</postgresql_port>
+    <interserver_http_port>29009</interserver_http_port>
+</clickhouse>
