@@ -5,20 +5,20 @@ import (
 	"log"
 )
 
-// QueryMeta 描述一条被代理到上游的 ClickHouse Query。
+// QueryMeta describes a ClickHouse Query that is proxied to upstream.
 type QueryMeta struct {
 	ConnID       int64
 	ClientAddr   string
 	UpstreamAddr string
 
-	// QueryPreview 是一个用于日志/调试的简短摘要。
+	// QueryPreview is a brief summary for logging/debugging.
 	QueryPreview string
 
-	// Raw 可以携带原始包片段，视需要使用。
+	// Raw can carry raw packet fragments, used as needed.
 	Raw []byte
 
-	// SQL 是按照 ClickHouse 原生协议精确解析出来的 Query.Body。
-	// 如果解析失败，则为空字符串。
+	// SQL is the Query.Body parsed precisely according to ClickHouse native protocol.
+	// If parsing fails, it will be an empty string.
 	SQL string
 }
 
@@ -26,7 +26,7 @@ type Validator interface {
 	ValidateQuery(context.Context, QueryMeta) error
 }
 
-// NoopValidator 是默认的验证实现：永远放行，并打印解析出的 SQL。
+// NoopValidator is the default validation implementation: always allows queries and prints the parsed SQL.
 type NoopValidator struct{}
 
 func (NoopValidator) ValidateQuery(_ context.Context, meta QueryMeta) error {

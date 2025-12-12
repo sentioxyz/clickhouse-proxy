@@ -519,8 +519,8 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
 
-			// Feed all chunks to parser to capture Hello + Query accurately。
-			// 解析到的 SQL 会通过 Validator 做验证。
+			// Feed all chunks to parser to capture Hello + Query accurately.
+			// Parsed SQL will be validated through the Validator.
 			sqls, perr := parser.feed(chunk)
 			if perr != nil {
 				log.Printf("[conn %d] query decode warning: %v", id, perr)
@@ -539,7 +539,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					return
 				}
 				if p.cfg.LogQueries {
-					log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
+					log.Printf("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
 					log.Printf("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
 				}
 			}
@@ -570,7 +570,7 @@ func (p *proxy) logPacket(id int64, clientAddr string, pktType string, chunk []b
 	case "Query":
 		if p.cfg.LogQueries {
 			summary := extractQuerySummary(chunk, p.cfg.MaxQueryLogBytes)
-			log.Printf("[conn %d %s -> %s] Query: 【%s】", id, clientAddr, p.cfg.Upstream, summary)
+			log.Printf("[conn %d %s -> %s] Query: [%s]", id, clientAddr, p.cfg.Upstream, summary)
 		}
 	case "Data":
 		if p.cfg.LogData {
