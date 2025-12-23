@@ -37,3 +37,4 @@ coverage.txt
 
 # Local configuration
 config.json
+.ck_runtime/
