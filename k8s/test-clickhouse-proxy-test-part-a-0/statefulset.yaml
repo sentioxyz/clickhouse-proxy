@@ -54,11 +54,11 @@ spec:
           failureThreshold: 2
         resources:
           requests:
-            cpu: "100m"
-            memory: "128Mi"
+            cpu: "8"
+            memory: "16Gi"
           limits:
-            cpu: "1000m"
-            memory: "512Mi"
+            cpu: "8"
+            memory: "16Gi"
       
       volumes:
       - name: config
