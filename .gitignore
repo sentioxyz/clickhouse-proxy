@@ -1,0 +1,39 @@
+# Bazel build outputs
+/bazel-*
+
+# Bazel lock file (generated, may want to commit for reproducibility)
+# MODULE.bazel.lock
+
+# Go build artifacts
+/ck_remote_proxy
+
+# IDE and editor files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Binary files
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Test binary
+*.test
+
+# Go coverage files
+*.out
+coverage.txt
+
+# Compiled Object files, Static and Dynamic libs
+*.o
+*.a
+
+# Local configuration
+config.json

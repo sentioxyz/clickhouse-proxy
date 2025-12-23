@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	log "sentioxyz/sentio-core/common/log"
 	"os"
 	"time"
 )
@@ -74,14 +74,14 @@ func loadConfig(path string) Config {
 		if _, err := os.Stat("config.json"); err == nil {
 			path = "config.json"
 		} else {
-			log.Printf("no config file provided, using defaults and env overrides")
+			log.Infof("no config file provided, using defaults and env overrides")
 			return cfg
 		}
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("config file %s not found, using defaults", path)
+			log.Infof("config file %s not found, using defaults", path)
 			return cfg
 		}
 		log.Fatalf("read config file %s: %v", path, err)

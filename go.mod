@@ -5,6 +5,7 @@ go 1.25.3
 require (
 	github.com/ClickHouse/ch-go v0.69.0
 	github.com/ClickHouse/clickhouse-go/v2 v2.38.1
+	sentioxyz/sentio-core v0.0.0-20251222093952-5940f52963a7
 )
 
 require (
@@ -21,11 +22,16 @@ require (
 	github.com/shopspring/decimal v1.4.0 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
 	go.opentelemetry.io/otel/trace v1.38.0 // indirect
+	go.uber.org/multierr v1.11.0 // indirect
+	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
+	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
 
 replace github.com/ClickHouse/ch-go => github.com/sentioxyz/ch-go v1.0.1
 
 replace github.com/ClickHouse/clickhouse-go/v2 => github.com/sentioxyz/clickhouse-go/v2 v2.0.1
+
+replace sentioxyz/sentio-core => github.com/sentioxyz/sentio-core v0.0.0-20251222093952-5940f52963a7
