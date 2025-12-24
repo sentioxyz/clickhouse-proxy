@@ -2,7 +2,7 @@ package main
 
 import (
 	"context"
-	"log"
+	log "sentioxyz/sentio-core/common/log"
 )
 
 // QueryMeta describes a ClickHouse Query that is proxied to upstream.
@@ -31,9 +31,9 @@ type NoopValidator struct{}
 
 func (NoopValidator) ValidateQuery(_ context.Context, meta QueryMeta) error {
 	if meta.SQL != "" {
-		log.Printf("[validator] allow query from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.SQL)
+		log.Infof("[validator] allow query from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.SQL)
 	} else if meta.QueryPreview != "" {
-		log.Printf("[validator] allow query (preview) from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.QueryPreview)
+		log.Infof("[validator] allow query (preview) from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.QueryPreview)
 	}
 	return nil
 }

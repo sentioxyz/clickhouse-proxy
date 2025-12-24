@@ -1,0 +1,5 @@
+# Common Bazel settings
+build --enable_bzlmod
+
+# Go settings
+build --@rules_go//go/config:static=false

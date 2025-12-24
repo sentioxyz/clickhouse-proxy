@@ -7,7 +7,22 @@ CK_BIN="/workspace/Clickhouse/build/programs/clickhouse"
 
 echo "[run_demo] using root dir: ${ROOT_DIR}"
 
+CK_RUNTIME_DIR="/workspace/clickhouse-proxy-demo/.ck_runtime"
+
+init_dirs() {
+  echo "[run_demo] initializing ClickHouse runtime directories..."
+  for node in a b; do
+    mkdir -p "${CK_RUNTIME_DIR}/${node}/logs"
+    mkdir -p "${CK_RUNTIME_DIR}/${node}/data"
+    mkdir -p "${CK_RUNTIME_DIR}/${node}/tmp"
+    mkdir -p "${CK_RUNTIME_DIR}/${node}/user_files"
+    mkdir -p "${CK_RUNTIME_DIR}/${node}/format_schemas"
+    mkdir -p "${CK_RUNTIME_DIR}/${node}/access"
+  done
+}
+
 start_clickhouse() {
+  init_dirs
   echo "[run_demo] starting ClickHouse A/B (may already be running)..."
   "${CK_BIN}" server --config-file "${ROOT_DIR}/local/ck-a-config.xml" --daemon || true
   "${CK_BIN}" server --config-file "${ROOT_DIR}/local/ck-b-config.xml" --daemon || true
@@ -45,8 +60,8 @@ run_demo() {
 
 main() {
   start_clickhouse
-  # 给 server 一点时间完成启动
-  sleep 5
+  # Debug build needs more time to start
+  sleep 15
 
   start_proxies
   # 等待 proxy 监听起来
