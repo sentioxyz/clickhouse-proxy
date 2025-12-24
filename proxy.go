@@ -102,6 +102,8 @@ type queryParser struct {
 	version      int
 	buf          []byte
 	addendumDone bool
+	disabled     bool // if true, stop parsing forever on this connection
+
 }
 
 // maxParserBufSize limits the parser buffer to prevent memory exhaustion.
@@ -274,13 +276,18 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 }
 
 func (p *queryParser) feed(chunk []byte) ([]string, error) {
+	if p.disabled {
+		return nil, nil
+	}
+
 	p.buf = append(p.buf, chunk...)
 
 	// Safety limit: if buffer exceeds max size, discard to prevent OOM.
 	// This can happen with very large Query packets or malformed data.
 	if len(p.buf) > maxParserBufSize {
 		p.resetBuf()
-		return nil, errors.New("parser buffer exceeded max size, discarding")
+		p.disabled = true
+		return nil, errors.New("parser buffer exceeded max size, discarding, parser disabled")
 	}
 
 	var out []string
@@ -297,6 +304,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 			if err != nil {
 				decodeErr = err
 				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			if !ok {
@@ -326,6 +334,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				}
 				decodeErr = err
 				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			p.version = hello.ProtocolVersion
@@ -334,6 +343,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 		case 1: // Query
 			if p.version == 0 {
 				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
@@ -352,6 +362,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				}
 				decodeErr = err
 				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			out = append(out, q.Body)
@@ -360,6 +371,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.
 			p.resetBuf()
+			p.disabled = true
 			return out, decodeErr
 		}
 	}
