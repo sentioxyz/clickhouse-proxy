@@ -80,3 +80,24 @@ check-sql:
 		echo "⚠️  Connectivity check failed!"; \
 		exit 1; \
 	fi
+
+test-forwarding:
+	@echo "Running local forwarding integration tests..."
+	@./tests/run_tests.sh $(N)
+
+# Stream replay from remote ClickHouse query_log to local proxy
+# Starts mock server + proxy + port-forward, runs replay, cleans up on exit/Ctrl-C
+# Usage: make test-stream-replay POD=clickhouse-user-part-a-0-0-0 [NS=clickhouse] [SINCE="1 hour"] [N=0]
+NS ?= clickhouse
+N ?= 0
+SINCE ?= 1 hour
+
+test-stream-replay:
+ifndef POD
+	@echo "Error: Please specify POD=<pod-name>"
+	@echo "Usage: make test-stream-replay POD=clickhouse-user-part-a-0-0-0 [NS=clickhouse] [SINCE='1 hour'] [N=0]"
+	@exit 1
+endif
+	@./tests/run_stream_replay.sh "$(POD)" "$(NS)" "$(SINCE)" "$(N)"
+
+

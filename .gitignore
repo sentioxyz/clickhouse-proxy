@@ -38,3 +38,6 @@ coverage.txt
 # Local configuration
 config.json
 .ck_runtime/
+tests/data/
+tests/bin/
+tests/*.log

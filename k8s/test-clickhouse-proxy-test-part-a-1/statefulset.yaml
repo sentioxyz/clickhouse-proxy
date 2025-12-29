@@ -17,6 +17,11 @@ spec:
       labels:
         app: test-clickhouse-proxy-test-part-a-1
         component: test-clickhouse-proxy
+        clickhouse.altinity.com/app: chop
+        clickhouse.altinity.com/chi: test-clickhouse
+        clickhouse.altinity.com/cluster: test-part-a
+        clickhouse.altinity.com/namespace: clickhouse
+        clickhouse.altinity.com/ready: "yes"
     spec:
       securityContext:
         runAsNonRoot: true
