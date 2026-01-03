@@ -30,7 +30,7 @@ spec:
       
       containers:
       - name: proxy
-        image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:1796232
+        image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:b6f0c4a
         imagePullPolicy: Always
         
         volumeMounts:

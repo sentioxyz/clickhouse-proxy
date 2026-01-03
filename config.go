@@ -21,6 +21,7 @@ type Config struct {
 	LogData          bool     `json:"log_data"`
 	MaxQueryLogBytes int      `json:"max_query_log_bytes"`
 	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
+	MetricsListen    string   `json:"metrics_listen"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -65,6 +66,7 @@ func defaultConfig() Config {
 		LogData:          false,
 		MaxQueryLogBytes: 300,
 		MaxDataLogBytes:  200,
+		MetricsListen:    envOrDefault("CK_METRICS_LISTEN", ":9091"),
 	}
 }
 

@@ -20,18 +20,23 @@ update-yaml:
 	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' k8s/test-clickhouse-proxy-test-part-a-0/statefulset.yaml
 	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' k8s/test-clickhouse-proxy-test-part-a-1/statefulset.yaml
 	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' k8s/test-clickhouse-proxy-test-part-b-0/statefulset.yaml
+	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' k8s/test-clickhouse-proxy-extra-usage-0-0-0/statefulset.yaml
+	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' k8s/test-clickhouse-proxy-extra-usage-0-1-0/statefulset.yaml
 
 apply:
 	kubectl apply -f k8s/test-clickhouse-proxy-test-part-a-0/statefulset.yaml
 	kubectl apply -f k8s/test-clickhouse-proxy-test-part-a-1/statefulset.yaml
 	kubectl apply -f k8s/test-clickhouse-proxy-test-part-b-0/statefulset.yaml
+	kubectl apply -f k8s/test-clickhouse-proxy-extra-usage-0-0-0/statefulset.yaml
+	kubectl apply -f k8s/test-clickhouse-proxy-extra-usage-0-1-0/statefulset.yaml
 
 check: check-version check-sql
 
 check-version:
 	@echo "Checking images for statefulsets to ensure they match: $(IMAGE)"
 	@failed=0; \
-	for sts in test-clickhouse-proxy-test-part-a-0 test-clickhouse-proxy-test-part-a-1 test-clickhouse-proxy-test-part-b-0; do \
+	for sts in test-clickhouse-proxy-test-part-a-0 test-clickhouse-proxy-test-part-a-1 test-clickhouse-proxy-test-part-b-0 \
+		test-clickhouse-proxy-extra-usage-0-0-0 test-clickhouse-proxy-extra-usage-0-1-0; do \
 		current_image=$$(kubectl get statefulset -n clickhouse $$sts -o jsonpath='{.spec.template.spec.containers[0].image}'); \
 		if [ "$$current_image" = "$(IMAGE)" ]; then \
 			echo "✅ $$sts: IMAGE MATCH"; \
@@ -53,7 +58,8 @@ check-sql:
 	@echo "Checking generic SQL connectivity (TCP Port 9000)..."
 	@failed=0; \
 	CLIENT_POD=$$(kubectl get pod -n clickhouse -l app=test-clickhouse-test-part-a-0 -o jsonpath='{.items[0].metadata.name}'); \
-	for sts in test-clickhouse-proxy-test-part-a-0 test-clickhouse-proxy-test-part-a-1 test-clickhouse-proxy-test-part-b-0; do \
+	for sts in test-clickhouse-proxy-test-part-a-0 test-clickhouse-proxy-test-part-a-1 test-clickhouse-proxy-test-part-b-0 \
+		test-clickhouse-proxy-extra-usage-0-0-0 test-clickhouse-proxy-extra-usage-0-1-0; do \
 		proxy_svc=$$sts.clickhouse.svc.cluster.local; \
 		echo "   Testing connection to $$proxy_svc from $$CLIENT_POD..."; \
 		if kubectl exec -n clickhouse $$CLIENT_POD -- clickhouse-client -h $$proxy_svc --port 9000 --query "SELECT version()" >/dev/null 2>&1; then \

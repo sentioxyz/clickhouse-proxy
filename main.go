@@ -3,9 +3,12 @@ package main
 import (
 	"context"
 	"flag"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	log "sentioxyz/sentio-core/common/log"
 )
@@ -19,6 +22,13 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+
+	go func() {
+		log.Infof("metrics listening on %s", cfg.MetricsListen)
+		if err := http.ListenAndServe(cfg.MetricsListen, promhttp.Handler()); err != nil {
+			log.Infof("metrics server error: %v", err)
+		}
+	}()
 
 	proxy := newProxy(cfg, nil)
 	if err := proxy.serve(ctx); err != nil {

@@ -16,7 +16,29 @@ import (
 	"time"
 
 	"github.com/ClickHouse/ch-go/proto"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+var (
+	activeConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "clickhouse_proxy_active_connections",
+		Help: "Number of currently active client connections",
+	})
+	packetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clickhouse_proxy_packets_total",
+		Help: "Total count of ClickHouse protocol packets processed",
+	}, []string{"type"})
+	bytesTransferred = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clickhouse_proxy_bytes_transferred_total",
+		Help: "Total bytes transferred through the proxy",
+	}, []string{"direction"})
+)
+
+func init() {
+	prometheus.MustRegister(activeConnections)
+	prometheus.MustRegister(packetsTotal)
+	prometheus.MustRegister(bytesTransferred)
+}
 
 // Known client -> server packet types in ClickHouse native protocol.
 // Values match Protocol::Client enum in ClickHouse sources.
@@ -464,6 +486,8 @@ func (p *proxy) runStatsPrinter(ctx context.Context) {
 }
 
 func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.Conn) {
+	activeConnections.Inc()
+	defer activeConnections.Dec()
 	defer clientConn.Close()
 	if tc, ok := clientConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
@@ -530,6 +554,7 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 		}
 		n, err := upstreamConn.Read(buf)
 		if n > 0 {
+			bytesTransferred.WithLabelValues("upstream_to_client").Add(float64(n))
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = clientConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
@@ -559,6 +584,8 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			chunk := buf[:n]
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
+			packetsTotal.WithLabelValues(pkt).Inc()
+			bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(n))
 
 			// Feed all chunks to parser to capture Hello + Query accurately.
 			// Parsed SQL will be validated through the Validator.
