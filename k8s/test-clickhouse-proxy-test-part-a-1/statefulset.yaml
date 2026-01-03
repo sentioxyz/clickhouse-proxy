@@ -17,6 +17,11 @@ spec:
       labels:
         app: test-clickhouse-proxy-test-part-a-1
         component: test-clickhouse-proxy
+        clickhouse.altinity.com/app: chop
+        clickhouse.altinity.com/chi: test-clickhouse
+        clickhouse.altinity.com/cluster: test-part-a
+        clickhouse.altinity.com/namespace: clickhouse
+        clickhouse.altinity.com/ready: "yes"
     spec:
       securityContext:
         runAsNonRoot: true
@@ -25,7 +30,7 @@ spec:
       
       containers:
       - name: proxy
-        image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:v0.1.0
+        image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:b6f0c4a
         imagePullPolicy: Always
         
         volumeMounts:
@@ -54,11 +59,11 @@ spec:
           failureThreshold: 2
         resources:
           requests:
-            cpu: "100m"
-            memory: "128Mi"
+            cpu: "8"
+            memory: "16Gi"
           limits:
-            cpu: "1000m"
-            memory: "512Mi"
+            cpu: "8"
+            memory: "16Gi"
       
       volumes:
       - name: config

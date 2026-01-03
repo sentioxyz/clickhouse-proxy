@@ -7,7 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	log "sentioxyz/sentio-core/common/log"
 	"net"
 	"regexp"
 	"strings"
@@ -16,7 +16,29 @@ import (
 	"time"
 
 	"github.com/ClickHouse/ch-go/proto"
+	"github.com/prometheus/client_golang/prometheus"
 )
+
+var (
+	activeConnections = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "clickhouse_proxy_active_connections",
+		Help: "Number of currently active client connections",
+	})
+	packetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clickhouse_proxy_packets_total",
+		Help: "Total count of ClickHouse protocol packets processed",
+	}, []string{"type"})
+	bytesTransferred = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "clickhouse_proxy_bytes_transferred_total",
+		Help: "Total bytes transferred through the proxy",
+	}, []string{"direction"})
+)
+
+func init() {
+	prometheus.MustRegister(activeConnections)
+	prometheus.MustRegister(packetsTotal)
+	prometheus.MustRegister(bytesTransferred)
+}
 
 // Known client -> server packet types in ClickHouse native protocol.
 // Values match Protocol::Client enum in ClickHouse sources.
@@ -102,6 +124,29 @@ type queryParser struct {
 	version      int
 	buf          []byte
 	addendumDone bool
+	disabled     bool // if true, stop parsing forever on this connection
+
+}
+
+// maxParserBufSize limits the parser buffer to prevent memory exhaustion.
+// Query packets should be small; if buffer exceeds this, we discard and reset.
+const maxParserBufSize = 1 << 20 // 1MB
+
+// resetBuf releases the underlying buffer memory to GC.
+func (p *queryParser) resetBuf() {
+	p.buf = nil
+}
+
+// consumeBuf removes the first n bytes from the buffer.
+// It copies remaining data to a new slice to allow GC of the old underlying array.
+func (p *queryParser) consumeBuf(n int) {
+	if n >= len(p.buf) {
+		p.buf = nil
+		return
+	}
+	remaining := make([]byte, len(p.buf)-n)
+	copy(remaining, p.buf[n:])
+	p.buf = remaining
 }
 
 // skipAddendum attempts to consume the optional "addendum" section that
@@ -253,7 +298,20 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 }
 
 func (p *queryParser) feed(chunk []byte) ([]string, error) {
+	if p.disabled {
+		return nil, nil
+	}
+
 	p.buf = append(p.buf, chunk...)
+
+	// Safety limit: if buffer exceeds max size, discard to prevent OOM.
+	// This can happen with very large Query packets or malformed data.
+	if len(p.buf) > maxParserBufSize {
+		p.resetBuf()
+		p.disabled = true
+		return nil, errors.New("parser buffer exceeded max size, discarding, parser disabled")
+	}
+
 	var out []string
 	var decodeErr error
 	for {
@@ -267,7 +325,8 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 			consumed, ok, err := p.skipAddendum()
 			if err != nil {
 				decodeErr = err
-				p.buf = p.buf[:0]
+				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			if !ok {
@@ -275,7 +334,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				return out, decodeErr
 			}
 			p.addendumDone = true
-			p.buf = p.buf[consumed:]
+			p.consumeBuf(consumed)
 			if len(p.buf) == 0 {
 				return out, decodeErr
 			}
@@ -296,15 +355,17 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 					return out, decodeErr
 				}
 				decodeErr = err
-				p.buf = p.buf[:0]
+				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			p.version = hello.ProtocolVersion
 			consumed := n + cr.n
-			p.buf = p.buf[consumed:]
+			p.consumeBuf(consumed)
 		case 1: // Query
 			if p.version == 0 {
-				p.buf = p.buf[:0]
+				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
@@ -318,19 +379,21 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
 				if derr == nil {
 					out = append(out, body)
-					p.buf = p.buf[n+consumed:]
+					p.consumeBuf(n + consumed)
 					continue
 				}
 				decodeErr = err
-				p.buf = p.buf[:0]
+				p.resetBuf()
+				p.disabled = true
 				return out, decodeErr
 			}
 			out = append(out, q.Body)
 			consumed := n + cr.n
-			p.buf = p.buf[consumed:]
+			p.consumeBuf(consumed)
 		default:
-			// Unknown packet type; reset to avoid buffer growth.
-			p.buf = p.buf[:0]
+			// Unknown packet type (e.g., Data); reset to release memory.
+			p.resetBuf()
+			p.disabled = true
 			return out, decodeErr
 		}
 	}
@@ -397,12 +460,12 @@ func (p *proxy) serve(ctx context.Context) error {
 			if errors.Is(err, net.ErrClosed) {
 				return nil
 			}
-			log.Printf("accept error: %v", err)
+			log.Infof("accept error: %v", err)
 			continue
 		}
 
 		id := atomic.AddInt64(&connID, 1)
-		log.Printf("[conn %d] new connection from %s", id, clientConn.RemoteAddr())
+		log.Infof("[conn %d] new connection from %s", id, clientConn.RemoteAddr())
 
 		go p.handleConnection(ctx, id, clientConn)
 	}
@@ -423,6 +486,8 @@ func (p *proxy) runStatsPrinter(ctx context.Context) {
 }
 
 func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.Conn) {
+	activeConnections.Inc()
+	defer activeConnections.Dec()
 	defer clientConn.Close()
 	if tc, ok := clientConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
@@ -445,7 +510,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 
 	upstreamConn, err := dialer.DialContext(upstreamCtx, "tcp", p.cfg.Upstream)
 	if err != nil {
-		log.Printf("[conn %d] dial upstream %s error: %v", id, p.cfg.Upstream, err)
+		log.Infof("[conn %d] dial upstream %s error: %v", id, p.cfg.Upstream, err)
 		return
 	}
 	defer upstreamConn.Close()
@@ -478,7 +543,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	}()
 
 	wg.Wait()
-	log.Printf("[conn %d] closed", id)
+	log.Infof("[conn %d] closed", id)
 }
 
 func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn) {
@@ -489,17 +554,18 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 		}
 		n, err := upstreamConn.Read(buf)
 		if n > 0 {
+			bytesTransferred.WithLabelValues("upstream_to_client").Add(float64(n))
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = clientConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
 			if _, werr := clientConn.Write(buf[:n]); werr != nil {
-				log.Printf("[conn %d] upstream->client write error: %v", id, werr)
+				log.Infof("[conn %d] upstream->client write error: %v", id, werr)
 				return
 			}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !isTimeout(err) && !errors.Is(err, net.ErrClosed) {
-				log.Printf("[conn %d] upstream->client read error: %v", id, err)
+				log.Infof("[conn %d] upstream->client read error: %v", id, err)
 			}
 			return
 		}
@@ -518,12 +584,14 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			chunk := buf[:n]
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
+			packetsTotal.WithLabelValues(pkt).Inc()
+			bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(n))
 
 			// Feed all chunks to parser to capture Hello + Query accurately.
 			// Parsed SQL will be validated through the Validator.
 			sqls, perr := parser.feed(chunk)
 			if perr != nil {
-				log.Printf("[conn %d] query decode warning: %v", id, perr)
+				log.Infof("[conn %d] query decode warning: %v", id, perr)
 			}
 			for _, sql := range sqls {
 				meta := QueryMeta{
@@ -535,12 +603,12 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					SQL:          sql,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
-					log.Printf("[conn %d] query rejected: %v", id, err)
+					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
 				}
 				if p.cfg.LogQueries {
-					log.Printf("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
-					log.Printf("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
+					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
+					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
 				}
 			}
 
@@ -552,13 +620,13 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 				_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
 			if _, err := upstreamConn.Write(chunk); err != nil {
-				log.Printf("[conn %d] client->upstream write error: %v", id, err)
+				log.Infof("[conn %d] client->upstream write error: %v", id, err)
 				return
 			}
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) && !isTimeout(readErr) && !errors.Is(readErr, net.ErrClosed) {
-				log.Printf("[conn %d] client->upstream read error: %v", id, readErr)
+				log.Infof("[conn %d] client->upstream read error: %v", id, readErr)
 			}
 			return
 		}
@@ -570,11 +638,11 @@ func (p *proxy) logPacket(id int64, clientAddr string, pktType string, chunk []b
 	case "Query":
 		if p.cfg.LogQueries {
 			summary := extractQuerySummary(chunk, p.cfg.MaxQueryLogBytes)
-			log.Printf("[conn %d %s -> %s] Query: [%s]", id, clientAddr, p.cfg.Upstream, summary)
+			log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientAddr, p.cfg.Upstream, summary)
 		}
 	case "Data":
 		if p.cfg.LogData {
-			log.Printf("[conn %d %s -> %s] Data packet (%d bytes): %s", id, clientAddr, p.cfg.Upstream, len(chunk), summarizePrintable(chunk, p.cfg.MaxDataLogBytes))
+			log.Infof("[conn %d %s -> %s] Data packet (%d bytes): %s", id, clientAddr, p.cfg.Upstream, len(chunk), summarizePrintable(chunk, p.cfg.MaxDataLogBytes))
 		}
 	default:
 	}
@@ -592,9 +660,9 @@ func isTimeout(err error) bool {
 
 func printStats(stats *packetStats) {
 	snap := stats.snapshot()
-	log.Printf("==== ck_remote_proxy stats ====")
+	log.Infof("==== ck_remote_proxy stats ====")
 	for _, key := range []string{"Hello", "Query", "Data", "Ping", "Cancel", "TablesStatusRequest", "KeepAlive", "Scalar", "Poll", "Data (portable)", "unknown"} {
-		log.Printf("%-18s: %d", key, snap[key])
+		log.Infof("%-18s: %d", key, snap[key])
 	}
 	// Print any extra ids that appeared.
 	for k, v := range snap {
@@ -604,9 +672,9 @@ func printStats(stats *packetStats) {
 		if k == "unknown" {
 			continue
 		}
-		log.Printf("%-18s: %d", k, v)
+		log.Infof("%-18s: %d", k, v)
 	}
-	log.Printf("===============================")
+	log.Infof("===============================")
 }
 
 // summarizePrintable extracts a compact ASCII summary from raw bytes, replacing

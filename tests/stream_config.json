@@ -1,0 +1,11 @@
+{
+    "listen": ":19000",
+    "upstream": "127.0.0.1:19002",
+    "dial_timeout": "1s",
+    "idle_timeout": "10s",
+    "stats_interval": "5s",
+    "log_queries": true,
+    "log_data": false,
+    "max_query_log_bytes": 200,
+    "max_data_log_bytes": 0
+}

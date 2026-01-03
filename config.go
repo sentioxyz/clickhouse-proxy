@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
+	log "sentioxyz/sentio-core/common/log"
 	"os"
 	"time"
 )
@@ -21,6 +21,7 @@ type Config struct {
 	LogData          bool     `json:"log_data"`
 	MaxQueryLogBytes int      `json:"max_query_log_bytes"`
 	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
+	MetricsListen    string   `json:"metrics_listen"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -65,6 +66,7 @@ func defaultConfig() Config {
 		LogData:          false,
 		MaxQueryLogBytes: 300,
 		MaxDataLogBytes:  200,
+		MetricsListen:    envOrDefault("CK_METRICS_LISTEN", ":9091"),
 	}
 }
 
@@ -74,14 +76,14 @@ func loadConfig(path string) Config {
 		if _, err := os.Stat("config.json"); err == nil {
 			path = "config.json"
 		} else {
-			log.Printf("no config file provided, using defaults and env overrides")
+			log.Infof("no config file provided, using defaults and env overrides")
 			return cfg
 		}
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			log.Printf("config file %s not found, using defaults", path)
+			log.Infof("config file %s not found, using defaults", path)
 			return cfg
 		}
 		log.Fatalf("read config file %s: %v", path, err)
