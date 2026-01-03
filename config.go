@@ -22,6 +22,7 @@ type Config struct {
 	MaxQueryLogBytes int      `json:"max_query_log_bytes"`
 	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
 	MetricsListen    string   `json:"metrics_listen"`
+	AllowedProcessors []string `json:"allowed_processors"` // List of ethereum addresses (hex)
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON

@@ -228,30 +228,38 @@ func (p *queryParser) skipAddendum() (consumed int, ok bool, err error) {
 	return offset, true, nil
 }
 
-func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int, error) {
+type ParsedQuery struct {
+	Body      string
+	Signature string
+}
+
+func decodeQueryBody(data []byte, version int, forceSettings bool) (string, string, int, error) {
 	cr := &countingReader{r: bytes.NewReader(data)}
 	r := proto.NewReader(cr)
 
 	// QueryID
 	if _, err := r.Str(); err != nil {
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
+
+	var quotaKey string
 
 	if proto.FeatureClientWriteInfo.In(version) {
 		var info proto.ClientInfo
 		if err := info.DecodeAware(r, version); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
+		quotaKey = info.QuotaKey
 	}
 
 	if !proto.FeatureSettingsSerializedAsStrings.In(version) && !forceSettings {
-		return "", cr.n, errors.New("settings not serialized as strings")
+		return "", "", cr.n, errors.New("settings not serialized as strings")
 	}
 
 	for {
 		var s proto.Setting
 		if err := s.Decode(r); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 		if s.Key == "" {
 			break
@@ -260,33 +268,33 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 
 	if proto.FeatureInterserverExternallyGrantedRoles.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 	}
 
 	if proto.FeatureInterServerSecret.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 	}
 
 	if _, err := r.UVarInt(); err != nil { // Stage
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
 	if _, err := r.UVarInt(); err != nil { // Compression
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
 
 	body, err := r.Str()
 	if err != nil {
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
 
 	if proto.FeatureParameters.In(version) {
 		for {
 			var p proto.Parameter
 			if err := p.Decode(r); err != nil {
-				return "", cr.n, err
+				return "", "", cr.n, err
 			}
 			if p.Key == "" {
 				break
@@ -294,10 +302,10 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 		}
 	}
 
-	return body, cr.n, nil
+	return body, quotaKey, cr.n, nil
 }
 
-func (p *queryParser) feed(chunk []byte) ([]string, error) {
+func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 	if p.disabled {
 		return nil, nil
 	}
@@ -312,7 +320,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 		return nil, errors.New("parser buffer exceeded max size, discarding, parser disabled")
 	}
 
-	var out []string
+	var out []ParsedQuery
 	var decodeErr error
 	for {
 		// After we know the protocol version, ClickHouse will send a single
@@ -359,6 +367,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				p.disabled = true
 				return out, decodeErr
 			}
+			log.Infof("Detected ClientHello. Version: %d", hello.ProtocolVersion)
 			p.version = hello.ProtocolVersion
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
@@ -368,28 +377,40 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				p.disabled = true
 				return out, decodeErr
 			}
-			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
-			r := proto.NewReader(cr)
-			var q proto.Query
-			if err := q.DecodeAware(r, p.version); err != nil {
+			// We need QuotaKey from ClientInfo. ch-go/proto.Query struct doesn't expose it
+			// easily (or at all in this version), so we use our own decoder (decodeQueryBody).
+			
+			// 1. Try strict decode (forceSettings=false)
+			// We reset the reader for the second attempt if needed, but since we have the buffer,
+			// we can just call decodeQueryBody on the buffer slice.
+			
+			log.Infof("Attempting strict decode of Query. buffer len=%d", len(p.buf[n:]))
+			body, quotaKey, consumed, err := decodeQueryBody(p.buf[n:], p.version, false)
+			log.Infof("Strict decode result: err=%v, len(body)=%d, consumed=%d, quotaKey=%s", err, len(body), consumed, quotaKey)
+			if err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
-				// Try permissive decode ignoring settings flag.
-				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
-				if derr == nil {
-					out = append(out, body)
-					p.consumeBuf(n + consumed)
+				
+				// 2. Try permissive decode (forceSettings=true)
+				log.Infof("Attempting permissive decode of Query")
+				body2, quotaKey2, consumed2, err2 := decodeQueryBody(p.buf[n:], p.version, true)
+				log.Infof("Permissive decode result: err=%v, len(body)=%d, consumed=%d, quotaKey=%s", err2, len(body2), consumed2, quotaKey2)
+				if err2 == nil {
+					out = append(out, ParsedQuery{Body: body2, Signature: quotaKey2})
+					p.consumeBuf(n + consumed2)
 					continue
 				}
+				
 				decodeErr = err
 				p.resetBuf()
 				p.disabled = true
 				return out, decodeErr
 			}
-			out = append(out, q.Body)
-			consumed := n + cr.n
-			p.consumeBuf(consumed)
+			
+			// Strict decode succeeded
+			out = append(out, ParsedQuery{Body: body, Signature: quotaKey})
+			p.consumeBuf(n + consumed)
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.
 			p.resetBuf()
@@ -581,6 +602,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 		}
 		n, readErr := clientConn.Read(buf)
 		if n > 0 {
+			log.Infof("Proxy read %d bytes from client. Chunk hex: %x", n, buf[:n])
 			chunk := buf[:n]
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
@@ -593,22 +615,23 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			if perr != nil {
 				log.Infof("[conn %d] query decode warning: %v", id, perr)
 			}
-			for _, sql := range sqls {
+			for _, q := range sqls {
 				meta := QueryMeta{
 					ConnID:       id,
 					ClientAddr:   clientConn.RemoteAddr().String(),
 					UpstreamAddr: p.cfg.Upstream,
-					QueryPreview: sql,
+					QueryPreview: q.Body,
 					Raw:          append([]byte(nil), chunk...),
-					SQL:          sql,
+					SQL:          q.Body,
+					Signature:    q.Signature,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
 				}
 				if p.cfg.LogQueries {
-					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
-					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
+					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, q.Body)
+					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(q.Body))
 				}
 			}
 

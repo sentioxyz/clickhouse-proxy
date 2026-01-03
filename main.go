@@ -30,7 +30,13 @@ func main() {
 		}
 	}()
 
-	proxy := newProxy(cfg, nil)
+	var v Validator
+	if len(cfg.AllowedProcessors) > 0 {
+		v = NewSignatureValidator(cfg.AllowedProcessors)
+		log.Infof("signature validation enabled for %d processors", len(cfg.AllowedProcessors))
+	}
+
+	proxy := newProxy(cfg, v)
 	if err := proxy.serve(ctx); err != nil {
 		log.Fatalf("proxy stopped: %v", err)
 	}
