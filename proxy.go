@@ -367,7 +367,6 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 				p.disabled = true
 				return out, decodeErr
 			}
-			log.Infof("Detected ClientHello. Version: %d", hello.ProtocolVersion)
 			p.version = hello.ProtocolVersion
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
@@ -384,18 +383,14 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 			// We reset the reader for the second attempt if needed, but since we have the buffer,
 			// we can just call decodeQueryBody on the buffer slice.
 			
-			log.Infof("Attempting strict decode of Query. buffer len=%d", len(p.buf[n:]))
 			body, quotaKey, consumed, err := decodeQueryBody(p.buf[n:], p.version, false)
-			log.Infof("Strict decode result: err=%v, len(body)=%d, consumed=%d, quotaKey=%s", err, len(body), consumed, quotaKey)
 			if err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
 				
 				// 2. Try permissive decode (forceSettings=true)
-				log.Infof("Attempting permissive decode of Query")
 				body2, quotaKey2, consumed2, err2 := decodeQueryBody(p.buf[n:], p.version, true)
-				log.Infof("Permissive decode result: err=%v, len(body)=%d, consumed=%d, quotaKey=%s", err2, len(body2), consumed2, quotaKey2)
 				if err2 == nil {
 					out = append(out, ParsedQuery{Body: body2, Signature: quotaKey2})
 					p.consumeBuf(n + consumed2)
@@ -602,7 +597,6 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 		}
 		n, readErr := clientConn.Read(buf)
 		if n > 0 {
-			log.Infof("Proxy read %d bytes from client. Chunk hex: %x", n, buf[:n])
 			chunk := buf[:n]
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)

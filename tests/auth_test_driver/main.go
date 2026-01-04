@@ -7,6 +7,8 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/clickhouse-go/v2"
@@ -16,6 +18,8 @@ import (
 func main() {
 	addr := flag.String("addr", "127.0.0.1:19000", "Proxy address")
 	privKeyHex := flag.String("priv", "", "Private key hex (without 0x)")
+	concurrency := flag.Int("c", 1, "Concurrency level")
+	total := flag.Int("n", 1, "Total requests")
 	flag.Parse()
 
 	if *privKeyHex == "" {
@@ -29,13 +33,17 @@ func main() {
 
 	fmt.Printf("Testing against %s with key %s\n", *addr, crypto.PubkeyToAddress(privKey.PublicKey).Hex())
 
+	if *total > 1 || *concurrency > 1 {
+		runLoadTest(*addr, privKey, *concurrency, *total)
+		return
+	}
+
 	if err := runTest(*addr, privKey, true); err != nil {
 		log.Fatalf("Test with valid signature failed: %v", err)
 	}
 	fmt.Println("✅ Valid signature test passed")
 
 	// Test with NO signature (should fail if auth is enabled)
-	// We need a separate connection for this as QuotaKey might be cached or we need strict separation
 	if err := runTest(*addr, nil, false); err == nil {
 		log.Fatalf("Test with missing signature succeeded but should have failed")
 	} else {
@@ -51,6 +59,38 @@ func main() {
 	}
 }
 
+func runLoadTest(addr string, key *ecdsa.PrivateKey, concurrency int, total int) {
+	fmt.Printf("Starting load test: concurrency=%d, total=%d\n", concurrency, total)
+	
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	start := time.Now()
+	var success, failures int64
+	
+	for i := 0; i < total; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(id int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			
+			if err := runTest(addr, key, true); err != nil {
+				atomic.AddInt64(&failures, 1)
+				// log sampling
+				if atomic.LoadInt64(&failures) < 50 { 
+					log.Printf("Req %d failed: %v", id, err)
+				}
+			} else {
+				atomic.AddInt64(&success, 1)
+			}
+		}(i)
+	}
+	wg.Wait()
+	duration := time.Since(start)
+	qps := float64(total) / duration.Seconds()
+	fmt.Printf("Load Test Done. Duration: %v. QPS: %.2f. Success: %d. Failures: %d\n", duration, qps, success, failures)
+}
+
 func runTest(addr string, key *ecdsa.PrivateKey, expectSuccess bool) error {
 	opts := clickhouse.Options{
 		Addr: []string{addr},
@@ -62,13 +102,12 @@ func runTest(addr string, key *ecdsa.PrivateKey, expectSuccess bool) error {
 		DialTimeout: 30 * time.Second,
 	}
 	
-	start := time.Now()
-	fmt.Printf("[%t] Connecting... ", expectSuccess)
+	// We verify connection establishment separately from query execution in the logs usually,
+	// but here we just lump it together.
 	conn, err := clickhouse.Open(&opts)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
-	fmt.Printf("Connected in %v.\n", time.Since(start))
 
 	ctx := context.Background()
 	query := "SELECT 1"
@@ -86,12 +125,6 @@ func runTest(addr string, key *ecdsa.PrivateKey, expectSuccess bool) error {
 		queryOpts = append(queryOpts, clickhouse.WithQuotaKey(sigHex))
 	}
 
-	// We expect the proxy to forward this to mock server, mock server returns "1" presumably or we just check connectivity
-	// Actually, relying on mock server response might be tricky if mock server doesn't respond to SELECT 1
-	// checking mock_server code would be good. But for now we check if Proxy REJECTS the connection.
-	
-	// If proxy rejects, it drops connection, so we get EOF or connection closed.
-	
 	var result int
 	err = conn.QueryRow(ctx, query, queryOpts...).Scan(&result)
 	return err
