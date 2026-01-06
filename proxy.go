@@ -118,7 +118,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies.
+// query  incrementally decodes Hello/Query packets to extract accurate SQL bodies.
 // It assumes the buffer starts on a packet boundary; for unknown packet types it drops the buffer.
 type queryParser struct {
 	version      int
@@ -233,33 +233,52 @@ type ParsedQuery struct {
 	Signature string
 }
 
-func decodeQueryBody(data []byte, version int, forceSettings bool) (string, string, int, error) {
+const signaturePrefix = "/* sentio-sig:"
+const signatureSuffix = " */"
+
+// extractSignatureFromSQL extracts signature from SQL prefix comment.
+// Format: /* sentio-sig:0x... */ SELECT ...
+// Returns (signature, cleanSQL) where cleanSQL has the signature comment removed.
+func extractSignatureFromSQL(sql string) (signature string, cleanSQL string) {
+	if !strings.HasPrefix(sql, signaturePrefix) {
+		return "", sql
+	}
+	
+	endIdx := strings.Index(sql, signatureSuffix)
+	if endIdx == -1 {
+		return "", sql
+	}
+	
+	signature = sql[len(signaturePrefix):endIdx]
+	cleanSQL = strings.TrimPrefix(sql[endIdx+len(signatureSuffix):], " ")
+	return signature, cleanSQL
+}
+
+func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int, error) {
 	cr := &countingReader{r: bytes.NewReader(data)}
 	r := proto.NewReader(cr)
 
 	// QueryID
 	if _, err := r.Str(); err != nil {
-		return "", "", cr.n, err
+		return "", cr.n, err
 	}
 
-	var quotaKey string
-
+	// Skip ClientInfo (we don't use QuotaKey anymore - signature is in SQL comment)
 	if proto.FeatureClientWriteInfo.In(version) {
 		var info proto.ClientInfo
 		if err := info.DecodeAware(r, version); err != nil {
-			return "", "", cr.n, err
+			return "", cr.n, err
 		}
-		quotaKey = info.QuotaKey
 	}
 
 	if !proto.FeatureSettingsSerializedAsStrings.In(version) && !forceSettings {
-		return "", "", cr.n, errors.New("settings not serialized as strings")
+		return "", cr.n, errors.New("settings not serialized as strings")
 	}
 
 	for {
 		var s proto.Setting
 		if err := s.Decode(r); err != nil {
-			return "", "", cr.n, err
+			return "", cr.n, err
 		}
 		if s.Key == "" {
 			break
@@ -268,33 +287,33 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, stri
 
 	if proto.FeatureInterserverExternallyGrantedRoles.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", "", cr.n, err
+			return "", cr.n, err
 		}
 	}
 
 	if proto.FeatureInterServerSecret.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", "", cr.n, err
+			return "", cr.n, err
 		}
 	}
 
 	if _, err := r.UVarInt(); err != nil { // Stage
-		return "", "", cr.n, err
+		return "", cr.n, err
 	}
 	if _, err := r.UVarInt(); err != nil { // Compression
-		return "", "", cr.n, err
+		return "", cr.n, err
 	}
 
 	body, err := r.Str()
 	if err != nil {
-		return "", "", cr.n, err
+		return "", cr.n, err
 	}
 
 	if proto.FeatureParameters.In(version) {
 		for {
 			var p proto.Parameter
 			if err := p.Decode(r); err != nil {
-				return "", "", cr.n, err
+				return "", cr.n, err
 			}
 			if p.Key == "" {
 				break
@@ -302,7 +321,7 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, stri
 		}
 	}
 
-	return body, quotaKey, cr.n, nil
+	return body, cr.n, nil
 }
 
 func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
@@ -376,23 +395,19 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 				p.disabled = true
 				return out, decodeErr
 			}
-			// We need QuotaKey from ClientInfo. ch-go/proto.Query struct doesn't expose it
-			// easily (or at all in this version), so we use our own decoder (decodeQueryBody).
 			
 			// 1. Try strict decode (forceSettings=false)
-			// We reset the reader for the second attempt if needed, but since we have the buffer,
-			// we can just call decodeQueryBody on the buffer slice.
-			
-			body, quotaKey, consumed, err := decodeQueryBody(p.buf[n:], p.version, false)
+			body, consumed, err := decodeQueryBody(p.buf[n:], p.version, false)
 			if err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
 				
 				// 2. Try permissive decode (forceSettings=true)
-				body2, quotaKey2, consumed2, err2 := decodeQueryBody(p.buf[n:], p.version, true)
+				body2, consumed2, err2 := decodeQueryBody(p.buf[n:], p.version, true)
 				if err2 == nil {
-					out = append(out, ParsedQuery{Body: body2, Signature: quotaKey2})
+					sig, cleanSQL := extractSignatureFromSQL(body2)
+					out = append(out, ParsedQuery{Body: cleanSQL, Signature: sig})
 					p.consumeBuf(n + consumed2)
 					continue
 				}
@@ -403,8 +418,9 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 				return out, decodeErr
 			}
 			
-			// Strict decode succeeded
-			out = append(out, ParsedQuery{Body: body, Signature: quotaKey})
+			// Strict decode succeeded - extract signature from SQL comment prefix
+			sig, cleanSQL := extractSignatureFromSQL(body)
+			out = append(out, ParsedQuery{Body: cleanSQL, Signature: sig})
 			p.consumeBuf(n + consumed)
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.

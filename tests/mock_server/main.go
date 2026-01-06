@@ -2,10 +2,9 @@ package main
 
 import (
 	"flag"
+	"io"
 	"log"
 	"net"
-
-	"github.com/ClickHouse/ch-go/proto"
 )
 
 func main() {
@@ -29,79 +28,187 @@ func main() {
 	}
 }
 
+// readVarInt reads a varint from the connection
+func readVarInt(conn net.Conn) (uint64, error) {
+	var value uint64
+	var shift uint
+	for {
+		b := make([]byte, 1)
+		if _, err := io.ReadFull(conn, b); err != nil {
+			return 0, err
+		}
+		value |= uint64(b[0]&0x7f) << shift
+		if b[0]&0x80 == 0 {
+			break
+		}
+		shift += 7
+	}
+	return value, nil
+}
+
+// readString reads a length-prefixed string from the connection
+func readString(conn net.Conn) (string, error) {
+	length, err := readVarInt(conn)
+	if err != nil {
+		return "", err
+	}
+	
+	if length == 0 {
+		return "", nil
+	}
+	data := make([]byte, length)
+	if _, err := io.ReadFull(conn, data); err != nil {
+		return "", err
+	}
+	return string(data), nil
+}
+
+// writeVarInt writes a varint to the buffer
+func writeVarInt(buf []byte, v uint64) []byte {
+	for v >= 0x80 {
+		buf = append(buf, byte(v)|0x80)
+		v >>= 7
+	}
+	buf = append(buf, byte(v))
+	return buf
+}
+
+// writeString writes a length-prefixed string
+func writeString(buf []byte, s string) []byte {
+	buf = writeVarInt(buf, uint64(len(s)))
+	buf = append(buf, s...)
+	return buf
+}
+
 func handle(conn net.Conn) {
 	defer conn.Close()
-	// Simple handshake: Read ClientHello, Write ServerHello.
-	// We use ch-go/proto to decode/encode.
 	
-	// Create a buffered reader to help decoding
-    // Note: In a real server we need to handle buffering carefully, 
-    // but here we just want to get past the handshake.
-	r := proto.NewReader(conn)
-	var clientHello proto.ClientHello
-	if err := clientHello.Decode(r); err != nil {
-		log.Println("decode client hello:", err)
+	// Step 1: Read ClientHello
+	// Format: [PacketType=0] [Name] [Major] [Minor] [ProtocolVersion] [Database] [User] [Password]
+	
+	// Packet Type (varint, should be 0 for Hello)
+	packetType, err := readVarInt(conn)
+	if err != nil {
+		log.Println("read packet type:", err)
 		return
 	}
-	// log.Printf("Client Hello: %s (%v)", clientHello.Name, clientHello.ProtocolVersion)
-
-	// Send Server Hello
-	serverHello := proto.ServerHello{
-		Name:            "MockServer",
-		Major:           22,
-		Minor:           8,
-		Revision:        54460,
-		Timezone:        "UTC",
-		DisplayName:     "Mock",
-		Patch:           1,
+	if packetType != 0 {
+		log.Println("expected Hello packet type 0, got", packetType)
+		return
 	}
 	
-	// Write server hello to buffer
-	var buf proto.Buffer
-	serverHello.EncodeAware(&buf, clientHello.ProtocolVersion)
-	if _, err := conn.Write(buf.Buf); err != nil {
+	// Name (string)
+	if _, err := readString(conn); err != nil {
+		log.Println("read name:", err)
+		return
+	}
+	
+	// Major (varint)
+	if _, err := readVarInt(conn); err != nil {
+		log.Println("read major:", err)
+		return
+	}
+	
+	// Minor (varint)
+	if _, err := readVarInt(conn); err != nil {
+		log.Println("read minor:", err)
+		return
+	}
+	
+	// ProtocolVersion (varint)
+	protoVersion, err := readVarInt(conn)
+	if err != nil {
+		log.Println("read proto version:", err)
+		return
+	}
+	
+	// Database (string)
+	if _, err := readString(conn); err != nil {
+		log.Println("read database:", err)
+		return
+	}
+	
+	// User (string)
+	if _, err := readString(conn); err != nil {
+		log.Println("read user:", err)
+		return
+	}
+	
+	// Password (string)
+	if _, err := readString(conn); err != nil {
+		log.Println("read password:", err)
+		return
+	}
+	
+	// Step 2: Send ServerHello (no packet type prefix - it's implicit)
+	var resp []byte
+	resp = writeString(resp, "MockServer")        // Name
+	resp = writeVarInt(resp, 22)                  // Major
+	resp = writeVarInt(resp, 8)                   // Minor
+	resp = writeVarInt(resp, protoVersion)        // Revision (same as client)
+	resp = writeString(resp, "UTC")               // Timezone
+	resp = writeString(resp, "Mock")              // DisplayName
+	
+	// Patch version (if client supports it)
+	if protoVersion >= 54448 {
+		resp = writeVarInt(resp, 1)               // Patch
+	}
+	
+	if _, err := conn.Write(resp); err != nil {
 		log.Println("write server hello:", err)
 		return
 	}
 
-	// Read packets and respond with EndOfStream
-	for {
-		packetType, err := r.UVarInt()
-		if err != nil {
-			// Connection closed or error
+	// Step 3: Skip Addendum
+	// For version 54460, only QuotaKey is present.
+	
+	// QuotaKey (FeatureQuotaKey >= 54458)
+	if protoVersion >= 54458 {
+		if _, err := readString(conn); err != nil {
+			log.Println("skip quota key:", err)
 			return
 		}
-
-		// Read the rest of the packet data (just discard it)
-		// For Query packets (type 1), we need to send EndOfStream back
-		// For Data packets (type 2), we also respond
-		switch proto.ClientCode(packetType) {
-		case proto.ClientCodeQuery: // Query = 1
-			// Skip reading query details, just drain whatever is available
-			// and send back EndOfStream
-			buf.Reset()
-			// ServerCodeEndOfStream = 5
-			buf.PutByte(5)
-			if _, err := conn.Write(buf.Buf); err != nil {
-				return
-			}
-		case proto.ClientCodeData: // Data = 2
-			// For INSERT data, respond with EndOfStream
-			buf.Reset()
-			buf.PutByte(5)
-			if _, err := conn.Write(buf.Buf); err != nil {
-				return
-			}
-		case proto.ClientCodePing: // Ping = 4
-			// Respond with Pong
-			buf.Reset()
-			buf.PutByte(7) // ServerCodePong
-			if _, err := conn.Write(buf.Buf); err != nil {
-				return
-			}
-		default:
-			// Unknown packet, skip
+	}
+	
+	// ChunkedPackets (FeatureChunkedPackets >= 54470)
+	if protoVersion >= 54470 {
+		if _, err := readString(conn); err != nil {
+			log.Println("skip chunked send:", err)
+			return
+		}
+		if _, err := readString(conn); err != nil {
+			log.Println("skip chunked recv:", err)
+			return
 		}
 	}
-}
 
+	// ParallelReplicasVersion (FeatureVersionedParallelReplicas >= 54471)
+	if protoVersion >= 54471 {
+		if _, err := readVarInt(conn); err != nil {
+			log.Println("skip parallel replicas:", err)
+			return
+		}
+	}
+
+	// Step 4: Read Query packet and respond with EndOfStream
+	// Query packet: [PacketType=1] [QueryID] [ClientInfo] [Settings] [Roles] [Secret] [Stage] [Compression] [Body] [Params]
+	
+	queryPacketType, err := readVarInt(conn)
+	if err != nil {
+		log.Println("read query packet type:", err)
+		return
+	}
+	if queryPacketType != 1 {
+		log.Println("expected Query packet type 1, got", queryPacketType)
+		return
+	}
+	
+	// Don't need to parse the rest of the Query, just send EndOfStream
+	endOfStream := []byte{5} // ServerCodeEndOfStream = 5
+	if _, err := conn.Write(endOfStream); err != nil {
+		log.Println("write end of stream:", err)
+		return
+	}
+	
+	// Done with this request - connection will be closed
+}

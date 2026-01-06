@@ -6,7 +6,7 @@
 
 # Go build artifacts
 /ck_remote_proxy
-
+./external/
 # IDE and editor files
 .idea/
 .vscode/

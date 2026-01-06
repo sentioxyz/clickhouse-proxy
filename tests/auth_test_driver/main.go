@@ -15,6 +15,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+const signaturePrefix = "/* sentio-sig:"
+const signatureSuffix = " */ "
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:19000", "Proxy address")
 	privKeyHex := flag.String("priv", "", "Private key hex (without 0x)")
@@ -102,30 +105,31 @@ func runTest(addr string, key *ecdsa.PrivateKey, expectSuccess bool) error {
 		DialTimeout: 30 * time.Second,
 	}
 	
-	// We verify connection establishment separately from query execution in the logs usually,
-	// but here we just lump it together.
 	conn, err := clickhouse.Open(&opts)
 	if err != nil {
 		return fmt.Errorf("open: %w", err)
 	}
 
 	ctx := context.Background()
-	query := "SELECT 1"
+	originalQuery := "SELECT 1"
 
-	var queryOpts []interface{}
-	
+	// Build query with signature prefix comment
+	var query string
 	if key != nil {
-		// Sign the query
-		hash := crypto.Keccak256Hash([]byte(query))
+		// Sign the original query body
+		hash := crypto.Keccak256Hash([]byte(originalQuery))
 		sig, err := crypto.Sign(hash.Bytes(), key)
 		if err != nil {
 			return fmt.Errorf("sign: %w", err)
 		}
 		sigHex := "0x" + hex.EncodeToString(sig)
-		queryOpts = append(queryOpts, clickhouse.WithQuotaKey(sigHex))
+		// Prepend signature as SQL comment
+		query = signaturePrefix + sigHex + signatureSuffix + originalQuery
+	} else {
+		query = originalQuery
 	}
 
 	var result int
-	err = conn.QueryRow(ctx, query, queryOpts...).Scan(&result)
+	err = conn.QueryRow(ctx, query).Scan(&result)
 	return err
 }

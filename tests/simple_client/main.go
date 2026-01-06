@@ -15,6 +15,9 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 )
 
+const signaturePrefix = "/* sentio-sig:"
+const signatureSuffix = " */ "
+
 func main() {
 	addr := flag.String("addr", "127.0.0.1:19000", "Proxy address")
 	privKeyHex := flag.String("priv", "", "Private key hex")
@@ -42,14 +45,16 @@ func runLoadTest(addr string, key *ecdsa.PrivateKey, concurrency int, total int)
 	start := time.Now()
 	var success, failures int64
 
-	// Pre-calculate signature
-	query := "SELECT 1"
-	hash := crypto.Keccak256Hash([]byte(query))
+	// Pre-calculate signed query
+	originalQuery := "SELECT 1"
+	hash := crypto.Keccak256Hash([]byte(originalQuery))
 	sig, err := crypto.Sign(hash.Bytes(), key)
 	if err != nil {
 		log.Fatal(err)
 	}
 	sigHex := "0x" + hex.EncodeToString(sig)
+	// Prepend signature as SQL comment
+	signedQuery := signaturePrefix + sigHex + signatureSuffix + originalQuery
 
 
 	for i := 0; i < total; i++ {
@@ -59,7 +64,7 @@ func runLoadTest(addr string, key *ecdsa.PrivateKey, concurrency int, total int)
 			defer wg.Done()
 			defer func() { <-sem }()
 			
-			if err := runSingleRequest(addr, sigHex, query); err != nil {
+			if err := runSingleRequest(addr, signedQuery); err != nil {
 				atomic.AddInt64(&failures, 1)
 				if atomic.LoadInt64(&failures) < 50 {
 					log.Printf("Req %d failed: %v", id, err)
@@ -75,7 +80,7 @@ func runLoadTest(addr string, key *ecdsa.PrivateKey, concurrency int, total int)
 	fmt.Printf("Load Test Done. Duration: %v. QPS: %.2f. Success: %d. Failures: %d\n", duration, qps, success, failures)
 }
 
-func runSingleRequest(addr string, sigHex string, query string) error {
+func runSingleRequest(addr string, signedQuery string) error {
 	conn, err := net.DialTimeout("tcp", addr, 5*time.Second)
 	if err != nil {
 		return err
@@ -87,69 +92,105 @@ func runSingleRequest(addr string, sigHex string, query string) error {
 		Name:            "SimpleClient",
 		Major:           1,
 		Minor:           1,
-		ProtocolVersion: 54460, // Match proxy expectation
+		ProtocolVersion: 54460,
 		Database:        "default",
 		User:            "default",
 	}
 	var buf proto.Buffer
 	info.Encode(&buf)
 	if _, err := conn.Write(buf.Buf); err != nil {
-		return err
+		return fmt.Errorf("write hello: %w", err)
 	}
 
-	// 2. Mock Server (or Proxy) might send ServerHello.
-	// We don't read it to speed up (TCP buffering handles it).
-	// If the protocol requires strict read-before-write, we might need to Read.
-	// But usually ClientHello -> (async ServerHello) -> Query is fine.
-    
-    buf.Reset()
-    
-    // Packet Type: Query=1
-    buf.PutUVarInt(1)
-    
-    // Query ID
-    buf.PutString("")
-    
-    // Client Info with QuotaKey
-    clientInfo := proto.ClientInfo{
-        ProtocolVersion: 54460,
-        ClientName:      "SimpleClient",
-        QuotaKey:        sigHex,
-    }
-    clientInfo.EncodeAware(&buf, 54460)
-    
+	// 2. Read ServerHello response (wait for server to respond before sending Query)
+	conn.SetReadDeadline(time.Now().Add(5*time.Second))
+	helloBuf := make([]byte, 1024)
+	n, err := conn.Read(helloBuf)
+	if err != nil {
+		return fmt.Errorf("read server hello: %w", err)
+	}
+	if n == 0 {
+		return fmt.Errorf("empty server hello response")
+	}
+
+	// 3. Send Addendum (required by protocol after ServerHello)
+	buf.Reset()
+	// QuotaKey (string)
+	if proto.FeatureQuotaKey.In(54460) {
+		buf.PutString("") // empty quota key
+	}
+	// ChunkedSend (string)
+	if proto.FeatureChunkedPackets.In(54460) {
+		buf.PutString("") // empty chunked send
+		buf.PutString("") // empty chunked recv
+	}
+	// ParallelReplicasVersion (uvarint)
+	if proto.FeatureVersionedParallelReplicas.In(54460) {
+		buf.PutUVarInt(0)
+	}
+	if _, err := conn.Write(buf.Buf); err != nil {
+		return fmt.Errorf("write addendum: %w", err)
+	}
+
+	// 4. Send Query packet
+	buf.Reset()
+	
+	// Packet Type: Query=1
+	buf.PutUVarInt(1)
+	
+	// Query ID
+	buf.PutString("")
+	
+	// Client Info
+	clientInfo := proto.ClientInfo{
+		ProtocolVersion: 54460,
+		ClientName:      "SimpleClient",
+		Interface:       1, // TCP
+	}
+	clientInfo.EncodeAware(&buf, 54460)
+	
 	// Settings (empty)
-    (proto.Setting{}).Encode(&buf)
+	buf.PutString("")
 
-    // Interserver Roles (empty)
-    buf.PutString("")
-    
-    // Interserver Secret (empty)
-    buf.PutString("")
-    
-    // Stage = 2 (Complete)
-    buf.PutUVarInt(2)
-    
-    // Compression = 0
-    buf.PutUVarInt(0)
-    
-    // Query Body
-    buf.PutString(query)
-    
-    // Parameters (empty)
-    (proto.Parameter{}).Encode(&buf)
-    
-    if _, err := conn.Write(buf.Buf); err != nil {
-        return err
-    }
+	// Interserver Roles (empty)
+	if proto.FeatureInterserverExternallyGrantedRoles.In(54460) {
+		buf.PutString("")
+	}
+	
+	// Interserver Secret (empty)
+	if proto.FeatureInterServerSecret.In(54460) {
+		buf.PutString("")
+	}
+	
+	// Stage = 2 (Complete)
+	buf.PutUVarInt(2)
+	
+	// Compression = 0
+	buf.PutUVarInt(0)
+	
+	// Query Body with signature prefix
+	buf.PutString(signedQuery)
+	
+	// Parameters (empty)
+	if proto.FeatureParameters.In(54460) {
+		buf.PutString("")
+	}
+	
+	if _, err := conn.Write(buf.Buf); err != nil {
+		return fmt.Errorf("write query: %w", err)
+	}
 
-	// 4. Expect response
-    // Read 1 byte
-    conn.SetReadDeadline(time.Now().Add(5*time.Second))
-    b := make([]byte, 1)
-    if _, err := conn.Read(b); err != nil {
-        return err
-    }
-    
+	// 5. Read response (EndOfStream = byte 5)
+	conn.SetReadDeadline(time.Now().Add(5*time.Second))
+	respBuf := make([]byte, 128)
+	n, err = conn.Read(respBuf)
+	// Accept as success if we read at least 1 byte (EndOfStream)
+	if n > 0 {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read response: %w", err)
+	}
+	
 	return nil
 }
