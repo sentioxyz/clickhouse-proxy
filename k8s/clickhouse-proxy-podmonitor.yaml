@@ -8,9 +8,9 @@ metadata:
 spec:
   selector:
     matchLabels:
-      clickhouse.altinity.com/app: chop  # 匹配所有 ClickHouse Operator 管理的 pods
+      clickhouse.altinity.com/app: chop 
   podMetricsEndpoints:
-    - targetPort: 9091    # 明确指定 proxy 的 metrics 端口号，避免与 ClickHouse 的 metrics 端口冲突
+    - targetPort: 9091    
       interval: 30s
       path: /metrics
       filterRunning: true
