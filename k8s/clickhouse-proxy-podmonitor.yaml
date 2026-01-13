@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: clickhouse-proxy
+  namespace: clickhouse
+  labels:
+    app: clickhouse-proxy
+spec:
+  selector:
+    matchLabels:
+      clickhouse.altinity.com/app: chop  # 匹配所有 ClickHouse Operator 管理的 pods
+  podMetricsEndpoints:
+    - targetPort: 9091    # 明确指定 proxy 的 metrics 端口号，避免与 ClickHouse 的 metrics 端口冲突
+      interval: 30s
+      path: /metrics
+      filterRunning: true
+  namespaceSelector:
+    matchNames:
+      - clickhouse
