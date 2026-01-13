@@ -1,0 +1,19 @@
+apiVersion: monitoring.coreos.com/v1
+kind: PodMonitor
+metadata:
+  name: clickhouse-proxy
+  namespace: clickhouse
+  labels:
+    app: clickhouse-proxy
+spec:
+  selector:
+    matchLabels:
+      clickhouse.altinity.com/app: chop 
+  podMetricsEndpoints:
+    - targetPort: 9091    
+      interval: 30s
+      path: /metrics
+      filterRunning: true
+  namespaceSelector:
+    matchNames:
+      - clickhouse
