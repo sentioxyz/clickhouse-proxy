@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	log "sentioxyz/sentio-core/common/log"
 	"os"
+	log "sentioxyz/sentio-core/common/log"
 	"time"
 )
 
@@ -22,6 +22,7 @@ type Config struct {
 	MaxQueryLogBytes int      `json:"max_query_log_bytes"`
 	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
 	MetricsListen    string   `json:"metrics_listen"`
+	JWKSetPath       string   `json:"jwk_set_path"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON

@@ -8,6 +8,7 @@ import (
 	"os/signal"
 	"syscall"
 
+	"github.com/lestrrat-go/jwx/v2/jwk"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	log "sentioxyz/sentio-core/common/log"
@@ -30,7 +31,17 @@ func main() {
 		}
 	}()
 
-	proxy := newProxy(cfg, nil)
+	var v Validator
+	if cfg.JWKSetPath != "" {
+		set, err := jwk.ReadFile(cfg.JWKSetPath)
+		if err != nil {
+			log.Fatalf("failed to parse JWK set from %s: %v", cfg.JWKSetPath, err)
+		}
+		v = NewJWKValidator(set)
+		log.Infof("JWK validation enabled using keys from %s", cfg.JWKSetPath)
+	}
+
+	proxy := newProxy(cfg, v)
 	if err := proxy.serve(ctx); err != nil {
 		log.Fatalf("proxy stopped: %v", err)
 	}

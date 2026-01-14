@@ -7,9 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	log "sentioxyz/sentio-core/common/log"
 	"net"
 	"regexp"
+	log "sentioxyz/sentio-core/common/log"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -118,7 +118,7 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies.
+// query  incrementally decodes Hello/Query packets to extract accurate SQL bodies.
 // It assumes the buffer starts on a packet boundary; for unknown packet types it drops the buffer.
 type queryParser struct {
 	version      int
@@ -228,65 +228,140 @@ func (p *queryParser) skipAddendum() (consumed int, ok bool, err error) {
 	return offset, true, nil
 }
 
-func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int, error) {
+type ParsedQuery struct {
+	Body      string
+	Signature string
+}
+
+var signatureRegex = regexp.MustCompile(`/\*\s*jwk_signature=([^\s*]+)\s*\*/`)
+
+// extractSignatureFromSQL extracts signature from SQL prefix comment.
+// Format: /* jwk_signature=<SIGNATURE> */ SELECT ...
+// Returns (signature, cleanSQL) where cleanSQL has the signature comment removed.
+func extractSignatureFromSQL(sql string) (signature string, cleanSQL string) {
+	// Find the signature pattern in the string
+	loc := signatureRegex.FindStringIndex(sql)
+	if loc == nil {
+		return "", sql
+	}
+
+	// Extract the full match (comment)
+	match := sql[loc[0]:loc[1]]
+
+	// Extract the signature group (submatch 1)
+	submatches := signatureRegex.FindStringSubmatch(match)
+	if len(submatches) < 2 {
+		return "", sql
+	}
+	signature = submatches[1]
+
+	// Remove the comment from SQL. Replace with space to avoid merging tokens.
+	cleanSQL = strings.TrimSpace(sql[:loc[0]] + " " + sql[loc[1]:])
+	return signature, cleanSQL
+}
+
+func decodeQueryBody(data []byte, version int, forceSettings bool) (string, string, int, error) {
 	cr := &countingReader{r: bytes.NewReader(data)}
 	r := proto.NewReader(cr)
 
 	// QueryID
 	if _, err := r.Str(); err != nil {
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
 
+	// Skip ClientInfo (we don't use QuotaKey anymore - signature is in SQL comment)
 	if proto.FeatureClientWriteInfo.In(version) {
 		var info proto.ClientInfo
 		if err := info.DecodeAware(r, version); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 	}
 
 	if !proto.FeatureSettingsSerializedAsStrings.In(version) && !forceSettings {
-		return "", cr.n, errors.New("settings not serialized as strings")
+		return "", "", cr.n, errors.New("settings not serialized as strings")
 	}
+
+	var signature string
 
 	for {
 		var s proto.Setting
 		if err := s.Decode(r); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 		if s.Key == "" {
 			break
+		}
+		// Check for signature in log_comment
+		// Client can send clickhouse.Settings{"log_comment": "jwk_signature=..."}
+		// Check for signature in log_comment
+		// Client can send clickhouse.Settings{"log_comment": "jwk_signature=..."}
+		if s.Key == "log_comment" {
+			val := s.Value // Value is string
+			// Allow "jwk_signature=..." directly or wrapped in comments
+			// Reuse regex but simple check first
+			// Regex is: /*\s*jwk_signature=([^\s*]+)\s*\*/
+			if strings.HasPrefix(val, "jwk_signature=") {
+				signature = strings.TrimPrefix(val, "jwk_signature=")
+			} else {
+				// Try regex for robust matching if they reused the comment format
+				// We can just construct a dummy SQL "/* ... */" and feed to extractSignatureFromSQL?
+				// Or parsing manually.
+				// Simplest: Expect "jwk_signature=TOKEN" in log_comment.
+				// But user might copy paste the whole comment.
+
+				// Better: The regex expects /* ... */.
+				// If val is "jwk_signature=...", regex won't match unless wrapped.
+				// If val is "/* jwk_signature=... */", regex matches.
+				// Let's try both.
+				sig, _ := extractSignatureFromSQL("/* " + val + " */")
+				if sig == "" {
+					sig, _ = extractSignatureFromSQL(val) // In case they sent the whole comment
+				}
+				if sig != "" {
+					signature = sig
+				}
+			}
 		}
 	}
 
 	if proto.FeatureInterserverExternallyGrantedRoles.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 	}
 
 	if proto.FeatureInterServerSecret.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", cr.n, err
+			return "", "", cr.n, err
 		}
 	}
 
 	if _, err := r.UVarInt(); err != nil { // Stage
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
 	if _, err := r.UVarInt(); err != nil { // Compression
-		return "", cr.n, err
+		return "", "", cr.n, err
 	}
 
 	body, err := r.Str()
 	if err != nil {
-		return "", cr.n, err
+		return "", "", cr.n, err
+	}
+
+	// Try to extract signature from SQL comment if not already found in settings
+	if signature == "" {
+		var sig string
+		sig, body = extractSignatureFromSQL(body)
+		if sig != "" {
+			signature = sig
+		}
 	}
 
 	if proto.FeatureParameters.In(version) {
 		for {
 			var p proto.Parameter
 			if err := p.Decode(r); err != nil {
-				return "", cr.n, err
+				return "", "", cr.n, err
 			}
 			if p.Key == "" {
 				break
@@ -294,10 +369,10 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 		}
 	}
 
-	return body, cr.n, nil
+	return body, signature, cr.n, nil
 }
 
-func (p *queryParser) feed(chunk []byte) ([]string, error) {
+func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 	if p.disabled {
 		return nil, nil
 	}
@@ -312,7 +387,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 		return nil, errors.New("parser buffer exceeded max size, discarding, parser disabled")
 	}
 
-	var out []string
+	var out []ParsedQuery
 	var decodeErr error
 	for {
 		// After we know the protocol version, ClickHouse will send a single
@@ -368,28 +443,39 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				p.disabled = true
 				return out, decodeErr
 			}
-			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
-			r := proto.NewReader(cr)
-			var q proto.Query
-			if err := q.DecodeAware(r, p.version); err != nil {
+
+			// 1. Try strict decode (forceSettings=false)
+			body, sigSettings, consumed, err := decodeQueryBody(p.buf[n:], p.version, false)
+			if err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
-				// Try permissive decode ignoring settings flag.
-				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
-				if derr == nil {
-					out = append(out, body)
-					p.consumeBuf(n + consumed)
+
+				// 2. Try permissive decode (forceSettings=true)
+				body2, sigSettings2, consumed2, err2 := decodeQueryBody(p.buf[n:], p.version, true)
+				if err2 == nil {
+					sig, cleanSQL := extractSignatureFromSQL(body2)
+					if sig == "" {
+						sig = sigSettings2
+					}
+					out = append(out, ParsedQuery{Body: cleanSQL, Signature: sig})
+					p.consumeBuf(n + consumed2)
 					continue
 				}
+
 				decodeErr = err
 				p.resetBuf()
 				p.disabled = true
 				return out, decodeErr
 			}
-			out = append(out, q.Body)
-			consumed := n + cr.n
-			p.consumeBuf(consumed)
+
+			// Strict decode succeeded - extract signature from SQL comment prefix
+			sig, cleanSQL := extractSignatureFromSQL(body)
+			if sig == "" {
+				sig = sigSettings
+			}
+			out = append(out, ParsedQuery{Body: cleanSQL, Signature: sig})
+			p.consumeBuf(n + consumed)
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.
 			p.resetBuf()
@@ -593,22 +679,23 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			if perr != nil {
 				log.Infof("[conn %d] query decode warning: %v", id, perr)
 			}
-			for _, sql := range sqls {
+			for _, q := range sqls {
 				meta := QueryMeta{
 					ConnID:       id,
 					ClientAddr:   clientConn.RemoteAddr().String(),
 					UpstreamAddr: p.cfg.Upstream,
-					QueryPreview: sql,
+					QueryPreview: q.Body,
 					Raw:          append([]byte(nil), chunk...),
-					SQL:          sql,
+					SQL:          q.Body,
+					Signature:    q.Signature,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
 				}
 				if p.cfg.LogQueries {
-					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
-					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
+					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, q.Body)
+					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(q.Body))
 				}
 			}
 
