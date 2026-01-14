@@ -7,41 +7,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	log "sentioxyz/sentio-core/common/log"
 	"net"
 	"regexp"
+	log "sentioxyz/sentio-core/common/log"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/ClickHouse/ch-go/proto"
-	"github.com/prometheus/client_golang/prometheus"
 )
-
-var (
-	activeConnections = prometheus.NewGauge(prometheus.GaugeOpts{
-		Name: "clickhouse_proxy_active_connections",
-		Help: "Number of currently active client connections",
-	})
-	packetsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "clickhouse_proxy_packets_total",
-		Help: "Total count of ClickHouse protocol packets processed",
-	}, []string{"type"})
-	bytesTransferred = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "clickhouse_proxy_bytes_transferred_total",
-		Help: "Total bytes transferred through the proxy",
-	}, []string{"direction"})
-)
-
-func init() {
-	prometheus.MustRegister(activeConnections)
-	prometheus.MustRegister(packetsTotal)
-	prometheus.MustRegister(bytesTransferred)
-}
 
 // Known client -> server packet types in ClickHouse native protocol.
-// Values match Protocol::Client enum in ClickHouse sources.
 var packetNames = map[uint64]string{
 	0: "Hello",
 	1: "Query",
@@ -53,6 +30,25 @@ var packetNames = map[uint64]string{
 	7: "Scalar",
 	8: "Poll",
 	9: "Data (portable)",
+}
+
+// Known server -> client packet types in ClickHouse native protocol.
+var serverPacketNames = map[uint64]string{
+	0:  "Hello",
+	1:  "Data",
+	2:  "Exception",
+	3:  "Progress",
+	4:  "Pong",
+	5:  "EndOfStream",
+	6:  "ProfileInfo",
+	7:  "Totals",
+	8:  "Extremes",
+	9:  "TablesStatusResponse",
+	10: "Log",
+	11: "TableColumns",
+	12: "PartUUIDs",
+	13: "ReadTaskRequest",
+	14: "ProfileEvents",
 }
 
 // Build reverse lookup for known packet names to avoid double-printing.
@@ -93,6 +89,7 @@ type proxy struct {
 	cfg       Config
 	stats     *packetStats
 	validator Validator
+	observer  *MetricsObserver
 }
 
 func newProxy(cfg Config, v Validator) *proxy {
@@ -103,6 +100,7 @@ func newProxy(cfg Config, v Validator) *proxy {
 		cfg:       cfg,
 		stats:     newPacketStats(),
 		validator: v,
+		observer:  NewMetricsObserver(),
 	}
 }
 
@@ -119,17 +117,14 @@ func (c *countingReader) Read(p []byte) (int, error) {
 }
 
 // queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies.
-// It assumes the buffer starts on a packet boundary; for unknown packet types it drops the buffer.
 type queryParser struct {
 	version      int
 	buf          []byte
 	addendumDone bool
 	disabled     bool // if true, stop parsing forever on this connection
-
 }
 
 // maxParserBufSize limits the parser buffer to prevent memory exhaustion.
-// Query packets should be small; if buffer exceeds this, we discard and reset.
 const maxParserBufSize = 1 << 20 // 1MB
 
 // resetBuf releases the underlying buffer memory to GC.
@@ -138,7 +133,6 @@ func (p *queryParser) resetBuf() {
 }
 
 // consumeBuf removes the first n bytes from the buffer.
-// It copies remaining data to a new slice to allow GC of the old underlying array.
 func (p *queryParser) consumeBuf(n int) {
 	if n >= len(p.buf) {
 		p.buf = nil
@@ -149,24 +143,8 @@ func (p *queryParser) consumeBuf(n int) {
 	p.buf = remaining
 }
 
-// skipAddendum attempts to consume the optional "addendum" section that
-// follows the Hello/handshake in newer protocol versions. It returns:
-//   - consumed > 0 and ok=true when the addendum was fully read,
-//   - ok=false when more bytes are needed (no state is changed),
-//   - err on hard parse errors.
+// skipAddendum attempts to consume the optional "addendum" section.
 func (p *queryParser) skipAddendum() (consumed int, ok bool, err error) {
-	// The addendum layout mirrors Connection::sendAddendum in ClickHouse:
-	//   if (server_revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_QUOTA_KEY)
-	//       writeStringBinary(quota_key)
-	//   if (server_revision >= DBMS_MIN_PROTOCOL_VERSION_WITH_CHUNKED_PACKETS)
-	//       writeStringBinary(proto_send_chunked)
-	//       writeStringBinary(proto_recv_chunked)
-	//   if (server_revision >= DBMS_MIN_REVISION_WITH_VERSIONED_PARALLEL_REPLICAS_PROTOCOL)
-	//       writeVarUInt(DBMS_PARALLEL_REPLICAS_PROTOCOL_VERSION)
-	//
-	// We don't need the values themselves, only their lengths, so work
-	// directly on the raw buffer to avoid interference from bufio.Reader
-	// prefetching.
 	buf := p.buf
 	offset := 0
 
@@ -304,8 +282,6 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 
 	p.buf = append(p.buf, chunk...)
 
-	// Safety limit: if buffer exceeds max size, discard to prevent OOM.
-	// This can happen with very large Query packets or malformed data.
 	if len(p.buf) > maxParserBufSize {
 		p.resetBuf()
 		p.disabled = true
@@ -315,12 +291,6 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 	var out []string
 	var decodeErr error
 	for {
-		// After we know the protocol version, ClickHouse will send a single
-		// "addendum" block as part of the handshake (quota key, chunked
-		// protocol negotiation, parallel replicas). This block does not
-		// start with a packet type varint, so if it gets coalesced with the
-		// first Query into a single TCP read, naive parsing will never see
-		// the Query. Explicitly skip addendum once per connection.
 		if p.version != 0 && !p.addendumDone && proto.FeatureAddendum.In(p.version) {
 			consumed, ok, err := p.skipAddendum()
 			if err != nil {
@@ -330,7 +300,6 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				return out, decodeErr
 			}
 			if !ok {
-				// Need more bytes to complete addendum.
 				return out, decodeErr
 			}
 			p.addendumDone = true
@@ -375,7 +344,6 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
-				// Try permissive decode ignoring settings flag.
 				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
 				if derr == nil {
 					out = append(out, body)
@@ -399,18 +367,12 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 	}
 }
 
-// detectPacketType tries to read a ClickHouse packet type from the
-// beginning of a chunk. This is intentionally best-effort: it only looks
-// at the first varint in the buffer and does not attempt full protocol
-// parsing. If detection fails we return "unknown".
+// detectPacketType tries to read a ClickHouse packet type from the beginning.
 func detectPacketType(chunk []byte) string {
 	if len(chunk) == 0 {
 		return "unknown"
 	}
 
-	// Packet type is a varint; for common packets it fits into a single byte
-	// with high bit unset. If the first byte has the continuation bit set,
-	// treat it as payload, not a packet boundary.
 	if chunk[0]&0x80 != 0 {
 		return "unknown"
 	}
@@ -422,8 +384,28 @@ func detectPacketType(chunk []byte) string {
 	if name, ok := packetNames[typ]; ok {
 		return name
 	}
-	// Count small unknown ids to help spot unexpected packets; otherwise
-	// group as generic unknown.
+	if typ < 32 {
+		return fmt.Sprintf("type_%d", typ)
+	}
+	return "unknown"
+}
+
+// detectServerPacketType tries to read a ClickHouse server packet type.
+func detectServerPacketType(chunk []byte) string {
+	if len(chunk) == 0 {
+		return "unknown"
+	}
+	if chunk[0]&0x80 != 0 {
+		return "unknown"
+	}
+
+	typ, n := binary.Uvarint(chunk)
+	if n <= 0 {
+		return "unknown"
+	}
+	if name, ok := serverPacketNames[typ]; ok {
+		return name
+	}
 	if typ < 32 {
 		return fmt.Sprintf("type_%d", typ)
 	}
@@ -441,6 +423,9 @@ func (p *proxy) serve(ctx context.Context) error {
 	if p.cfg.StatsInterval.Duration > 0 {
 		go p.runStatsPrinter(ctx)
 	}
+
+	// Start background health check
+	go p.runHealthCheck(ctx)
 
 	go func() {
 		<-ctx.Done()
@@ -485,9 +470,34 @@ func (p *proxy) runStatsPrinter(ctx context.Context) {
 	}
 }
 
+func (p *proxy) runHealthCheck(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	check := func() {
+		d := net.Dialer{Timeout: 1 * time.Second}
+		conn, err := d.DialContext(ctx, "tcp", p.cfg.Upstream)
+		if err != nil {
+			p.observer.SetUpstreamHealth(false)
+		} else {
+			p.observer.SetUpstreamHealth(true)
+			conn.Close()
+		}
+	}
+	// Initial check
+	check()
+	for {
+		select {
+		case <-ticker.C:
+			check()
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.Conn) {
-	activeConnections.Inc()
-	defer activeConnections.Dec()
+	p.observer.ConnectionOpened()
+	defer p.observer.ConnectionClosed()
 	defer clientConn.Close()
 	if tc, ok := clientConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
@@ -511,6 +521,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	upstreamConn, err := dialer.DialContext(upstreamCtx, "tcp", p.cfg.Upstream)
 	if err != nil {
 		log.Infof("[conn %d] dial upstream %s error: %v", id, p.cfg.Upstream, err)
+		p.observer.Error("dial", err)
 		return
 	}
 	defer upstreamConn.Close()
@@ -554,18 +565,30 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 		}
 		n, err := upstreamConn.Read(buf)
 		if n > 0 {
-			bytesTransferred.WithLabelValues("upstream_to_client").Add(float64(n))
+			chunk := buf[:n]
+			p.observer.BytesTransferred("upstream_to_client", float64(n))
+
+			// Detect server packet types (e.g. Exception, EndOfStream, Data)
+			pkt := detectServerPacketType(chunk)
+			if pkt != "unknown" {
+				p.observer.ServerPacket(pkt)
+			}
+
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = clientConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
-			if _, werr := clientConn.Write(buf[:n]); werr != nil {
+			if _, werr := clientConn.Write(chunk); werr != nil {
 				log.Infof("[conn %d] upstream->client write error: %v", id, werr)
+				p.observer.Error("client_write", werr)
 				return
 			}
 		}
 		if err != nil {
 			if !errors.Is(err, io.EOF) && !isTimeout(err) && !errors.Is(err, net.ErrClosed) {
 				log.Infof("[conn %d] upstream->client read error: %v", id, err)
+			}
+			if !errors.Is(err, io.EOF) {
+				p.observer.Error("upstream_read", err)
 			}
 			return
 		}
@@ -584,8 +607,8 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			chunk := buf[:n]
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
-			packetsTotal.WithLabelValues(pkt).Inc()
-			bytesTransferred.WithLabelValues("client_to_upstream").Add(float64(n))
+			p.observer.ClientPacket(pkt)
+			p.observer.BytesTransferred("client_to_upstream", float64(n))
 
 			// Feed all chunks to parser to capture Hello + Query accurately.
 			// Parsed SQL will be validated through the Validator.
@@ -621,12 +644,20 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			}
 			if _, err := upstreamConn.Write(chunk); err != nil {
 				log.Infof("[conn %d] client->upstream write error: %v", id, err)
+				p.observer.Error("upstream_write", err)
 				return
+			}
+			// If we successfully wrote a Query packet, increment the forwarded metric
+			if pkt == "Query" {
+				p.observer.QueryForwarded()
 			}
 		}
 		if readErr != nil {
 			if !errors.Is(readErr, io.EOF) && !isTimeout(readErr) && !errors.Is(readErr, net.ErrClosed) {
 				log.Infof("[conn %d] client->upstream read error: %v", id, readErr)
+			}
+			if !errors.Is(readErr, io.EOF) {
+				p.observer.Error("client_read", readErr)
 			}
 			return
 		}
@@ -664,7 +695,6 @@ func printStats(stats *packetStats) {
 	for _, key := range []string{"Hello", "Query", "Data", "Ping", "Cancel", "TablesStatusRequest", "KeepAlive", "Scalar", "Poll", "Data (portable)", "unknown"} {
 		log.Infof("%-18s: %d", key, snap[key])
 	}
-	// Print any extra ids that appeared.
 	for k, v := range snap {
 		if _, known := packetNamesByName[k]; known {
 			continue
@@ -677,8 +707,7 @@ func printStats(stats *packetStats) {
 	log.Infof("===============================")
 }
 
-// summarizePrintable extracts a compact ASCII summary from raw bytes, replacing
-// non-printable chars with space and collapsing whitespace.
+// summarizePrintable extracts a compact ASCII summary from raw bytes.
 func summarizePrintable(b []byte, maxLen int) string {
 	if len(b) == 0 {
 		return ""
@@ -705,8 +734,6 @@ func summarizePrintable(b []byte, maxLen int) string {
 }
 
 // extractQuerySummary cleans a raw Query packet payload into a readable SQL snippet.
-// It strips leading metadata and keeps only a substring starting from the first
-// recognizable SQL keyword.
 func extractQuerySummary(chunk []byte, maxLen int) string {
 	clean := summarizePrintable(chunk, maxLen*4)
 	lower := strings.ToLower(clean)
@@ -722,7 +749,6 @@ func extractQuerySummary(chunk []byte, maxLen int) string {
 	if idx < len(clean) {
 		clean = clean[idx:]
 	} else {
-		// Fallback: match USE if no other keyword found.
 		if loc := regexp.MustCompile(`(?i)\buse\b`).FindStringIndex(clean); len(loc) == 2 {
 			clean = clean[loc[0]:]
 		}
