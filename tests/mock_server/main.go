@@ -52,7 +52,7 @@ func readString(conn net.Conn) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	
+
 	if length == 0 {
 		return "", nil
 	}
@@ -82,10 +82,10 @@ func writeString(buf []byte, s string) []byte {
 
 func handle(conn net.Conn) {
 	defer conn.Close()
-	
+
 	// Step 1: Read ClientHello
 	// Format: [PacketType=0] [Name] [Major] [Minor] [ProtocolVersion] [Database] [User] [Password]
-	
+
 	// Packet Type (varint, should be 0 for Hello)
 	packetType, err := readVarInt(conn)
 	if err != nil {
@@ -96,64 +96,65 @@ func handle(conn net.Conn) {
 		log.Println("expected Hello packet type 0, got", packetType)
 		return
 	}
-	
+
 	// Name (string)
 	if _, err := readString(conn); err != nil {
 		log.Println("read name:", err)
 		return
 	}
-	
+
 	// Major (varint)
 	if _, err := readVarInt(conn); err != nil {
 		log.Println("read major:", err)
 		return
 	}
-	
+
 	// Minor (varint)
 	if _, err := readVarInt(conn); err != nil {
 		log.Println("read minor:", err)
 		return
 	}
-	
+
 	// ProtocolVersion (varint)
 	protoVersion, err := readVarInt(conn)
 	if err != nil {
 		log.Println("read proto version:", err)
 		return
 	}
-	
+
 	// Database (string)
 	if _, err := readString(conn); err != nil {
 		log.Println("read database:", err)
 		return
 	}
-	
+
 	// User (string)
 	if _, err := readString(conn); err != nil {
 		log.Println("read user:", err)
 		return
 	}
-	
+
 	// Password (string)
 	if _, err := readString(conn); err != nil {
 		log.Println("read password:", err)
 		return
 	}
-	
-	// Step 2: Send ServerHello (no packet type prefix - it's implicit)
+
+	// Step 2: Send ServerHello
 	var resp []byte
-	resp = writeString(resp, "MockServer")        // Name
-	resp = writeVarInt(resp, 22)                  // Major
-	resp = writeVarInt(resp, 8)                   // Minor
-	resp = writeVarInt(resp, protoVersion)        // Revision (same as client)
-	resp = writeString(resp, "UTC")               // Timezone
-	resp = writeString(resp, "Mock")              // DisplayName
-	
+	resp = append(resp, 0)                 // Packet Type: Hello
+	resp = writeString(resp, "MockServer") // Name
+	resp = writeVarInt(resp, 22)           // Major
+	resp = writeVarInt(resp, 8)            // Minor
+	resp = writeVarInt(resp, protoVersion) // Revision (same as client)
+	resp = writeString(resp, "UTC")        // Timezone
+	resp = writeString(resp, "Mock")       // DisplayName
+
 	// Patch version (if client supports it)
 	if protoVersion >= 54448 {
-		resp = writeVarInt(resp, 1)               // Patch
+		resp = writeVarInt(resp, 1) // Patch
 	}
-	
+
 	if _, err := conn.Write(resp); err != nil {
 		log.Println("write server hello:", err)
 		return
@@ -161,7 +162,7 @@ func handle(conn net.Conn) {
 
 	// Step 3: Skip Addendum
 	// For version 54460, only QuotaKey is present.
-	
+
 	// QuotaKey (FeatureQuotaKey >= 54458)
 	if protoVersion >= 54458 {
 		if _, err := readString(conn); err != nil {
@@ -169,7 +170,7 @@ func handle(conn net.Conn) {
 			return
 		}
 	}
-	
+
 	// ChunkedPackets (FeatureChunkedPackets >= 54470)
 	if protoVersion >= 54470 {
 		if _, err := readString(conn); err != nil {
@@ -192,7 +193,7 @@ func handle(conn net.Conn) {
 
 	// Step 4: Read Query packet and respond with EndOfStream
 	// Query packet: [PacketType=1] [QueryID] [ClientInfo] [Settings] [Roles] [Secret] [Stage] [Compression] [Body] [Params]
-	
+
 	queryPacketType, err := readVarInt(conn)
 	if err != nil {
 		log.Println("read query packet type:", err)
@@ -202,13 +203,13 @@ func handle(conn net.Conn) {
 		log.Println("expected Query packet type 1, got", queryPacketType)
 		return
 	}
-	
+
 	// Don't need to parse the rest of the Query, just send EndOfStream
 	endOfStream := []byte{5} // ServerCodeEndOfStream = 5
 	if _, err := conn.Write(endOfStream); err != nil {
 		log.Println("write end of stream:", err)
 		return
 	}
-	
+
 	// Done with this request - connection will be closed
 }

@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"testing"
 
-	drvproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	chproto "github.com/ClickHouse/ch-go/proto"
+	drvproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 )
 
 func TestDetectPacketType(t *testing.T) {
@@ -168,5 +168,63 @@ func TestQueryParser_AddendumAndQuerySameChunk(t *testing.T) {
 	}
 	if sqls[0].Body != q.Body {
 		t.Fatalf("body=%q, want %q", sqls[0].Body, q.Body)
+	}
+}
+
+func TestExtractSignatureFromSQL(t *testing.T) {
+	tests := []struct {
+		name          string
+		sql           string
+		wantSignature string
+		wantCleanSQL  string
+	}{
+		{
+			name:          "basic",
+			sql:           "/* jwk_signature=eyJxhGcc */ SELECT 1",
+			wantSignature: "eyJxhGcc",
+			wantCleanSQL:  "SELECT 1",
+		},
+		{
+			name:          "with spaces",
+			sql:           "/*   jwk_signature=abc.def.ghi   */ INSERT INTO table (a) VALUES (1)",
+			wantSignature: "abc.def.ghi",
+			wantCleanSQL:  "INSERT INTO table (a) VALUES (1)",
+		},
+		{
+			name:          "clean sql trailing spaces trim",
+			sql:           "/* jwk_signature=sig */   SELECT 1",
+			wantSignature: "sig",
+			wantCleanSQL:  "SELECT 1",
+		},
+		{
+			name:          "no signature",
+			sql:           "SELECT 1",
+			wantSignature: "",
+			wantCleanSQL:  "SELECT 1",
+		},
+		{
+			name:          "wrong prefix",
+			sql:           "/* signatures=abc */ SELECT 1",
+			wantSignature: "",
+			wantCleanSQL:  "/* signatures=abc */ SELECT 1",
+		},
+		{
+			name:          "multiline comment",
+			sql:           "/*\n jwk_signature=xyz \n*/ SELECT 1",
+			wantSignature: "xyz",
+			wantCleanSQL:  "SELECT 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotSig, gotClean := extractSignatureFromSQL(tt.sql)
+			if gotSig != tt.wantSignature {
+				t.Errorf("extractSignatureFromSQL() signature = %q, want %q", gotSig, tt.wantSignature)
+			}
+			if gotClean != tt.wantCleanSQL {
+				t.Errorf("extractSignatureFromSQL() cleanSQL = %q, want %q", gotClean, tt.wantCleanSQL)
+			}
+		})
 	}
 }
