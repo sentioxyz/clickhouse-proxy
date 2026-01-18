@@ -115,3 +115,48 @@ unknown           : 0
 Notes:
 - No unknown types appeared, all common packet types were identified.
 - Query/Data logs show SQL fragments and data block summaries, do not affect forwarding.
+
+## Testing
+
+The project includes a comprehensive set of tests to ensure stability and correctness.
+
+### 1. Unit Tests
+Run standard Go unit tests for internal packages:
+```bash
+go test ./...
+```
+
+### 2. Local Integration Forwarding Test
+This test validates that the proxy can correctly forward queries and data between a local client and a mock server.
+```bash
+make test-forwarding
+```
+
+### 3. Stream Replay Verification (Production Quality Check)
+**This is the most critical test.** It streams real query logs from a running ClickHouse pod and replays them against the local proxy to verify that requests are processed correctly without errors or panics.
+
+**Prerequisites:**
+- Access to a Kubernetes cluster with ClickHouse running.
+- `kubectl` configured locally.
+
+**Usage:**
+```bash
+make test-stream-replay POD=<pod-name> [NS=clickhouse] [SINCE="1 hour"] [N=0]
+```
+
+**Example:**
+```bash
+# Replay the last hour of queries from a specific pod
+make test-stream-replay POD=clickhouse-user-part-a-0-0-0
+
+# Replay only the last 100 queries
+make test-stream-replay POD=clickhouse-user-part-a-0-0-0 N=100
+
+# Replay ALL queries from the last 30 days (Full History Load Test)
+make test-stream-replay POD=clickhouse-user-part-a-0-0-0 SINCE="30 day" N=0
+```
+
+**Success Criteria:**
+- The test finishes with `✅ All queries forwarded!`.
+- The "Failures" count is 0.
+- No panics are reported in the proxy log summary.

@@ -41,3 +41,4 @@ config.json
 tests/data/
 tests/bin/
 tests/*.log
+external/
