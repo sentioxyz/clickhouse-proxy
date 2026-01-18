@@ -18,7 +18,8 @@ func main() {
 	flag.Parse()
 
 	cfg := loadConfig(*configPath)
-	log.Infof("ck_remote_proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t", cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData)
+	log.Infof("ck_remote_proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t",
+		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -30,7 +31,14 @@ func main() {
 		}
 	}()
 
-	proxy := newProxy(cfg, nil)
+	// Create validator based on configuration
+	var validator Validator
+	if cfg.AuthEnabled {
+		validator = NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true)
+		log.Infof("Ethereum signature auth enabled with %d allowed addresses", len(cfg.AuthAllowedAddresses))
+	}
+
+	proxy := newProxy(cfg, validator)
 	if err := proxy.serve(ctx); err != nil {
 		log.Fatalf("proxy stopped: %v", err)
 	}

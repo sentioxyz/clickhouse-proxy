@@ -116,7 +116,14 @@ func (c *countingReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-// queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies.
+// ParsedQuery holds the parsed SQL body and settings from a ClickHouse Query packet.
+type ParsedQuery struct {
+	SQL      string
+	Settings map[string]string
+}
+
+// queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies and settings.
+// It assumes the buffer starts on a packet boundary; for unknown packet types it drops the buffer.
 type queryParser struct {
 	version      int
 	buf          []byte
@@ -275,7 +282,7 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 	return body, cr.n, nil
 }
 
-func (p *queryParser) feed(chunk []byte) ([]string, error) {
+func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 	if p.disabled {
 		return nil, nil
 	}
@@ -288,7 +295,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 		return nil, errors.New("parser buffer exceeded max size, discarding, parser disabled")
 	}
 
-	var out []string
+	var out []ParsedQuery
 	var decodeErr error
 	for {
 		if p.version != 0 && !p.addendumDone && proto.FeatureAddendum.In(p.version) {
@@ -346,7 +353,7 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				}
 				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
 				if derr == nil {
-					out = append(out, body)
+					out = append(out, ParsedQuery{SQL: body, Settings: nil})
 					p.consumeBuf(n + consumed)
 					continue
 				}
@@ -355,9 +362,17 @@ func (p *queryParser) feed(chunk []byte) ([]string, error) {
 				p.disabled = true
 				return out, decodeErr
 			}
-			out = append(out, q.Body)
+			// Extract settings from proto.Query
+			settings := make(map[string]string)
+			for _, s := range q.Settings {
+				settings[s.Key] = s.Value
+			}
+			out = append(out, ParsedQuery{SQL: q.Body, Settings: settings})
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
+		case 3, 4: // Cancel or Ping
+			// These packets have no body, just consume the type byte.
+			p.consumeBuf(n)
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.
 			p.resetBuf()
@@ -616,22 +631,23 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			if perr != nil {
 				log.Infof("[conn %d] query decode warning: %v", id, perr)
 			}
-			for _, sql := range sqls {
+			for _, parsed := range sqls {
 				meta := QueryMeta{
 					ConnID:       id,
 					ClientAddr:   clientConn.RemoteAddr().String(),
 					UpstreamAddr: p.cfg.Upstream,
-					QueryPreview: sql,
+					QueryPreview: parsed.SQL,
 					Raw:          append([]byte(nil), chunk...),
-					SQL:          sql,
+					SQL:          parsed.SQL,
+					Settings:     parsed.Settings,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
 				}
 				if p.cfg.LogQueries {
-					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, sql)
-					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(sql))
+					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, parsed.SQL)
+					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(parsed.SQL))
 				}
 			}
 

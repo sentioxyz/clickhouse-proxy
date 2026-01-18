@@ -1,0 +1,207 @@
+# ConfigMap for auth-enabled proxy
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clickhouse-proxy-auth-check-config
+  namespace: clickhouse
+data:
+  config.json: |
+    {
+      "listen": ":9002",
+      "upstream": "127.0.0.1:9000",
+      "stats_interval": "30s",
+      "dial_timeout": "5s",
+      "idle_timeout": "5m",
+      "log_queries": true,
+      "log_data": false,
+      "max_query_log_bytes": 300,
+      "max_data_log_bytes": 200,
+      "auth_enabled": true,
+      "auth_allowed_addresses": [
+        "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
+        "0x86cE23361B15507dDbf734EE32904312C6A16eE3",
+        "0x2932A8aAd29e41b90A447E586651587bea3eB11E"
+      ],
+      "auth_max_token_age": "1m"
+    }
+---
+apiVersion: "clickhouse.altinity.com/v1"
+kind: "ClickHouseInstallation"
+metadata:
+  name: "clickhouse-auth-check"
+  namespace: "clickhouse"
+spec:
+  defaults:
+    templates:
+      podTemplate: clickhouse-auth
+      dataVolumeClaimTemplate: data-volume-claim
+      logVolumeClaimTemplate: log-volume-claim
+      clusterServiceTemplate: cluster-service-template-auth
+      replicaServiceTemplate: replica-service-template-auth
+    storageManagement:
+      reclaimPolicy: Retain
+  configuration:
+    zookeeper:
+      nodes:
+        - host: clickhouse-keeper-test-0.clickhouse.svc.cluster.local
+          port: 2181
+        - host: clickhouse-keeper-test-1.clickhouse.svc.cluster.local
+          port: 2181
+        - host: clickhouse-keeper-test-2.clickhouse.svc.cluster.local
+          port: 2181
+      session_timeout_ms: 100000
+      operation_timeout_ms: 10000
+    clusters:
+      - name: "auth-check"
+        layout:
+          shardsCount: 1
+          replicasCount: 1
+    settings:
+      logger/level: "warning"
+      logger/console: "true"
+      prometheus/endpoint: /metrics
+      prometheus/port: 9363
+      prometheus/metrics: true
+      prometheus/events: true
+      prometheus/asynchronous_metrics: true
+      prometheus/status_info: true
+      max_concurrent_queries: 100
+      max_server_memory_usage_to_ram_ratio: "0.85"
+      # Allow custom settings prefixed with x_auth_ (for JWS tokens)
+      custom_settings_prefixes: "x_auth_"
+    users:
+      clickhouse_operator/networks/ip:
+        - "0.0.0.0/0"
+      sentio/password: "2vwzZBJ6cbZbyoKm4j"
+      sentio/networks/ip:
+        - "0.0.0.0/0"
+      sentio/access_management: "1"
+      sentio/profile: sentio
+    profiles:
+      default/query_cache_nondeterministic_function_handling: "ignore"
+      default/enable_json_type: "1"
+      sentio/async_insert: "1"
+  templates:
+    podTemplates:
+      - name: clickhouse-auth
+        generateName: "{chi}-{cluster}-{host}"
+        podDistribution:
+          - type: ClusterAffinity
+        metadata:
+          annotations:
+            prometheus.io/scrape: "true"
+            prometheus.io/path: "/metrics"
+            prometheus.io/port: "9363"
+          labels:
+            app: clickhouse-auth-check
+        spec:
+          nodeSelector:
+            sentio.xyz/general: "true"
+          containers:
+            - name: clickhouse
+              image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-server:25.7-sentio-release-decimal512
+              ports:
+                - name: "metrics"
+                  containerPort: 9363
+              volumeMounts:
+                - name: data-volume-claim
+                  mountPath: /var/lib/clickhouse
+              resources:
+                requests:
+                  memory: 4Gi
+                  cpu: 1
+                limits:
+                  memory: 8Gi
+                  cpu: 4
+            - name: proxy
+              image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:auth-v3
+              imagePullPolicy: Always
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 1000
+              ports:
+                - name: proxy-tcp
+                  containerPort: 9002
+                - name: metrics
+                  containerPort: 9091
+              livenessProbe:
+                tcpSocket:
+                  port: 9002
+                initialDelaySeconds: 10
+                periodSeconds: 10
+                timeoutSeconds: 3
+                failureThreshold: 3
+              readinessProbe:
+                tcpSocket:
+                  port: 9002
+                initialDelaySeconds: 5
+                periodSeconds: 5
+                timeoutSeconds: 2
+                failureThreshold: 2
+              resources:
+                requests:
+                  cpu: "100m"
+                  memory: "128Mi"
+                limits:
+                  cpu: "500m"
+                  memory: "512Mi"
+              volumeMounts:
+                - name: proxy-config
+                  mountPath: /app/config.json
+                  subPath: config.json
+          volumes:
+            - name: proxy-config
+              configMap:
+                name: clickhouse-proxy-auth-check-config
+    volumeClaimTemplates:
+      - name: data-volume-claim
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: "local-path"
+          resources:
+            requests:
+              storage: 10Gi
+      - name: log-volume-claim
+        spec:
+          accessModes:
+            - ReadWriteOnce
+          storageClassName: "local-path"
+          resources:
+            requests:
+              storage: 1Gi
+    serviceTemplates:
+      - name: cluster-service-template-auth
+        generateName: "{chi}-{cluster}"
+        spec:
+          ports:
+            - name: http
+              port: 8123
+            - name: tcp
+              port: 9000
+              targetPort: 9002   # Route through auth proxy
+            - name: tcp-direct
+              port: 9001
+              targetPort: 9000   # Direct to ClickHouse
+            - name: proxy-tcp
+              port: 9002
+              targetPort: 9002
+          type: ClusterIP
+      - name: replica-service-template-auth
+        generateName: "{chi}-{cluster}-replica-{replica}"
+        spec:
+          ports:
+            - name: http
+              port: 8123
+            - name: tcp
+              port: 9000
+              targetPort: 9002   # Route through auth proxy
+            - name: tcp-direct
+              port: 9001
+              targetPort: 9000   # Direct to ClickHouse
+            - name: proxy-tcp
+              port: 9002
+              targetPort: 9002
+            - name: interserver
+              port: 9009
+          type: ClusterIP

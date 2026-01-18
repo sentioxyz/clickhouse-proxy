@@ -2,7 +2,11 @@ IMAGE_REPO := us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy
 TAG ?= $(shell git rev-parse --short HEAD)
 IMAGE := $(IMAGE_REPO):$(TAG)
 
-.PHONY: build docker push update-yaml apply test-forwarding test-stream-replay
+# Auth-specific image tag
+AUTH_TAG ?= auth-v1
+AUTH_IMAGE := $(IMAGE_REPO):$(AUTH_TAG)
+
+.PHONY: build docker push update-yaml apply test-forwarding test-stream-replay docker-auth push-auth
 
 all: build docker push update-yaml
 
@@ -15,14 +19,28 @@ docker:
 push:
 	docker push $(IMAGE)
 
+# Build and push auth-enabled version
+docker-auth:
+	docker build -t $(AUTH_IMAGE) .
+
+push-auth:
+	docker push $(AUTH_IMAGE)
+
 update-yaml:
 	@echo "Updating external k8s configs with image: $(IMAGE)"
 	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' external/production/k8s-sea/clickhouse/test-clickhouse.yaml
 	sed -i 's|image: $(IMAGE_REPO):.*|image: $(IMAGE)|' external/production/k8s-sea/clickhouse/clickhouse-extra.yaml
 
+update-yaml-auth:
+	@echo "Updating auth_validate_ck.yaml with image: $(AUTH_IMAGE)"
+	sed -i 's|image: $(IMAGE_REPO):.*|image: $(AUTH_IMAGE)|' external/production/k8s-sea/clickhouse/auth_validate_ck.yaml
+
 apply:
 	kubectl apply -f external/production/k8s-sea/clickhouse/test-clickhouse.yaml
 	kubectl apply -f external/production/k8s-sea/clickhouse/clickhouse-extra.yaml
+
+apply-auth:
+	kubectl apply -f external/production/k8s-sea/clickhouse/auth_validate_ck.yaml
 
 test-forwarding:
 	@echo "Running local forwarding integration tests..."
@@ -42,6 +60,3 @@ ifndef POD
 	@exit 1
 endif
 	@./tests/run_stream_replay.sh "$(POD)" "$(NS)" "$(SINCE)" "$(N)"
-
-
-
