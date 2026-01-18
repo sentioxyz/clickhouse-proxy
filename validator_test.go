@@ -190,9 +190,9 @@ func TestParseJWS(t *testing.T) {
 
 	token := generateTestToken(t, privKeyHex, time.Now(), sqlHash)
 
-	header, payload, sig, err := parseJWS(token)
+	header, payload, sig, err := parseJWSCompact(token)
 	if err != nil {
-		t.Fatalf("parseJWS failed: %v", err)
+		t.Fatalf("parseJWSCompact failed: %v", err)
 	}
 
 	if header.Alg != "ES256K" {

@@ -69,6 +69,18 @@ type JWSPayload struct {
 	QueryHash string `json:"qhash"`
 }
 
+// JWSJSON represents the JWS JSON Serialization format.
+type JWSJSON struct {
+	Payload    string             `json:"payload"`
+	Signatures []JWSJSONSignature `json:"signatures"`
+}
+
+// JWSJSONSignature represents a single signature in the JWS JSON format.
+type JWSJSONSignature struct {
+	Protected string `json:"protected"`
+	Signature string `json:"signature"`
+}
+
 // EthValidator validates queries using Ethereum-style secp256k1 signatures.
 type EthValidator struct {
 	// AllowedAddresses is a set of allowed Ethereum addresses (lowercase, with 0x prefix).
@@ -106,11 +118,100 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 	// Trim possible quotes that might be added by some client libs
 	token = strings.Trim(token, "\"'")
 
-	header, payload, signature, err := parseJWS(token)
+	// Determine if it's JSON or Compact serialization
+	if strings.HasPrefix(strings.TrimSpace(token), "{") {
+		return v.validateJWSJSON(token, meta.SQL)
+	}
+	return v.validateJWSCompact(token, meta.SQL)
+}
+
+func (v *EthValidator) validateJWSCompact(token, sql string) error {
+	header, payload, signature, err := parseJWSCompact(token)
 	if err != nil {
 		return fmt.Errorf("invalid JWS token: %w", err)
 	}
 
+	if err := v.verifyPayloadAndHeader(header, payload, sql); err != nil {
+		return err
+	}
+
+	// Verify signature and recover address
+	signingInput := token[:strings.LastIndex(token, ".")]
+	recoveredAddr, err := v.recoverAddressFromInput(signingInput, signature)
+	if err != nil {
+		return fmt.Errorf("signature verification failed: %w", err)
+	}
+
+	// Check allowlist
+	if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
+		return fmt.Errorf("address %s not in allowlist", recoveredAddr)
+	}
+
+	log.Infof("[eth_validator] authenticated query (compact) from %s (address: %s)", "", recoveredAddr)
+	return nil
+}
+
+func (v *EthValidator) validateJWSJSON(token, sql string) error {
+	var jws JWSJSON
+	if err := json.Unmarshal([]byte(token), &jws); err != nil {
+		return fmt.Errorf("invalid JWS JSON: %w", err)
+	}
+
+	if len(jws.Signatures) == 0 {
+		return errors.New("no signatures found in JWS JSON")
+	}
+
+	// All signatures must be valid and from allowed addresses
+	var authenticatedAddresses []string
+
+	for i, sig := range jws.Signatures {
+		headerBytes, err := base64.RawURLEncoding.DecodeString(sig.Protected)
+		if err != nil {
+			return fmt.Errorf("sig[%d]: invalid protected header encoding: %w", i, err)
+		}
+		var header JWSHeader
+		if err := json.Unmarshal(headerBytes, &header); err != nil {
+			return fmt.Errorf("sig[%d]: invalid header JSON: %w", i, err)
+		}
+
+		// Decode payload to verify hash/time (assuming same payload for all, which is how JWS works)
+		payloadBytes, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+		if err != nil {
+			return fmt.Errorf("invalid payload encoding: %w", err)
+		}
+		var payload JWSPayload
+		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+			return fmt.Errorf("invalid payload JSON: %w", err)
+		}
+
+		// Verify header and payload constraints
+		if err := v.verifyPayloadAndHeader(header, payload, sql); err != nil {
+			return fmt.Errorf("sig[%d]: %w", i, err)
+		}
+
+		// Verify signature
+		signatureBytes, err := base64.RawURLEncoding.DecodeString(sig.Signature)
+		if err != nil {
+			return fmt.Errorf("sig[%d]: invalid signature encoding: %w", i, err)
+		}
+
+		signingInput := sig.Protected + "." + jws.Payload
+		recoveredAddr, err := v.recoverAddressFromInput(signingInput, signatureBytes)
+		if err != nil {
+			return fmt.Errorf("sig[%d]: signature verification failed: %w", i, err)
+		}
+
+		if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
+			return fmt.Errorf("sig[%d]: address %s not in allowlist", i, recoveredAddr)
+		}
+		authenticatedAddresses = append(authenticatedAddresses, recoveredAddr)
+	}
+
+	log.Infof("[eth_validator] authenticated query (json) from %s (addresses: %v)", "", authenticatedAddresses)
+	return nil
+}
+
+func (v *EthValidator) verifyPayloadAndHeader(header JWSHeader, payload JWSPayload, sql string) error {
 	// Verify algorithm
 	if header.Alg != "ES256K" && header.Alg != "secp256k1" {
 		return fmt.Errorf("unsupported algorithm: %s", header.Alg)
@@ -127,31 +228,20 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 	}
 
 	// Verify query hash
-	expectedHash := keccak256Hex([]byte(meta.SQL))
+	expectedHash := keccak256Hex([]byte(sql))
 	if !strings.EqualFold(payload.QueryHash, expectedHash) {
 		return fmt.Errorf("query hash mismatch: expected %s, got %s", expectedHash, payload.QueryHash)
 	}
-
-	// Verify signature and recover address
-	signingInput := token[:strings.LastIndex(token, ".")]
-	messageHash := keccak256([]byte(signingInput))
-
-	recoveredAddr, err := recoverAddress(messageHash, signature)
-	if err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
-	}
-
-	// Check allowlist
-	if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
-		return fmt.Errorf("address %s not in allowlist", recoveredAddr)
-	}
-
-	log.Infof("[eth_validator] authenticated query from %s (address: %s)", meta.ClientAddr, recoveredAddr)
 	return nil
 }
 
-// parseJWS parses a JWS compact serialization token into its components.
-func parseJWS(token string) (JWSHeader, JWSPayload, []byte, error) {
+func (v *EthValidator) recoverAddressFromInput(signingInput string, signature []byte) (string, error) {
+	messageHash := keccak256([]byte(signingInput))
+	return recoverAddress(messageHash, signature)
+}
+
+// parseJWSCompact parses a JWS compact serialization token into its components.
+func parseJWSCompact(token string) (JWSHeader, JWSPayload, []byte, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return JWSHeader{}, JWSPayload{}, nil, errors.New("invalid JWS format: expected 3 parts")

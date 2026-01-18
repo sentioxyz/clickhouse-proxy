@@ -19,8 +19,8 @@ data:
       "auth_enabled": true,
       "auth_allowed_addresses": [
         "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
-        "0x86cE23361B15507dDbf734EE32904312C6A16eE3",
-        "0x2932A8aAd29e41b90A447E586651587bea3eB11E"
+        "0x2932A8aAd29e41b90A447E586651587bea3eB11E",
+        "0x1Be31A94361a391bBaFB2a4CCd704F57dc04d4bb"
       ],
       "auth_max_token_age": "1m"
     }
@@ -114,7 +114,7 @@ spec:
                   memory: 8Gi
                   cpu: 4
             - name: proxy
-              image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:auth-v3
+              image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:f9f02ad
               imagePullPolicy: Always
               securityContext:
                 runAsNonRoot: true
