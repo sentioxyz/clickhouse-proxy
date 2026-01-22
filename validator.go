@@ -89,10 +89,12 @@ type EthValidator struct {
 	MaxTokenAge time.Duration
 	// Enabled controls whether authentication is required; if false, all queries pass.
 	Enabled bool
+	// AllowNoAuth when true allows requests without auth tokens to pass through.
+	AllowNoAuth bool
 }
 
 // NewEthValidator creates a new EthValidator with the given allowed addresses.
-func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool) *EthValidator {
+func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool, allowNoAuth bool) *EthValidator {
 	allowed := make(map[string]bool, len(addresses))
 	for _, addr := range addresses {
 		allowed[strings.ToLower(addr)] = true
@@ -101,6 +103,7 @@ func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool) *Et
 		AllowedAddresses: allowed,
 		MaxTokenAge:      maxAge,
 		Enabled:          enabled,
+		AllowNoAuth:      allowNoAuth,
 	}
 }
 
@@ -112,6 +115,10 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 
 	token, ok := meta.Settings[AuthTokenSettingKey]
 	if !ok || token == "" {
+		if v.AllowNoAuth {
+			log.Infof("[eth_validator] no auth token, allowing due to allow_no_auth=true")
+			return nil
+		}
 		return errors.New("missing authentication token")
 	}
 

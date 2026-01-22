@@ -193,7 +193,7 @@ func startProxyWithAuth(t *testing.T, upstreamAddr string, allowedAddrs []string
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
 	}
 
-	validator := NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true)
+	validator := NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true, false)
 	proxy := newProxy(cfg, validator)
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -27,6 +27,7 @@ type Config struct {
 	AuthEnabled          bool     `json:"auth_enabled"`
 	AuthAllowedAddresses []string `json:"auth_allowed_addresses"`
 	AuthMaxTokenAge      Duration `json:"auth_max_token_age"`
+	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"` // If true, requests without auth token are allowed
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -76,6 +77,7 @@ func defaultConfig() Config {
 		AuthEnabled:          false,
 		AuthAllowedAddresses: nil,
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
+		AuthAllowNoAuth:      false,
 	}
 }
 

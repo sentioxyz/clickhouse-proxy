@@ -34,8 +34,8 @@ func main() {
 	// Create validator based on configuration
 	var validator Validator
 	if cfg.AuthEnabled {
-		validator = NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true)
-		log.Infof("Ethereum signature auth enabled with %d allowed addresses", len(cfg.AuthAllowedAddresses))
+		validator = NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true, cfg.AuthAllowNoAuth)
+		log.Infof("Ethereum signature auth enabled with %d allowed addresses, allow_no_auth=%t", len(cfg.AuthAllowedAddresses), cfg.AuthAllowNoAuth)
 	}
 
 	proxy := newProxy(cfg, validator)

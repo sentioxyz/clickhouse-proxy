@@ -2,11 +2,11 @@ IMAGE_REPO := us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy
 TAG ?= $(shell git rev-parse --short HEAD)
 IMAGE := $(IMAGE_REPO):$(TAG)
 
-# Auth-specific image tag
-AUTH_TAG ?= auth-v1
+# Auth-specific image tag (auth-{commit_id})
+AUTH_TAG ?= auth-$(TAG)
 AUTH_IMAGE := $(IMAGE_REPO):$(AUTH_TAG)
 
-.PHONY: build docker push update-yaml apply test-forwarding test-stream-replay docker-auth push-auth
+.PHONY: build docker push update-yaml apply test-forwarding test-stream-replay docker-auth push-auth auth_proxy
 
 all: build docker push update-yaml
 
@@ -60,3 +60,9 @@ ifndef POD
 	@exit 1
 endif
 	@./tests/run_stream_replay.sh "$(POD)" "$(NS)" "$(SINCE)" "$(N)"
+
+# Build and push auth proxy with auth-{commit_id} tag
+# Usage: make auth_proxy
+auth_proxy: docker-auth push-auth
+	@echo "Auth proxy built and pushed: $(AUTH_IMAGE)"
+
