@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	log "sentioxyz/sentio-core/common/log"
 	"os"
+	log "sentioxyz/sentio-core/common/log"
 	"time"
 )
 
@@ -22,6 +22,12 @@ type Config struct {
 	MaxQueryLogBytes int      `json:"max_query_log_bytes"`
 	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
 	MetricsListen    string   `json:"metrics_listen"`
+
+	// Authentication configuration
+	AuthEnabled          bool     `json:"auth_enabled"`
+	AuthAllowedAddresses []string `json:"auth_allowed_addresses"`
+	AuthMaxTokenAge      Duration `json:"auth_max_token_age"`
+	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"` // If true, requests without auth token are allowed
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -67,6 +73,11 @@ func defaultConfig() Config {
 		MaxQueryLogBytes: 300,
 		MaxDataLogBytes:  200,
 		MetricsListen:    envOrDefault("CK_METRICS_LISTEN", ":9091"),
+		// Auth defaults: disabled by default
+		AuthEnabled:          false,
+		AuthAllowedAddresses: nil,
+		AuthMaxTokenAge:      Duration{1 * time.Minute},
+		AuthAllowNoAuth:      false,
 	}
 }
 

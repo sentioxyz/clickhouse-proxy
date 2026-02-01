@@ -4,8 +4,8 @@ import (
 	"encoding/binary"
 	"testing"
 
-	drvproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 	chproto "github.com/ClickHouse/ch-go/proto"
+	drvproto "github.com/ClickHouse/clickhouse-go/v2/lib/proto"
 )
 
 func TestDetectPacketType(t *testing.T) {
@@ -90,8 +90,8 @@ func TestQueryParser_DriverQuerySimple(t *testing.T) {
 	if len(sqls) != 1 {
 		t.Fatalf("expected 1 SQL, got %d", len(sqls))
 	}
-	if sqls[0] != q.Body {
-		t.Fatalf("decoded body = %q, want %q", sqls[0], q.Body)
+	if sqls[0].SQL != q.Body {
+		t.Fatalf("decoded body = %q, want %q", sqls[0].SQL, q.Body)
 	}
 }
 
@@ -129,8 +129,8 @@ func TestQueryParser_DriverQuerySplit(t *testing.T) {
 		if len(sqls) != 1 {
 			t.Fatalf("split=%d expected 1 SQL after second feed, got %d", split, len(sqls))
 		}
-		if sqls[0] != q.Body {
-			t.Fatalf("split=%d body=%q, want %q", split, sqls[0], q.Body)
+		if sqls[0].SQL != q.Body {
+			t.Fatalf("split=%d body=%q, want %q", split, sqls[0].SQL, q.Body)
 		}
 	}
 }
@@ -166,7 +166,7 @@ func TestQueryParser_AddendumAndQuerySameChunk(t *testing.T) {
 	if len(sqls) != 1 {
 		t.Fatalf("expected 1 SQL, got %d", len(sqls))
 	}
-	if sqls[0] != q.Body {
-		t.Fatalf("body=%q, want %q", sqls[0], q.Body)
+	if sqls[0].SQL != q.Body {
+		t.Fatalf("body=%q, want %q", sqls[0].SQL, q.Body)
 	}
 }
