@@ -83,7 +83,7 @@ func TestQueryParser_DriverQuerySimple(t *testing.T) {
 	frame := append([]byte{drvproto.ClientQuery}, buf.Buf...)
 
 	p := &queryParser{version: int(drvproto.DBMS_TCP_PROTOCOL_VERSION), addendumDone: true}
-	sqls, err := p.feed(frame)
+	_, sqls, err := p.transform(frame)
 	if err != nil {
 		t.Fatalf("queryParser.feed error: %v", err)
 	}
@@ -116,13 +116,13 @@ func TestQueryParser_DriverQuerySplit(t *testing.T) {
 		first := frame[:split]
 		second := frame[split:]
 
-		if sqls, err := p.feed(first); err != nil {
+		if _, sqls, err := p.transform(first); err != nil {
 			t.Fatalf("split=%d first feed error: %v", split, err)
 		} else if len(sqls) != 0 {
 			t.Fatalf("split=%d expected 0 SQLs after first feed, got %d", split, len(sqls))
 		}
 
-		sqls, err := p.feed(second)
+		_, sqls, err := p.transform(second)
 		if err != nil {
 			t.Fatalf("split=%d second feed error: %v", split, err)
 		}
@@ -159,7 +159,7 @@ func TestQueryParser_AddendumAndQuerySameChunk(t *testing.T) {
 	payload := append(add.Buf, frame...)
 
 	p := &queryParser{version: int(drvproto.DBMS_TCP_PROTOCOL_VERSION)}
-	sqls, err := p.feed(payload)
+	_, sqls, err := p.transform(payload)
 	if err != nil {
 		t.Fatalf("feed error: %v", err)
 	}
