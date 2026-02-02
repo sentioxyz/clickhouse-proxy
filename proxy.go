@@ -742,6 +742,12 @@ func (p *proxy) processHello(chunk []byte, connID int64) ([]byte, string, error)
 	// 0 = Hello packet type (Uvarint)
 	// If chunk contains more than Hello, we need to be careful.
 	// For rewriting, we decode ONLY the Hello part, then re-encode it, then append the rest.
+	//
+	// NOTE: This simple implementation assumes the initial Hello packet arrives in the first
+	// read chunk. If the Hello packet is fragmented at the TCP level (unlikely for the
+	// small Hello packet, but possible), detectPacketType might return "unknown" or
+	// this function might fail to decode. For production robustness, a buffering
+	// reader that peeks until full packet length is available would be better.
 
 	// Use counting reader
 	cr := &countingReader{r: bytes.NewReader(chunk[1:])} // skip type byte
