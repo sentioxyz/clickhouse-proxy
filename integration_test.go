@@ -86,6 +86,46 @@ func TestIntegration_EthAuth(t *testing.T) {
 		}
 	})
 
+	t.Run("ValidToken_Stripped_LegacyKey", func(t *testing.T) {
+		// Valid token but using "x_auth_token" key
+		conn, err := clickhouse.Open(&clickhouse.Options{
+			Addr: []string{proxyAddr},
+			Auth: clickhouse.Auth{
+				Database: "default",
+				Username: "default",
+			},
+			DialTimeout: 5 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("failed to open connection: %v", err)
+		}
+		defer conn.Close()
+
+		sql := "SELECT 1"
+		token := generateAuthToken(t, privKeyHex, sql)
+
+		ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
+			"x_auth_token": token,
+		}))
+
+		err = conn.Exec(ctx, "SELECT 1")
+		if err != nil {
+			t.Fatalf("Exec failed with x_auth_token: %v", err)
+		}
+
+		select {
+		case receivedSettings := <-settingsCh:
+			if _, ok := receivedSettings["x_auth_token"]; ok {
+				t.Fatal("x_auth_token should have been stripped")
+			}
+			if _, ok := receivedSettings["SQL_x_auth_token"]; ok {
+				t.Fatal("SQL_x_auth_token should have been stripped")
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("Mock server did not receive query within timeout")
+		}
+	})
+
 	t.Run("InvalidToken", func(t *testing.T) {
 		conn, err := clickhouse.Open(&clickhouse.Options{
 			Addr: []string{proxyAddr},

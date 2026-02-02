@@ -391,7 +391,12 @@ func (p *queryParser) transform(chunk []byte) ([]byte, []ParsedQuery, error) {
 			// 1. Extract info for validation/logging
 			settings := make(map[string]string)
 			for _, s := range q.Settings {
-				settings[s.Key] = s.Value
+				// Normalize x_auth_token to SQL_x_auth_token for validation purposes
+				if s.Key == "x_auth_token" {
+					settings["SQL_x_auth_token"] = s.Value
+				} else {
+					settings[s.Key] = s.Value
+				}
 			}
 			outQueries = append(outQueries, ParsedQuery{SQL: q.Body, Settings: settings})
 
