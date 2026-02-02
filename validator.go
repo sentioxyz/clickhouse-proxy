@@ -236,36 +236,40 @@ func (v *EthValidator) verifyJWSJSON(token string) (string, string, error) {
 		return "", "", fmt.Errorf("token expired: age %ds exceeds max %s", tokenAge, v.MaxTokenAge)
 	}
 
-	for i, sig := range jws.Signatures {
+	for _, sig := range jws.Signatures {
 		headerBytes, err := base64.RawURLEncoding.DecodeString(sig.Protected)
 		if err != nil {
-			return "", "", fmt.Errorf("sig[%d]: invalid protected header encoding: %w", i, err)
+			log.Infof("invalid protected header encoding in JWS signature: %v", err)
+			continue
 		}
 		var header JWSHeader
 		if err := json.Unmarshal(headerBytes, &header); err != nil {
-			return "", "", fmt.Errorf("sig[%d]: invalid header JSON: %w", i, err)
+			log.Infof("invalid header JSON in JWS signature: %v", err)
+			continue
 		}
 
 		if header.Alg != "ES256K" && header.Alg != "secp256k1" {
-			return "", "", fmt.Errorf("unsupported algorithm: %s", header.Alg)
+			continue // Skip unsupported algorithms
 		}
 
 		// Verify signature
 		signatureBytes, err := base64.RawURLEncoding.DecodeString(sig.Signature)
 		if err != nil {
-			return "", "", fmt.Errorf("sig[%d]: invalid signature encoding: %w", i, err)
+			log.Infof("invalid signature encoding in JWS signature: %v", err)
+			continue
 		}
 
 		signingInput := sig.Protected + "." + jws.Payload
 		recoveredAddr, err := v.recoverAddressFromInput(signingInput, signatureBytes)
 		if err != nil {
-			return "", "", fmt.Errorf("sig[%d]: signature verification failed: %w", i, err)
+			log.Infof("signature verification failed in JWS signature: %v", err)
+			continue
 		}
 
 		// Return the first valid recovered address
 		return recoveredAddr, payload.QueryHash, nil
 	}
-	return "", "", errors.New("no valid signatures")
+	return "", "", errors.New("no valid signatures found")
 }
 
 func (v *EthValidator) verifyPayloadTimeAndAlg(header JWSHeader, payload JWSPayload) error {

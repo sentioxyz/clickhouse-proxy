@@ -232,7 +232,7 @@ The `demo/` directory contains tools to test the auth flow without a real ClickH
 ### 1. Start Mock Server
 Simulates a ClickHouse server that accepts any login (for testing rewrites).
 ```bash
-go run demo/mock_server.go
+go run demo/mock_server/main.go
 ```
 
 ### 2. Start Proxy
@@ -244,5 +244,5 @@ go run . -config demo/proxy_auth.json
 ### 3. Run Verify Client
 Generates a fresh token with a private key and executes a query.
 ```bash
-go run demo/verify_client.go -addr 127.0.0.1:9002 -query "SELECT 1"
+go run demo/verify_client/main.go -addr 127.0.0.1:9002 -query "SELECT 1"
 ```
