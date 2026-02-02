@@ -1,0 +1,11 @@
+{
+    "listen": ":9001",
+    "upstream": "127.0.0.1:19000",
+    "auth_enabled": true,
+    "users": {
+        "0x2932a8aad29e41b90a447e586651587bea3eb11e": {
+            "clickhouse_user": "swapped_user",
+            "clickhouse_password": "swapped_secret"
+        }
+    }
+}

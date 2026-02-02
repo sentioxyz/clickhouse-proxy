@@ -1,67 +1,72 @@
 # ClickHouse Auth Proxy
 
-ClickHouse Proxy with **JWK/Ethereum Signature Authentication** support. This proxy sits between clients and ClickHouse, validating requests using Ethereum-style secp256k1 signatures (JWS tokens).
+ClickHouse Proxy with **Ethereum Signature Authentication** support. This proxy sits between clients and ClickHouse, intercepting the handshake to authenticate users via Ethereum SECP256K1 signatures (JWS tokens) and transparently swapping credentials for upstream connection.
 
 ## Features
 
-- **Ethereum Signature Auth**: Validates queries using ES256K (secp256k1) signatures
-- **Multi-Signature Support**: Supports JWS JSON Serialization for multi-sig authorization
-- **Allowlist**: Only whitelisted Ethereum addresses can execute queries
-- **Token Expiration**: Configurable max token age
-- **No-Auth Mode**: Optional bypass for requests without tokens (`auth_allow_no_auth`)
-- **Backward Compatible**: Works with standard ClickHouse clients
+- **Credential Swapping**: Clients connect using Ethereum Address (User) and JWS Token (Password). Proxy authenticates them and swaps to real ClickHouse credentials.
+- **Query Verification**: Enforces that the executed query matches the hash signed in the JWS token.
+- **Ethereum Signature Auth**: Validates queries using ES256K (secp256k1) signatures.
+- **Multi-Signature Support**: Supports JWS JSON Serialization for multi-sig authorization.
+- **Allowlist**: Only whitelisted Ethereum addresses can execute queries.
+- **Token Expiration**: Configurable max token age.
+- **Backward Compatible**: Works with standard ClickHouse clients (CLI, JDBC, Go, Python, etc.) without modification.
 
 ## Quick Start
 
-### 1. Build Auth Proxy
+### 1. Build
 
 ```bash
-# Build and push with auth-{commit_id} tag
-make auth_proxy
-
-# Or manually:
-make docker-auth
-make push-auth
+make build
+# or
+go build -o ck-proxy .
 ```
 
 ### 2. Configuration
 
-Create a config file (see `jwk_proxy_config.json` for example):
+Create a config file (e.g., `config.json`):
 
 ```json
 {
-  "listen": ":9002",
-  "upstream": "127.0.0.1:9000",
+  "listen": ":9000",
+  "upstream": "127.0.0.1:19000",
   "auth_enabled": true,
   "auth_allowed_addresses": [
     "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
     "0x86cE23361B15507dDbf734EE32904312C6A16eE3"
   ],
-  "auth_max_token_age": "1m",
-  "auth_allow_no_auth": false
+  "users": {
+    "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23": {
+      "clickhouse_user": "default",
+      "clickhouse_password": ""
+    }
+  },
+  "auth_max_token_age": "5m"
 }
 ```
 
-### 3. Configuration Options
+### 3. Client Usage
 
-| Field | Type | Default | Description |
-|-------|------|---------|-------------|
-| `auth_enabled` | bool | `false` | Enable authentication |
-| `auth_allowed_addresses` | []string | `[]` | Ethereum addresses allowed to execute queries |
-| `auth_max_token_age` | string | `"1m"` | Max age of JWS tokens (e.g., `"1m"`, `"30s"`) |
-| `auth_allow_no_auth` | bool | `false` | If true, requests without tokens pass through |
+Clients authenticate by passing:
+- **Username**: Your Ethereum Address (e.g. `0x2c...`)
+- **Password**: Your JWS Token
 
-### 4. Client Usage
+Example with ClickHouse CLI:
 
-Clients must pass a JWS token via the `SQL_x_auth_token` custom setting (changed from `x_auth_token` to avoid ClickHouse unknown setting error):
-
-```go
-// Using clickhouse-go SDK
-ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
-    "SQL_x_auth_token": clickhouse.CustomSetting{Value: jwsToken},
-}))
-rows, err := conn.Query(ctx, "SELECT 1")
+```bash
+clickhouse-client --host 127.0.0.1 --port 9000 \
+  --user "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23" \
+  --password "eyJhbGciOiJFUzI1..." \
+  --query "SELECT 1"
 ```
+
+The proxy will:
+1. Verify the JWS token signature against the Ethereum address.
+2. Verify the token is not expired.
+3. Check if the address is in `auth_allowed_addresses` (if configured).
+4. Look up the `users` mapping to find the real ClickHouse credentials (`default` / `""`).
+5. Rewrite the Hello packet with the real credentials and forward to upstream.
+6. Verify that the query hash in the token matches the query being executed.
 
 ## JWS Token Format
 
@@ -86,36 +91,24 @@ BASE64(header).BASE64(payload).BASE64(signature)
 
 **Signature:** 65-byte recoverable ECDSA signature (R || S || V)
 
-### JSON Serialization (Multi-Signature)
+## Demo & Testing
 
-```json
-{
-  "payload": "BASE64_PAYLOAD",
-  "signatures": [
-    {"protected": "BASE64_HEADER", "signature": "BASE64_SIG"},
-    {"protected": "BASE64_HEADER", "signature": "BASE64_SIG"}
-  ]
-}
+The `demo/` directory contains tools to test the auth flow without a real ClickHouse server.
+
+### 1. Start Mock Server
+Simulates a ClickHouse server that accepts any login (for testing rewrites).
+```bash
+go run demo/mock_server.go
 ```
 
-All signatures must be valid and from allowed addresses.
-
-## Testing
-
-Run the test client:
-
+### 2. Start Proxy
+Connects to Mock Server, validates tokens using `demo/proxy_auth.json`.
 ```bash
-cd tests/auth_test_client
-go run main.go -addr 127.0.0.1:9002
+go run . -config demo/proxy_auth.json
 ```
 
-## Kubernetes Deployment
-
-See `auth_ck.yaml` for a complete Kubernetes example with:
-- ConfigMap for proxy config
-- Sidecar container in ClickHouseInstallation
-- Service port mappings
-
+### 3. Run Verify Client
+Generates a fresh token with a private key and executes a query.
 ```bash
-kubectl apply -f auth_ck.yaml
+go run demo/verify_client.go -addr 127.0.0.1:9002 -query "SELECT 1"
 ```

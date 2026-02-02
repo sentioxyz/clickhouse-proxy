@@ -1,0 +1,25 @@
+package main
+
+import (
+	"fmt"
+	"log"
+
+	"github.com/ethereum/go-ethereum/crypto"
+)
+
+func main() {
+	// 1. 生成新的私钥
+	privateKey, err := crypto.GenerateKey()
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 2. 获取 Hex 格式的私钥字符串 (请妥善保管!)
+	privBytes := crypto.FromECDSA(privateKey)
+	privHex := fmt.Sprintf("%x", privBytes)
+	fmt.Printf("Private Key (私钥): %s\\n", privHex)
+
+	// 3. 获取对应的公钥地址 (用于配置白名单)
+	address := crypto.PubkeyToAddress(privateKey.PublicKey).Hex()
+	fmt.Printf("Address (地址):     %s\\n", address)
+}
