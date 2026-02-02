@@ -34,6 +34,9 @@ type QueryMeta struct {
 
 	// Settings contains query settings extracted from the ClickHouse protocol.
 	Settings map[string]string
+
+	// Parameters contains query parameters extracted from the ClickHouse protocol.
+	Parameters map[string]string
 }
 
 type Validator interface {
@@ -114,6 +117,12 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 	}
 
 	token, ok := meta.Settings[AuthTokenSettingKey]
+	if !ok || token == "" {
+		if meta.Parameters != nil {
+			token, ok = meta.Parameters[AuthTokenSettingKey]
+		}
+	}
+
 	if !ok || token == "" {
 		if v.AllowNoAuth {
 			log.Infof("[eth_validator] no auth token, allowing due to allow_no_auth=true")

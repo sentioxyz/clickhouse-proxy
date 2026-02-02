@@ -1,0 +1,26 @@
+<clickhouse>
+    <logger>
+        <level>information</level>
+        <console>1</console>
+    </logger>
+    
+    <listen_host>0.0.0.0</listen_host>
+    <http_port>8123</http_port>
+    <tcp_port>9000</tcp_port>
+
+
+    <users_config>/etc/clickhouse-server/users.xml</users_config>
+
+    <remote_servers>
+        <cluster_b>
+            <shard>
+                <replica>
+                    <host>proxy-b</host>
+                    <port>9000</port>
+                    <user>test_user</user>
+                    <password>password123</password>
+                </replica>
+            </shard>
+        </cluster_b>
+    </remote_servers>
+</clickhouse>

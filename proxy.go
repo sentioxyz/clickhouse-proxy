@@ -118,8 +118,9 @@ func (c *countingReader) Read(p []byte) (int, error) {
 
 // ParsedQuery holds the parsed SQL body and settings from a ClickHouse Query packet.
 type ParsedQuery struct {
-	SQL      string
-	Settings map[string]string
+	SQL        string
+	Settings   map[string]string
+	Parameters map[string]string
 }
 
 // queryParser incrementally decodes Hello/Query packets to extract accurate SQL bodies and settings.
@@ -213,30 +214,30 @@ func (p *queryParser) skipAddendum() (consumed int, ok bool, err error) {
 	return offset, true, nil
 }
 
-func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int, error) {
+func decodeQueryBody(data []byte, version int, forceSettings bool) (string, map[string]string, int, error) {
 	cr := &countingReader{r: bytes.NewReader(data)}
 	r := proto.NewReader(cr)
 
 	// QueryID
 	if _, err := r.Str(); err != nil {
-		return "", cr.n, err
+		return "", nil, cr.n, err
 	}
 
 	if proto.FeatureClientWriteInfo.In(version) {
 		var info proto.ClientInfo
 		if err := info.DecodeAware(r, version); err != nil {
-			return "", cr.n, err
+			return "", nil, cr.n, err
 		}
 	}
 
 	if !proto.FeatureSettingsSerializedAsStrings.In(version) && !forceSettings {
-		return "", cr.n, errors.New("settings not serialized as strings")
+		return "", nil, cr.n, errors.New("settings not serialized as strings")
 	}
 
 	for {
 		var s proto.Setting
 		if err := s.Decode(r); err != nil {
-			return "", cr.n, err
+			return "", nil, cr.n, err
 		}
 		if s.Key == "" {
 			break
@@ -245,41 +246,44 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 
 	if proto.FeatureInterserverExternallyGrantedRoles.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", cr.n, err
+			return "", nil, cr.n, err
 		}
 	}
 
 	if proto.FeatureInterServerSecret.In(version) {
 		if _, err := r.Str(); err != nil {
-			return "", cr.n, err
+			return "", nil, cr.n, err
 		}
 	}
 
 	if _, err := r.UVarInt(); err != nil { // Stage
-		return "", cr.n, err
+		return "", nil, cr.n, err
 	}
 	if _, err := r.UVarInt(); err != nil { // Compression
-		return "", cr.n, err
+		return "", nil, cr.n, err
 	}
 
 	body, err := r.Str()
 	if err != nil {
-		return "", cr.n, err
+		return "", nil, cr.n, err
 	}
 
+	var params map[string]string
 	if proto.FeatureParameters.In(version) {
+		params = make(map[string]string)
 		for {
 			var p proto.Parameter
 			if err := p.Decode(r); err != nil {
-				return "", cr.n, err
+				return "", nil, cr.n, err
 			}
 			if p.Key == "" {
 				break
 			}
+			params[p.Key] = p.Value
 		}
 	}
 
-	return body, cr.n, nil
+	return body, params, cr.n, nil
 }
 
 func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
@@ -351,9 +355,9 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
-				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
+				body, params, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
 				if derr == nil {
-					out = append(out, ParsedQuery{SQL: body, Settings: nil})
+					out = append(out, ParsedQuery{SQL: body, Settings: nil, Parameters: params})
 					p.consumeBuf(n + consumed)
 					continue
 				}
@@ -367,7 +371,12 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 			for _, s := range q.Settings {
 				settings[s.Key] = s.Value
 			}
-			out = append(out, ParsedQuery{SQL: q.Body, Settings: settings})
+			// Extract parameters from proto.Query
+			params := make(map[string]string)
+			for _, param := range q.Parameters {
+				params[param.Key] = param.Value
+			}
+			out = append(out, ParsedQuery{SQL: q.Body, Settings: settings, Parameters: params})
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
 		case 3, 4: // Cancel or Ping
@@ -640,6 +649,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					Raw:          append([]byte(nil), chunk...),
 					SQL:          parsed.SQL,
 					Settings:     parsed.Settings,
+					Parameters:   parsed.Parameters,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
