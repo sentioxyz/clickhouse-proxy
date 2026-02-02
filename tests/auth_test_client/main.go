@@ -18,7 +18,7 @@ import (
 
 const (
 	// AuthTokenSettingKey is the setting key used to pass the JWS authentication token.
-	AuthTokenSettingKey = "x_auth_token"
+	AuthTokenSettingKey = "SQL_x_auth_token"
 
 	// Second Correct Private Key (needs to be added to verify multisig effectively)
 	// We will repurpose the existing "Correct" key and add a new one.

@@ -53,12 +53,12 @@ Create a config file (see `jwk_proxy_config.json` for example):
 
 ### 4. Client Usage
 
-Clients must pass a JWS token via the `x_auth_token` custom setting:
+Clients must pass a JWS token via the `SQL_x_auth_token` custom setting (changed from `x_auth_token` to avoid ClickHouse unknown setting error):
 
 ```go
 // Using clickhouse-go SDK
 ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
-    "x_auth_token": clickhouse.CustomSetting{Value: jwsToken},
+    "SQL_x_auth_token": clickhouse.CustomSetting{Value: jwsToken},
 }))
 rows, err := conn.Query(ctx, "SELECT 1")
 ```

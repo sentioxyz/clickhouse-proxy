@@ -53,7 +53,7 @@ func (NoopValidator) ValidateQuery(_ context.Context, meta QueryMeta) error {
 }
 
 // AuthTokenSettingKey is the setting key used to pass the JWS authentication token.
-const AuthTokenSettingKey = "x_auth_token"
+const AuthTokenSettingKey = "SQL_x_auth_token"
 
 // JWSHeader represents the header of a JWS token.
 type JWSHeader struct {
