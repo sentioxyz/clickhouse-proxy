@@ -613,17 +613,71 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, upstreamConn net.Conn) {
 	buf := make([]byte, 64*1024)
 	parser := &queryParser{}
+
+	// Handshake State
+	handshakeDone := false
+	var expectedHash string
+	// Buffer for any data read during handshake that wasn't part of Hello
+	var bufferedData []byte
+
 	for {
 		if p.cfg.IdleTimeout.Duration > 0 {
 			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 		}
-		n, readErr := clientConn.Read(buf)
+
+		var n int
+		var readErr error
+
+		// If we have buffered data from handshake, use it first
+		if len(bufferedData) > 0 {
+			n = copy(buf, bufferedData)
+			bufferedData = nil // consume all
+			readErr = nil
+		} else {
+			n, readErr = clientConn.Read(buf)
+		}
+
 		if n > 0 {
 			chunk := buf[:n]
-			pkt := detectPacketType(chunk)
+
+			// Handshake Interception for the first packet(s)
+			if !handshakeDone {
+				// Try to detect/process Hello packet
+				pkt := detectPacketType(chunk)
+				if pkt == "Hello" {
+					// Attempt to rewrite credentials
+					newChunk, qHash, err := p.processHello(chunk, id)
+					if err != nil {
+						log.Infof("[conn %d] handshake processing failed: %v", id, err)
+						// If strict, we could close. For now, maybe just forward original?
+						// But if validation failed, we should probably close.
+						// Let's forward original and let upstream reject if auth fails,
+						// UNLESS it's a critical error.
+					} else {
+						if newChunk != nil {
+							chunk = newChunk
+							log.Infof("[conn %d] Hello packet rewritten (Credential Swapping)", id)
+						}
+						if qHash != "" {
+							expectedHash = qHash
+							log.Infof("[conn %d] Session bound to query hash: %s", id, qHash)
+						}
+					}
+					handshakeDone = true
+				} else if pkt != "unknown" {
+					// If we see other known packets (unlikely before Hello), mark handshake done?
+					// ClickHouse protocol starts with Hello.
+					// If we receive 'unknown' it might be partial Hello.
+					// For now, if it's not Hello, we assume we missed it or it's partial.
+					// Simplification: assume first packet is Hello.
+					handshakeDone = true
+				}
+			}
+
+			pkt := detectPacketType(chunk) // Re-detect in case we changed it (though unlikely to change type)
 			p.stats.inc(pkt)
 			p.observer.ClientPacket(pkt)
-			p.observer.BytesTransferred("client_to_upstream", float64(n))
+			p.observer.BytesTransferred("client_to_upstream", float64(len(chunk)))
 
 			// Feed all chunks to parser to capture Hello + Query accurately.
 			// Parsed SQL will be validated through the Validator.
@@ -633,13 +687,14 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			}
 			for _, parsed := range sqls {
 				meta := QueryMeta{
-					ConnID:       id,
-					ClientAddr:   clientConn.RemoteAddr().String(),
-					UpstreamAddr: p.cfg.Upstream,
-					QueryPreview: parsed.SQL,
-					Raw:          append([]byte(nil), chunk...),
-					SQL:          parsed.SQL,
-					Settings:     parsed.Settings,
+					ConnID:            id,
+					ClientAddr:        clientConn.RemoteAddr().String(),
+					UpstreamAddr:      p.cfg.Upstream,
+					QueryPreview:      parsed.SQL,
+					Raw:               append([]byte(nil), chunk...),
+					SQL:               parsed.SQL,
+					Settings:          parsed.Settings,
+					ExpectedQueryHash: expectedHash,
 				}
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
@@ -678,6 +733,107 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			return
 		}
 	}
+}
+
+// processHello attempts to decode, validate, and rewrite a Hello packet.
+// Returns rewritten chunk (if changed), authorized query hash (if any), and error.
+func (p *proxy) processHello(chunk []byte, connID int64) ([]byte, string, error) {
+	// Basic check ensuring it looks like Hello
+	// 0 = Hello packet type (Uvarint)
+	// If chunk contains more than Hello, we need to be careful.
+	// For rewriting, we decode ONLY the Hello part, then re-encode it, then append the rest.
+	//
+	// NOTE: This simple implementation assumes the initial Hello packet arrives in the first
+	// read chunk. If the Hello packet is fragmented at the TCP level (unlikely for the
+	// small Hello packet, but possible), detectPacketType might return "unknown" or
+	// this function might fail to decode. For production robustness, a buffering
+	// reader that peeks until full packet length is available would be better.
+
+	// Use counting reader
+	cr := &countingReader{r: bytes.NewReader(chunk[1:])} // skip type byte
+	r := proto.NewReader(cr)
+	var hello proto.ClientHello
+	if err := hello.Decode(r); err != nil {
+		return nil, "", err
+	}
+
+	// Try to authenticate via EthValidator
+	ethVal, ok := p.validator.(*EthValidator)
+	if !ok || !ethVal.Enabled {
+		return nil, "", nil
+	}
+
+	// Attempt verification handling:
+	// 1. Check if we have Users mapping for hello.User (treat User as Address)
+	// 2. Validate hello.Password as Token
+
+	// We only intervene if we can verify the token.
+	token := hello.Password
+	addr, qHash, err := ethVal.VerifyToken(token)
+	if err != nil {
+		// Token verification failed.
+		// We do NOT block here if we want to allow normal auth fallback,
+		// BUT if it looks like an Eth address, maybe we should warn?
+		// Usage: User puts Address in Username, Token in Password.
+		// If verify fails, maybe it's a real password?
+		// Let's just return nil to pass through.
+		return nil, "", nil
+	}
+
+	// Token verified. Check mapping.
+	userCfg, ok := p.cfg.Users[addr] // addr is already normalized/lowercase from VerifyToken? VerifyToken returns normalized?
+	// VerifyToken returns normalized? Let's check validator.go.
+	// validator.RecoverAddress returns lowercase.
+	// Map keys in config should be lowercase? Unmarshaling might not enforce.
+	// We should normalize lookup.
+
+	if !ok {
+		// Try to look up lowercase in case config has mixed case
+		for k, v := range p.cfg.Users {
+			if strings.EqualFold(k, addr) {
+				userCfg = v
+				ok = true
+				break
+			}
+		}
+	}
+
+	if !ok {
+		// Authenticated but no mapping found?
+		// Should we fail or pass through?
+		log.Infof("[conn %d] Address %s authenticated but no user mapping found", connID, addr)
+		return nil, qHash, nil // We still return qHash to enforce hash constraint!
+	}
+
+	// Mapping found. Rewrite credentials.
+	log.Infof("[conn %d] Swapping credentials for %s -> %s", connID, addr, userCfg.ClickHouseUser)
+	hello.User = userCfg.ClickHouseUser
+	hello.Password = userCfg.ClickHousePassword
+
+	// Re-encode
+	var buf bytes.Buffer
+	// Log the decoded hello
+	log.Infof("[conn %d] Decoded Hello: %+v", connID, hello)
+
+	// Proto buffer for encoding hello
+	var pb proto.Buffer
+	hello.Encode(&pb)
+
+	log.Infof("[conn %d] Encoded Hello Hex: % X", connID, pb.Buf)
+
+	// Write encoded hello to our main buffer
+	buf.Write(pb.Buf)
+
+	// Calculate consumed bytes *before* logging and appending
+	consumed := 1 + cr.n
+	log.Infof("[conn %d] Hello Rewrite: Original Len %d, Consumed %d, New Len %d", connID, len(chunk), consumed, buf.Len())
+
+	// Append any remaining bytes from original chunk (pipelining)
+	if consumed < len(chunk) {
+		buf.Write(chunk[consumed:])
+	}
+
+	return buf.Bytes(), qHash, nil
 }
 
 func (p *proxy) logPacket(id int64, clientAddr string, pktType string, chunk []byte) {

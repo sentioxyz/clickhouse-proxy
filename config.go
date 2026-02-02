@@ -23,11 +23,20 @@ type Config struct {
 	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
 	MetricsListen    string   `json:"metrics_listen"`
 
+	// Users maps Ethereum addresses (or other identifiers) to backend ClickHouse credentials.
+	// Key: External User (e.g. 0xAddress), Value: Internal Credentials
+	Users map[string]UserConfig `json:"users"`
+
 	// Authentication configuration
 	AuthEnabled          bool     `json:"auth_enabled"`
 	AuthAllowedAddresses []string `json:"auth_allowed_addresses"`
 	AuthMaxTokenAge      Duration `json:"auth_max_token_age"`
 	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"` // If true, requests without auth token are allowed
+}
+
+type UserConfig struct {
+	ClickHouseUser     string `json:"clickhouse_user"`
+	ClickHousePassword string `json:"clickhouse_password"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -78,6 +87,7 @@ func defaultConfig() Config {
 		AuthAllowedAddresses: nil,
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
 		AuthAllowNoAuth:      false,
+		Users:                make(map[string]UserConfig),
 	}
 }
 
