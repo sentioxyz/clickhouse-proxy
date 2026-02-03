@@ -620,6 +620,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 		n, readErr := clientConn.Read(buf)
 		if n > 0 {
 			chunk := buf[:n]
+
 			pkt := detectPacketType(chunk)
 			p.stats.inc(pkt)
 			p.observer.ClientPacket(pkt)
@@ -641,6 +642,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					SQL:          parsed.SQL,
 					Settings:     parsed.Settings,
 				}
+				log.Infof("[conn %d] Processing parsed packet. SQL: %q, Settings: %v", id, parsed.SQL, parsed.Settings)
 				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
@@ -654,6 +656,13 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			if p.cfg.LogData && pkt == "Data" {
 				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
 			}
+
+			// Raw Patching: Strip/Replace Authentication Tokens
+			// AFTER validation, BEFORE forwarding.
+			// 1. x_auth_token (12) -> promql_table (12)
+			chunk = replaceToken(chunk, "x_auth_token", "promql_table")
+			// 2. SQL_x_auth_token (16) -> promql_table (12)
+			chunk = replaceToken(chunk, "SQL_x_auth_token", "promql_table")
 
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -699,10 +708,36 @@ func isTimeout(err error) bool {
 	if err == nil {
 		return false
 	}
-	if nerr, ok := err.(net.Error); ok && nerr.Timeout() {
+	if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 	return false
+}
+
+// replaceToken replaces all occurrences of a length-prefixed key with another key,
+// adjusting the length prefix and shifting the byte slice accordingly.
+// It searches for [UVarInt(len(oldKey))][oldKey] and replaces it with [UVarInt(len(newKey))][newKey].
+func replaceToken(data []byte, oldKey, newKey string) []byte {
+	// Construct search sequence
+	oldKeyBytes := []byte(oldKey)
+	oldLenBuf := make([]byte, binary.MaxVarintLen64)
+	nOld := binary.PutUvarint(oldLenBuf, uint64(len(oldKeyBytes)))
+	searchSeq := make([]byte, nOld+len(oldKeyBytes))
+	copy(searchSeq, oldLenBuf[:nOld])
+	copy(searchSeq[nOld:], oldKeyBytes)
+
+	// Construct replace sequence
+	newKeyBytes := []byte(newKey)
+	newLenBuf := make([]byte, binary.MaxVarintLen64)
+	nNew := binary.PutUvarint(newLenBuf, uint64(len(newKeyBytes)))
+	replaceSeq := make([]byte, nNew+len(newKeyBytes))
+	copy(replaceSeq, newLenBuf[:nNew])
+	copy(replaceSeq[nNew:], newKeyBytes)
+
+	return bytes.ReplaceAll(data, searchSeq, replaceSeq)
 }
 
 func printStats(stats *packetStats) {
