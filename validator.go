@@ -115,6 +115,10 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 
 	token, ok := meta.Settings[AuthTokenSettingKey]
 	if !ok || token == "" {
+		// Fallback to "x_auth_token"
+		token, ok = meta.Settings["x_auth_token"]
+	}
+	if !ok || token == "" {
 		if v.AllowNoAuth {
 			log.Infof("[eth_validator] no auth token, allowing due to allow_no_auth=true")
 			return nil
