@@ -282,170 +282,104 @@ func decodeQueryBody(data []byte, version int, forceSettings bool) (string, int,
 	return body, cr.n, nil
 }
 
-// transform consumes the input chunk and returns the data that should be forwarded to upstream.
-// If the parser detects a Query packet, it strips the auth token from settings before re-encoding.
-// If the parser is disabled or encounters unknown packets, it acts as a passthrough.
-func (p *queryParser) transform(chunk []byte) ([]byte, []ParsedQuery, error) {
+func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 	if p.disabled {
-		return chunk, nil, nil
+		return nil, nil
 	}
 
 	p.buf = append(p.buf, chunk...)
+
 	if len(p.buf) > maxParserBufSize {
-		p.disabled = true
-		// Return everything we have so far and stop parsing
-		out := p.buf
 		p.resetBuf()
-		return out, nil, errors.New("parser buffer exceeded max size, disabling parser and flushing buffer")
+		p.disabled = true
+		return nil, errors.New("parser buffer exceeded max size, discarding, parser disabled")
 	}
 
-	var outBytes []byte
-	var outQueries []ParsedQuery
+	var out []ParsedQuery
 	var decodeErr error
-
-	// Process as many packets as possible from p.buf
 	for {
-		if len(p.buf) == 0 {
-			break
-		}
-
 		if p.version != 0 && !p.addendumDone && proto.FeatureAddendum.In(p.version) {
 			consumed, ok, err := p.skipAddendum()
 			if err != nil {
 				decodeErr = err
-				p.disabled = true
-				outBytes = append(outBytes, p.buf...)
 				p.resetBuf()
-				return outBytes, outQueries, decodeErr
+				p.disabled = true
+				return out, decodeErr
 			}
 			if !ok {
-				// Not enough data for addendum
-				break
+				return out, decodeErr
 			}
 			p.addendumDone = true
-			// Write the addendum bytes to output
-			outBytes = append(outBytes, p.buf[:consumed]...)
 			p.consumeBuf(consumed)
 			if len(p.buf) == 0 {
-				break
+				return out, decodeErr
 			}
 		}
 
-		// Peek type
 		typ, n := binary.Uvarint(p.buf)
 		if n <= 0 {
-			break
+			return out, decodeErr
 		}
 
 		switch typ {
 		case 0: // Hello
-			log.Infof("Proxy: Processing Hello packet")
 			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
 			r := proto.NewReader(cr)
 			var hello proto.ClientHello
 			if err := hello.Decode(r); err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-					// Incomplete packet
-					goto WaitForMore
+					return out, decodeErr
 				}
-				// Decode error
 				decodeErr = err
-				p.disabled = true
-				outBytes = append(outBytes, p.buf...)
 				p.resetBuf()
-				return outBytes, outQueries, decodeErr
+				p.disabled = true
+				return out, decodeErr
 			}
 			p.version = hello.ProtocolVersion
-
-			// Packet fully read.
-			totalLen := n + cr.n
-			outBytes = append(outBytes, p.buf[:totalLen]...)
-			p.consumeBuf(totalLen)
-
+			consumed := n + cr.n
+			p.consumeBuf(consumed)
 		case 1: // Query
 			if p.version == 0 {
-				// Should have seen Hello first. Treat as unknown/passthrough.
-				p.disabled = true
-				outBytes = append(outBytes, p.buf...)
 				p.resetBuf()
-				return outBytes, outQueries, decodeErr
+				p.disabled = true
+				return out, decodeErr
 			}
 			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
 			r := proto.NewReader(cr)
 			var q proto.Query
 			if err := q.DecodeAware(r, p.version); err != nil {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
-					goto WaitForMore
+					return out, decodeErr
 				}
-				p.disabled = true
-				outBytes = append(outBytes, p.buf...)
-				p.resetBuf()
-				body, _, derr := decodeQueryBody(p.buf[n:], p.version, true)
+				body, consumed, derr := decodeQueryBody(p.buf[n:], p.version, true)
 				if derr == nil {
-					outQueries = append(outQueries, ParsedQuery{SQL: body})
-				}
-				return outBytes, outQueries, err
-			}
-
-			// Successfully decoded Query.
-			// 1. Extract info for validation/logging
-			settings := make(map[string]string)
-			for _, s := range q.Settings {
-				// Normalize x_auth_token to SQL_x_auth_token for validation purposes
-				if s.Key == "x_auth_token" {
-					settings["SQL_x_auth_token"] = s.Value
-				} else {
-					settings[s.Key] = s.Value
-				}
-			}
-			outQueries = append(outQueries, ParsedQuery{SQL: q.Body, Settings: settings})
-
-			// 2. STRIP AUTH TOKEN
-			// Filter out x_auth_token from q.Settings slice
-			newSettings := make([]proto.Setting, 0, len(q.Settings))
-			for _, s := range q.Settings {
-				if s.Key == "x_auth_token" || s.Key == "SQL_x_auth_token" {
+					out = append(out, ParsedQuery{SQL: body, Settings: nil})
+					p.consumeBuf(n + consumed)
 					continue
 				}
-				newSettings = append(newSettings, s)
+				decodeErr = err
+				p.resetBuf()
+				p.disabled = true
+				return out, decodeErr
 			}
-			q.Settings = newSettings
-
-			// 3. Re-encode the Query packet
-			var outPkt []byte
-			// Note: q.EncodeAware writes the Packet Type (ClientCodeQuery = 1) internally.
-			// So we do NOT need to write it manually.
-
-			// Re-encode Body
-			var pb proto.Buffer
-			q.EncodeAware(&pb, p.version)
-			// Note: q.EncodeAware returns no value.
-			outPkt = append(outPkt, pb.Buf...)
-
-			// 4. Write new packet to output
-			outBytes = append(outBytes, outPkt...)
-
-			// 5. Consume original packet from input buffer
-			packetLen := n + cr.n
-			p.consumeBuf(packetLen)
-
-		case 3, 4: // Ping/Cancel
-			// Just Type byte.
-			outBytes = append(outBytes, p.buf[:n]...)
+			// Extract settings from proto.Query
+			settings := make(map[string]string)
+			for _, s := range q.Settings {
+				settings[s.Key] = s.Value
+			}
+			out = append(out, ParsedQuery{SQL: q.Body, Settings: settings})
+			consumed := n + cr.n
+			p.consumeBuf(consumed)
+		case 3, 4: // Cancel or Ping
+			// These packets have no body, just consume the type byte.
 			p.consumeBuf(n)
-
 		default:
-			// Unknown packet type (e.g. Data).
-			// Stop parsing, flush everything.
-			p.disabled = true
-			outBytes = append(outBytes, p.buf...)
+			// Unknown packet type (e.g., Data); reset to release memory.
 			p.resetBuf()
-			return outBytes, outQueries, nil
+			p.disabled = true
+			return out, decodeErr
 		}
 	}
-
-WaitForMore:
-	return outBytes, outQueries, decodeErr
 }
 
 // detectPacketType tries to read a ClickHouse packet type from the beginning.
@@ -693,8 +627,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 
 			// Feed all chunks to parser to capture Hello + Query accurately.
 			// Parsed SQL will be validated through the Validator.
-			// now transform returns the data to be forwarded (maybe modified)
-			forwardData, sqls, perr := parser.transform(chunk)
+			sqls, perr := parser.feed(chunk)
 			if perr != nil {
 				log.Infof("[conn %d] query decode warning: %v", id, perr)
 			}
@@ -704,7 +637,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					ClientAddr:   clientConn.RemoteAddr().String(),
 					UpstreamAddr: p.cfg.Upstream,
 					QueryPreview: parsed.SQL,
-					Raw:          append([]byte(nil), chunk...), // Note: this raw might be partial or mixed
+					Raw:          append([]byte(nil), chunk...),
 					SQL:          parsed.SQL,
 					Settings:     parsed.Settings,
 				}
@@ -722,20 +655,17 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
 			}
 
-			if len(forwardData) > 0 {
-				if p.cfg.IdleTimeout.Duration > 0 {
-					_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
-				}
-				if _, err := upstreamConn.Write(forwardData); err != nil {
-					log.Infof("[conn %d] client->upstream write error: %v", id, err)
-					p.observer.Error("upstream_write", err)
-					return
-				}
-				// If we successfully wrote a Query packet, increment the forwarded metric
-				// Approximate check: if we parsed any SQLs, we forwarded a query.
-				if len(sqls) > 0 {
-					p.observer.QueryForwarded()
-				}
+			if p.cfg.IdleTimeout.Duration > 0 {
+				_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+			}
+			if _, err := upstreamConn.Write(chunk); err != nil {
+				log.Infof("[conn %d] client->upstream write error: %v", id, err)
+				p.observer.Error("upstream_write", err)
+				return
+			}
+			// If we successfully wrote a Query packet, increment the forwarded metric
+			if pkt == "Query" {
+				p.observer.QueryForwarded()
 			}
 		}
 		if readErr != nil {
