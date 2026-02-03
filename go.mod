@@ -1,6 +1,6 @@
 module ck_remote_proxy
 
-go 1.25.3
+go 1.24.2
 
 require (
 	github.com/ClickHouse/ch-go v0.69.0
@@ -31,19 +31,19 @@ require (
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
-	go.opentelemetry.io/otel v1.38.0 // indirect
-	go.opentelemetry.io/otel/trace v1.38.0 // indirect
+	go.opentelemetry.io/otel v1.39.0 // indirect
+	go.opentelemetry.io/otel/trace v1.39.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	go.uber.org/zap v1.27.0 // indirect
+	go.uber.org/zap v1.27.1 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
+	gopkg.in/yaml.v3 v3.0.1 // indirect
 )
 
-replace github.com/ClickHouse/ch-go => github.com/sentioxyz/ch-go v1.0.1
+replace github.com/ClickHouse/ch-go => ../ch-go
 
-replace github.com/ClickHouse/clickhouse-go/v2 => github.com/sentioxyz/clickhouse-go/v2 v2.0.1
+replace github.com/ClickHouse/clickhouse-go/v2 => ../clickhouse-go
 
-replace sentioxyz/sentio-core => github.com/sentioxyz/sentio-core v0.0.0-20251222093952-5940f52963a7
+replace sentioxyz/sentio-core => ../sentio-core-mock

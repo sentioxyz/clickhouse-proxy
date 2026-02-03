@@ -1,0 +1,65 @@
+services:
+  clickhouse-a:
+    image: clickhouse/clickhouse-server:latest
+    container_name: testing-clickhouse-a-1
+    hostname: clickhouse-a
+    ports:
+      - "18123:8123"
+      # Expose 9000 only internally to proxy usually, but mapped here for debugging if needed (via different port)
+      - "19000:9000"
+    volumes:
+      - ./configs/clickhouse-a/config.xml:/etc/clickhouse-server/config.d/custom.xml
+      - ./configs/users.xml:/etc/clickhouse-server/users.d/custom_users.xml
+    networks:
+      - ck-net
+
+  proxy-a:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    container_name: testing-proxy-a-1
+    hostname: proxy-a
+    ports:
+      - "9001:9000" # Host port 9001 -> Proxy A
+    volumes:
+      - ./configs/proxy-a.json:/app/config.json
+      - ./proxy-linux-amd64:/app/ck-proxy
+    command: [ "-config", "/app/config.json" ]
+    depends_on:
+      - clickhouse-a
+    networks:
+      - ck-net
+
+  clickhouse-b:
+    image: clickhouse/clickhouse-server:latest
+    container_name: testing-clickhouse-b-1
+    hostname: clickhouse-b
+    ports:
+      - "28123:8123"
+      - "29000:9000"
+    volumes:
+      - ./configs/clickhouse-b/config.xml:/etc/clickhouse-server/config.d/custom.xml
+      - ./configs/users.xml:/etc/clickhouse-server/users.d/custom_users.xml
+    networks:
+      - ck-net
+
+  proxy-b:
+    build:
+      context: ../
+      dockerfile: Dockerfile
+    container_name: testing-proxy-b-1
+    hostname: proxy-b
+    ports:
+      - "9002:9000" # Host port 9002 -> Proxy B
+    volumes:
+      - ./configs/proxy-b.json:/app/config.json
+      - ./proxy-linux-amd64:/app/ck-proxy
+    command: [ "-config", "/app/config.json" ]
+    depends_on:
+      - clickhouse-b
+    networks:
+      - ck-net
+
+networks:
+  ck-net:
+    driver: bridge
