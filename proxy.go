@@ -21,16 +21,18 @@ import (
 
 // Known client -> server packet types in ClickHouse native protocol.
 var packetNames = map[uint64]string{
-	0: "Hello",
-	1: "Query",
-	2: "Data",
-	3: "Cancel",
-	4: "Ping",
-	5: "TablesStatusRequest",
-	6: "KeepAlive",
-	7: "Scalar",
-	8: "Poll",
-	9: "Data (portable)",
+	0:  "Hello",
+	1:  "Query",
+	2:  "Data",
+	3:  "Cancel",
+	4:  "Ping",
+	5:  "TablesStatusRequest",
+	6:  "KeepAlive",
+	7:  "Scalar",
+	8:  "IgnoredPartUUIDs",
+	9:  "ReadTaskResponse",
+	10: "MergeTreeReadTaskResponse",
+	11: "QueryPlan",
 }
 
 // 预编译正则表达式，避免每次调用时重复编译
@@ -53,6 +55,9 @@ var serverPacketNames = map[uint64]string{
 	12: "PartUUIDs",
 	13: "ReadTaskRequest",
 	14: "ProfileEvents",
+	15: "MergeTreeReadTaskRequest",
+	16: "MergeTreeAllRangesAnnouncement",
+	17: "TimezoneUpdate",
 }
 
 // Build reverse lookup for known packet names to avoid double-printing.
@@ -607,6 +612,15 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 			clientConn.Close()
 			upstreamConn.Close()
 		})
+	}
+
+	// P2-6: 连接级别最大生存时间限制
+	if p.cfg.MaxConnectionLifetime.Duration > 0 {
+		lifetimeTimer := time.AfterFunc(p.cfg.MaxConnectionLifetime.Duration, func() {
+			log.Infof("[conn %d] max connection lifetime (%s) exceeded, closing", id, p.cfg.MaxConnectionLifetime.Duration)
+			closeBoth()
+		})
+		defer lifetimeTimer.Stop()
 	}
 
 	var wg sync.WaitGroup
@@ -1374,6 +1388,11 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 			originalSQL := eq.Body
 
+			// P2-1: 签名验证后截掉 auth token settings，不发送给 ClickHouse Server
+			// 在 streaming 模式下，decode 后移除 token，encode 时自然不会包含
+			eq.Settings = stripAuthTokenSettings(eq.Settings)
+			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
+
 			// SQL 重写
 			if p.rewriter != nil && p.cfg.RewriterEnabled {
 				rewriteStart := time.Now()
@@ -1544,38 +1563,44 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(rbuf)
 
 		case clientCodeMergeTreeReadTaskResponse:
-			// P0-2 Fix: MergeTreeReadTaskResponse 使用 raw passthrough 透传
-			// ClickHouse ParallelReadResponse 的序列化格式非常复杂:
-			//   [version: IntBinary(UInt64)][finish: BoolText][RangesInDataPartsDescription...]
-			// 而 RangesInDataPartsDescription 包含嵌套的 part 信息和 mark ranges。
-			// 之前使用 [segment: UVarInt][mark: UVarInt] 是完全错误的。
-			// 由于格式复杂且依赖 parallel_replicas_protocol_version，
-			// 最安全的做法是退出 streaming 解析，转为 raw passthrough。
+			// P0-3 Fix: MergeTreeReadTaskResponse 使用临时 raw passthrough
+			// 转发 codeByte 后进入临时 raw copy 模式，等待当前查询完成后恢复 streaming
 			p.observer.ClientPacket("MergeTreeReadTaskResponse")
 			p.stats.inc("MergeTreeReadTaskResponse")
-			log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse detected, switching to raw passthrough", id)
+			log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse detected, temporary raw passthrough", id)
 			p.observer.Fallback("mergetree_read_task_response")
 			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
-			return
+			// 临时 raw passthrough —— 等待查询完成后恢复 streaming
+			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCounter) {
+				return
+			}
+			inQuery = false
+			queryCompression = proto.CompressionDisabled
+			log.Infof("[conn %d] streaming: resumed streaming after MergeTreeReadTaskResponse", id)
+			continue
 
 		case clientCodeQueryPlan:
-			// P0-3: QueryPlan 包（ClickHouse 26.x+ serialize_query_plan=1 时发送）
-			// 格式复杂且依赖版本，安全策略是退出 streaming 解析转为 raw passthrough
+			// P0-3 Fix: QueryPlan 也使用临时 raw passthrough
 			p.observer.ClientPacket("QueryPlan")
 			p.stats.inc("QueryPlan")
-			log.Infof("[conn %d] streaming: QueryPlan packet detected, switching to raw passthrough", id)
+			log.Infof("[conn %d] streaming: QueryPlan packet detected, temporary raw passthrough", id)
 			p.observer.Fallback("query_plan")
 			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
-			return
+			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCounter) {
+				return
+			}
+			inQuery = false
+			queryCompression = proto.CompressionDisabled
+			log.Infof("[conn %d] streaming: resumed streaming after QueryPlan", id)
+			continue
 
 		default:
-			log.Warnf("[conn %d] streaming: unknown packet type %d, forwarding + fallback", id, codeByte)
+			// 未知包类型：无法确定包结构边界，仍使用永久 fallback
+			log.Warnf("[conn %d] streaming: unknown packet type %d, forwarding + permanent fallback", id, codeByte)
 			p.observer.Fallback("unknown_packet")
 			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
@@ -1586,7 +1611,55 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	}
 }
 
-// fallbackRawCopy 回退到原始逐 chunk 转发模式。
+// forwardUntilQueryDone 临时 raw passthrough 模式：逐块转发客户端数据到 upstream，
+// 直到 queryDoneCounter 表明当前查询已完成（upstream 返回 EndOfStream/Exception）。
+// 返回 true 表示查询完成可恢复 streaming，false 表示连接错误应退出。
+func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCounter *atomic.Int64) bool {
+	buf := make([]byte, 64*1024)
+	for {
+		// 检查查询是否完成
+		if queryDoneCounter != nil && queryDoneCounter.Swap(0) > 0 {
+			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
+			return true
+		}
+
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+
+		// 使用短超时 Peek 来非阻塞检查是否有数据
+		// 如果没有数据则重复检查 queryDoneCounter
+		if br.Buffered() == 0 {
+			// 没有 buffered 数据，设置短超时来轮询
+			_ = clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+			_, err := br.Peek(1)
+			if err != nil {
+				if isTimeout(err) {
+					// 超时 — 继续循环检查 queryDoneCounter
+					continue
+				}
+				// 真正的错误
+				return false
+			}
+		}
+
+		// 有数据可读，正常转发
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+		n, err := br.Read(buf)
+		if n > 0 {
+			if _, werr := upstreamWriter.Write(buf[:n]); werr != nil {
+				return false
+			}
+		}
+		if err != nil {
+			return false
+		}
+	}
+}
+
+// fallbackRawCopy 回退到原始逐 chunk 转发模式（永久性）。
 // upstreamWriter 可能是 ChunkedWriter（当 chunked 协议启用时），确保 fallback 数据也通过 chunked 层。
 func (p *proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer) {
 	log.Infof("[conn %d] falling back to raw copy mode", id)
@@ -1634,6 +1707,37 @@ func isTimeout(err error) bool {
 		return true
 	}
 	return false
+}
+
+// authTokenKeys 是需要在 streaming 模式下截掉的 auth token setting 键列表。
+var authTokenKeys = map[string]bool{
+	"x_auth_token":     true,
+	"SQL_x_auth_token": true,
+}
+
+// stripAuthTokenSettings 从新格式 Settings 中移除 auth token 相关的 setting。
+// 签名验证已在 proxy 端完成，token 不应发送给 ClickHouse Server。
+func stripAuthTokenSettings(settings []proto.Setting) []proto.Setting {
+	n := 0
+	for _, s := range settings {
+		if !authTokenKeys[s.Key] {
+			settings[n] = s
+			n++
+		}
+	}
+	return settings[:n]
+}
+
+// stripAuthTokenOldSettings 从旧格式 Settings 中移除 auth token 相关的 setting。
+func stripAuthTokenOldSettings(settings []OldSetting) []OldSetting {
+	n := 0
+	for _, s := range settings {
+		if !authTokenKeys[s.Key] {
+			settings[n] = s
+			n++
+		}
+	}
+	return settings[:n]
 }
 
 // replaceToken replaces all occurrences of a length-prefixed key with another key,

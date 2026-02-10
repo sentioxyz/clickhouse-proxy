@@ -497,7 +497,7 @@ func TestDetectServerPacketType(t *testing.T) {
 		{"PartUUIDs", []byte{12}, "PartUUIDs"},
 		{"ReadTaskRequest", []byte{13}, "ReadTaskRequest"},
 		{"ProfileEvents", []byte{14}, "ProfileEvents"},
-		{"unknown type 15", []byte{15}, "type_15"},
+		{"unknown type 15", []byte{15}, "MergeTreeReadTaskRequest"},
 		{"unknown type 31", []byte{31}, "type_31"},
 		{"high bit set", []byte{0x80}, "unknown"},
 	}
@@ -527,10 +527,10 @@ func TestDetectPacketType_V5(t *testing.T) {
 		{"TablesStatusRequest", []byte{5}, "TablesStatusRequest"},
 		{"KeepAlive", []byte{6}, "KeepAlive"},
 		{"Scalar", []byte{7}, "Scalar"},
-		{"Poll", []byte{8}, "Poll"},
-		{"Data portable", []byte{9}, "Data (portable)"},
-		{"unknown type 10", []byte{10}, "type_10"},
-		{"unknown type 11", []byte{11}, "type_11"},
+		{"IgnoredPartUUIDs", []byte{8}, "IgnoredPartUUIDs"},
+		{"ReadTaskResponse", []byte{9}, "ReadTaskResponse"},
+		{"MergeTreeReadTaskResponse", []byte{10}, "MergeTreeReadTaskResponse"},
+		{"QueryPlan", []byte{11}, "QueryPlan"},
 		{"high bit set", []byte{0x80}, "unknown"},
 	}
 

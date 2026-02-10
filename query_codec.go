@@ -13,6 +13,7 @@ package main
 
 import (
 	"fmt"
+	log "sentioxyz/sentio-core/common/log"
 
 	"github.com/ClickHouse/ch-go/proto"
 	"github.com/segmentio/asm/bswap"
@@ -96,11 +97,11 @@ func decodeQueryCustom(r *proto.Reader, revision int) (*ExtQuery, error) {
 			if key == "" {
 				break
 			}
-			val, err := r.UVarInt()
+			val, err := r.Int64()
 			if err != nil {
 				return nil, wrapErr("OldSetting.Value", err)
 			}
-			eq.OldSettings = append(eq.OldSettings, OldSetting{Key: key, Value: val})
+			eq.OldSettings = append(eq.OldSettings, OldSetting{Key: key, Value: uint64(val)})
 		}
 	}
 
@@ -185,7 +186,7 @@ func encodeQueryCustom(b *proto.Buffer, eq *ExtQuery, revision int) {
 		// 旧格式
 		for _, s := range eq.OldSettings {
 			b.PutString(s.Key)
-			b.PutUVarInt(s.Value)
+			b.PutInt64(int64(s.Value))
 		}
 		b.PutString("") // end of settings
 	}
@@ -582,7 +583,12 @@ func decodeBlockInfoCompat(r *proto.Reader) (*BlockInfoCompat, error) {
 			}
 			info.OutOfOrderBuckets = buckets
 		default:
-			return nil, fmt.Errorf("unknown BlockInfo field %d", f)
+			// 容错处理：未知 field ID 尝试跳过一个 UVarInt 值
+			// 当 ClickHouse 新版本添加新 field 时不会导致连接断开
+			log.Warnf("decodeBlockInfoCompat: unknown field %d, attempting to skip", f)
+			if _, err := r.UVarInt(); err != nil {
+				return nil, fmt.Errorf("unknown BlockInfo field %d: skip failed: %w", f, err)
+			}
 		}
 	}
 }

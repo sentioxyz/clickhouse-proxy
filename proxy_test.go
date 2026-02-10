@@ -16,7 +16,7 @@ func TestDetectPacketType(t *testing.T) {
 	}{
 		{name: "query", buf: []byte{1}, want: "Query"},
 		{name: "data", buf: []byte{2}, want: "Data"},
-		{name: "small unknown", buf: []byte{10}, want: "type_10"},
+		{name: "small unknown", buf: []byte{10}, want: "MergeTreeReadTaskResponse"},
 		{name: "unknown when continuation bit set", buf: []byte{0x81, 0x01}, want: "unknown"},
 		{name: "empty", buf: []byte{}, want: "unknown"},
 	}

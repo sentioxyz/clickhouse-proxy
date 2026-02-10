@@ -49,6 +49,11 @@ type Config struct {
 
 	// ValidateChecksum 是否启用压缩数据的 checksum 校验（CityHash128）
 	ValidateChecksum bool `json:"validate_checksum"`
+
+	// MaxConnectionLifetime 单个连接的最大存活时间。
+	// 超过此时间后连接将被关闭，防止慢速客户端无限占用资源。
+	// 参考 ClickHouse Server 的 TCP 连接管理行为，默认 24h。
+	MaxConnectionLifetime Duration `json:"max_connection_lifetime"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -112,8 +117,9 @@ func defaultConfig() Config {
 		CHUser:     envOrDefault("CK_CH_USER", "default"),
 		CHPassword: envOrDefault("CK_CH_PASSWORD", ""),
 		// Streaming buffer size
-		StreamingBufSize: 131072, // 128KB
-		ValidateChecksum: false,
+		StreamingBufSize:      131072, // 128KB
+		ValidateChecksum:      false,
+		MaxConnectionLifetime: Duration{24 * time.Hour},
 	}
 }
 
