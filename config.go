@@ -54,6 +54,9 @@ type Config struct {
 	// 超过此时间后连接将被关闭，防止慢速客户端无限占用资源。
 	// 参考 ClickHouse Server 的 TCP 连接管理行为，默认 24h。
 	MaxConnectionLifetime Duration `json:"max_connection_lifetime"`
+
+	// R1-16: ShutdownTimeout 优雅关闭时等待在途连接排水的最大时间，默认 30s。
+	ShutdownTimeout Duration `json:"shutdown_timeout"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -120,6 +123,7 @@ func defaultConfig() Config {
 		StreamingBufSize:      131072, // 128KB
 		ValidateChecksum:      false,
 		MaxConnectionLifetime: Duration{24 * time.Hour},
+		ShutdownTimeout:       Duration{30 * time.Second},
 	}
 }
 
@@ -144,6 +148,9 @@ func loadConfig(path string) Config {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		log.Fatalf("parse config file %s: %v", path, err)
 	}
+	// R1-10: 记录加载的配置（密码脱敏）
+	log.Infof("config loaded from %s: listen=%s upstream=%s ch_user=%s ch_password=%s",
+		path, cfg.Listen, cfg.Upstream, cfg.CHUser, maskPassword(cfg.CHPassword))
 	return cfg
 }
 

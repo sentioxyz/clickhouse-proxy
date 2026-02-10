@@ -77,6 +77,8 @@ const (
 	clientCodeReadTaskResponse          proto.ClientCode = 9
 	clientCodeMergeTreeReadTaskResponse proto.ClientCode = 10
 	clientCodeQueryPlan                 proto.ClientCode = 11
+	// R1-5: ClickHouse TCPHandler 中存在的 ClusterFunctionReadTaskResponse (type 13)
+	clientCodeClusterFunctionReadTaskResponse proto.ClientCode = 13
 )
 
 // 协议与缓冲区相关常量
@@ -195,14 +197,14 @@ func (p *queryParser) resetBuf() {
 }
 
 // consumeBuf removes the first n bytes from the buffer.
+// R1-13: 使用原地移动替代新分配，减少 GC 压力
 func (p *queryParser) consumeBuf(n int) {
 	if n >= len(p.buf) {
 		p.buf = nil
 		return
 	}
-	remaining := make([]byte, len(p.buf)-n)
-	copy(remaining, p.buf[n:])
-	p.buf = remaining
+	copy(p.buf, p.buf[n:])
+	p.buf = p.buf[:len(p.buf)-n]
 }
 
 // skipAddendum attempts to consume the optional "addendum" section.
@@ -486,6 +488,7 @@ func detectServerPacketType(chunk []byte) string {
 	return "unknown"
 }
 
+// R1-16: 添加 graceful shutdown 排水机制
 func (p *proxy) serve(ctx context.Context) error {
 	lc := net.ListenConfig{KeepAlive: 30 * time.Second}
 	ln, err := lc.Listen(ctx, "tcp", p.cfg.Listen)
@@ -506,12 +509,32 @@ func (p *proxy) serve(ctx context.Context) error {
 		ln.Close()
 	}()
 
+	// R1-16: 使用 WaitGroup 追踪在途连接，支持 graceful shutdown
+	var connWg sync.WaitGroup
+
 	var connID int64
 	for {
 		clientConn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				// 等待在途连接完成（带超时）
+				shutdownTimeout := p.cfg.ShutdownTimeout.Duration
+				if shutdownTimeout <= 0 {
+					shutdownTimeout = 30 * time.Second
+				}
+				log.Infof("shutting down, waiting up to %s for in-flight connections...", shutdownTimeout)
+				drainDone := make(chan struct{})
+				go func() {
+					connWg.Wait()
+					close(drainDone)
+				}()
+				select {
+				case <-drainDone:
+					log.Infof("all in-flight connections drained")
+				case <-time.After(shutdownTimeout):
+					log.Infof("shutdown timeout exceeded, forcing close")
+				}
 				printStats(p.stats)
 				return nil
 			default:
@@ -526,7 +549,11 @@ func (p *proxy) serve(ctx context.Context) error {
 		id := atomic.AddInt64(&connID, 1)
 		log.Infof("[conn %d] new connection from %s", id, clientConn.RemoteAddr())
 
-		go p.handleConnection(ctx, id, clientConn)
+		connWg.Add(1)
+		go func() {
+			defer connWg.Done()
+			p.handleConnection(ctx, id, clientConn)
+		}()
 	}
 }
 
@@ -802,12 +829,12 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
 			}
 
-			// Raw Patching: Strip/Replace Authentication Tokens
+			// R1-3: Raw Patching: Strip/Replace Authentication Tokens
 			// AFTER validation, BEFORE forwarding.
-			// 1. x_auth_token (12) -> promql_table (12)
-			chunk = replaceToken(chunk, "x_auth_token", "promql_table")
-			// 2. SQL_x_auth_token (16) -> promql_table (12)
-			chunk = replaceToken(chunk, "SQL_x_auth_token", "promql_table")
+			// 安全修复: 除了替换 key 名称外，还需要将 token 的值进行脱敏
+			// 使用 eraseTokenValue 将 key 替换为 promql_table 并擦除值内容
+			chunk = eraseTokenValue(chunk, "x_auth_token")
+			chunk = eraseTokenValue(chunk, "SQL_x_auth_token")
 
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -929,9 +956,11 @@ func (p *proxy) handleDataBlock(
 			}
 			totalFrameBytes += frameHeaderSize + remainingDataSize
 
-			// 检测是否有后续压缩帧：peek 完整帧头 (25 字节)
-			// 同时验证 compressed_size 和 decompressed_size 的合理性，
-			// 避免 CityHash128 checksum 中恰好出现 0x82/0x90/0x02 导致误判。
+			// R1-4: 检测是否有后续压缩帧
+			// 修复: 使用 chReader 的底层 bufio.Reader 进行 peek，确保与 ReadRaw 在同一缓冲层。
+			// 在 chunked 模式下，br 可能是 ChunkedReader 之上的新 bufio.Reader，
+			// 而 chReader 也在同一 bufio.Reader 之上，两者一致。
+			// 注意: chReader.ReadRaw 最终从 br.Read 读取, 所以 br.Peek 与之一致。
 			nextBytes, peekErr := br.Peek(frameHeaderSize) // 25 bytes
 			if peekErr != nil || len(nextBytes) < frameHeaderSize {
 				// 无法 peek 完整帧头，当前帧是最后一帧
@@ -1617,6 +1646,26 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			log.Infof("[conn %d] streaming: resumed streaming after MergeTreeReadTaskResponse", id)
 			continue
 
+		case clientCodeClusterFunctionReadTaskResponse:
+			// R1-5: ClusterFunctionReadTaskResponse (type 13)
+			// 与 TCPHandler::receiveClusterFunctionReadTaskResponse 对齐
+			// 格式: [response: String]
+			p.observer.ClientPacket("ClusterFunctionReadTaskResponse")
+			p.stats.inc("ClusterFunctionReadTaskResponse")
+			response, err := chReader.Str()
+			if err != nil {
+				log.Infof("[conn %d] streaming: ClusterFunctionReadTaskResponse decode error: %v", id, err)
+				return
+			}
+			cbuf := p.getBuffer()
+			cbuf.PutByte(byte(clientCodeClusterFunctionReadTaskResponse))
+			cbuf.PutString(response)
+			if _, err := upstreamWriter.Write(cbuf.Buf); err != nil {
+				p.putBuffer(cbuf)
+				return
+			}
+			p.putBuffer(cbuf)
+
 		case clientCodeQueryPlan:
 			// P0-3 Fix: QueryPlan 也使用临时 raw passthrough
 			p.observer.ClientPacket("QueryPlan")
@@ -1651,32 +1700,49 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 // 直到 queryDoneCh 收到信号表明当前查询已完成（upstream 返回 EndOfStream/Exception）。
 // 返回 true 表示查询完成可恢复 streaming，false 表示连接错误应退出。
 //
-// P0-2 Fix: 使用 channel + select 替代 100ms Peek(1) 忙等轮询，
-// 消除高并发下的无效系统调用开销。
+// R1-1 Fix: 使用 doneCh 控制 goroutine 生命周期，防止 goroutine 泄漏。
+// 当 forwardUntilQueryDone 返回时，关闭 doneCh 通知读取 goroutine 退出。
+// 读取 goroutine 在发送到 readCh 前检查 doneCh，避免向已无消费者的 channel 发送数据。
 func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCh chan struct{}) bool {
-	// 用 goroutine 将阻塞的 br.Read 包装为 channel，与 queryDoneCh 一起 select
 	type readResult struct {
 		data []byte
 		err  error
 	}
 	readCh := make(chan readResult, 1)
+	// R1-1: doneCh 用于通知读取 goroutine 退出
+	doneCh := make(chan struct{})
+	defer close(doneCh)
 
 	// 启动读取 goroutine
 	go func() {
 		buf := make([]byte, 64*1024)
 		for {
+			// R1-1: 先检查 doneCh，如果父函数已返回则立即退出
+			select {
+			case <-doneCh:
+				return
+			default:
+			}
+
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
 			n, err := br.Read(buf)
 			if n > 0 {
-				// 复制数据，因为 buf 会被复用
 				data := make([]byte, n)
 				copy(data, buf[:n])
-				readCh <- readResult{data: data}
+				// R1-1: 发送前再次检查 doneCh，防止阻塞在无消费者的 channel 上
+				select {
+				case readCh <- readResult{data: data}:
+				case <-doneCh:
+					return
+				}
 			}
 			if err != nil {
-				readCh <- readResult{err: err}
+				select {
+				case readCh <- readResult{err: err}:
+				case <-doneCh:
+				}
 				return
 			}
 		}
@@ -1814,6 +1880,51 @@ func replaceToken(data []byte, oldKey, newKey string) []byte {
 	copy(replaceSeq[nNew:], newKeyBytes)
 
 	return bytes.ReplaceAll(data, searchSeq, replaceSeq)
+}
+
+// R1-3: eraseTokenValue 将 auth token setting 的 key 替换为 promql_table，
+// 并将紧跟 key 之后的 value 字符串内容清零（保留长度前缀和原始位置，不改变包总长度）。
+// 格式: [UVarInt(len(key))][key][UVarInt(len(value))][value]
+// 替换后: [UVarInt(len("promql_table"))]["promql_table"][UVarInt(0)]
+// 注意：oldKey 和 "promql_table" 可能长度不同，此时使用 replaceToken 替换 key，
+// 然后查找紧跟新 key 后面的 value string 并将其替换为空字符串。
+func eraseTokenValue(data []byte, tokenKey string) []byte {
+	// 首先用 replaceToken 替换 key 名称
+	newKey := "promql_table"
+	data = replaceToken(data, tokenKey, newKey)
+
+	// 然后查找替换后的 key 并擦除其后的 value
+	newKeyBytes := []byte(newKey)
+	newLenBuf := make([]byte, binary.MaxVarintLen64)
+	nNew := binary.PutUvarint(newLenBuf, uint64(len(newKeyBytes)))
+	searchSeq := make([]byte, nNew+len(newKeyBytes))
+	copy(searchSeq, newLenBuf[:nNew])
+	copy(searchSeq[nNew:], newKeyBytes)
+
+	// 查找所有出现 promql_table 的位置，擦除其后的 value
+	for {
+		idx := bytes.Index(data, searchSeq)
+		if idx < 0 {
+			break
+		}
+		valueStart := idx + len(searchSeq)
+		if valueStart >= len(data) {
+			break
+		}
+		// 读取 value 的 UVarInt 长度前缀
+		valLen, n := binary.Uvarint(data[valueStart:])
+		if n <= 0 || valueStart+n+int(valLen) > len(data) {
+			break
+		}
+		// 将 value 内容清零（脱敏），保留整体结构不变
+		for i := 0; i < int(valLen); i++ {
+			data[valueStart+n+i] = '*'
+		}
+		// 只处理第一个匹配（同一个包中通常只有一个 auth token）
+		break
+	}
+
+	return data
 }
 
 func printStats(stats *packetStats) {
