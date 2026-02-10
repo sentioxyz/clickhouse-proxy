@@ -822,19 +822,24 @@ func (p *proxy) handleDataBlock(
 		return fmt.Errorf("block name: %w", err)
 	}
 
-	// 编码输出缓冲：packet_code + block_name
-	dbuf := &proto.Buffer{}
-	dbuf.PutByte(byte(code))
-	dbuf.PutString(blockName)
+	// 编码输出缓冲：packet_code + block_name（头部）
+	hdrBuf := &proto.Buffer{}
+	hdrBuf.PutByte(byte(code))
+	hdrBuf.PutString(blockName)
 
 	// 检查 context 是否已取消
 	if err := ctx.Err(); err != nil {
 		return fmt.Errorf("context cancelled: %w", err)
 	}
 
+	// 先写头部 (packet_code + block_name)
+	if _, err := upstreamWriter.Write(hdrBuf.Buf); err != nil {
+		return fmt.Errorf("write block header: %w", err)
+	}
+
 	if queryCompression == proto.CompressionEnabled {
 		p.observer.StreamingDataBlock("compressed")
-		// ========== 压缩模式: raw passthrough (多帧支持) ==========
+		// ========== 压缩模式: 流式逐帧 raw passthrough (多帧支持) ==========
 		// ClickHouse compressed frame format:
 		//   [16 bytes: CityHash128 checksum]
 		//   [1 byte: compression method (0x82=LZ4, 0x90=ZSTD, 0x02=none)]
@@ -850,6 +855,7 @@ func (p *proxy) handleDataBlock(
 
 		const frameHeaderSize = 16 + 1 + 4 + 4 // = 25 bytes
 		const maxCompressedFrameSize = 32 * 1024 * 1024
+		const maxDecompressedSize = 256 * 1024 * 1024
 		totalFrameBytes := 0
 
 		for {
@@ -878,30 +884,41 @@ func (p *proxy) handleDataBlock(
 				return fmt.Errorf("compressed frame data: %w", err)
 			}
 
-			// Forward: header + compressedData
-			dbuf.Buf = append(dbuf.Buf, header...)
-			dbuf.Buf = append(dbuf.Buf, compressedData...)
+			// 流式逐帧转发：立即写入当前帧，不累积到内存缓冲区
+			if _, err := upstreamWriter.Write(header); err != nil {
+				return fmt.Errorf("write compressed frame header: %w", err)
+			}
+			if _, err := upstreamWriter.Write(compressedData); err != nil {
+				return fmt.Errorf("write compressed frame data: %w", err)
+			}
 			totalFrameBytes += frameHeaderSize + remainingDataSize
 
-			// 检测是否有后续压缩帧：peek 下一个字节序列
-			// 如果下一个 17 字节（跳过 16 字节 checksum）是有效的 compression method
-			// (0x82=LZ4, 0x90=ZSTD, 0x02=none)，则继续读取
-			nextBytes, peekErr := br.Peek(17)
-			if peekErr != nil || len(nextBytes) < 17 {
-				// 无法 peek 或数据不够，当前帧可能是最后一帧
+			// 检测是否有后续压缩帧：peek 完整帧头 (25 字节)
+			// 同时验证 compressed_size 和 decompressed_size 的合理性，
+			// 避免 CityHash128 checksum 中恰好出现 0x82/0x90/0x02 导致误判。
+			nextBytes, peekErr := br.Peek(frameHeaderSize) // 25 bytes
+			if peekErr != nil || len(nextBytes) < frameHeaderSize {
+				// 无法 peek 完整帧头，当前帧是最后一帧
 				break
 			}
 			methodByte := nextBytes[16]
 			if methodByte != 0x82 && methodByte != 0x90 && methodByte != 0x02 {
-				// 不是压缩方法字节，说明下一个不是压缩帧，结束循环
+				// 不是压缩方法字节，说明下一个不是压缩帧
+				break
+			}
+			// 额外验证: compressed_size >= 9 且 decompressed_size > 0 且两者在合理范围内
+			peekCompSize := binary.LittleEndian.Uint32(nextBytes[17:21])
+			peekDecompSize := binary.LittleEndian.Uint32(nextBytes[21:25])
+			if peekCompSize < 9 || peekCompSize > maxCompressedFrameSize || peekDecompSize == 0 || peekDecompSize > maxDecompressedSize {
+				// 不符合压缩帧的合理参数范围，视为非压缩帧
 				break
 			}
 			// 继续读取下一个压缩帧
 		}
 
 		if p.cfg.LogQueries {
-			log.Infof("[conn %d] streaming: forwarded compressed %s block (raw passthrough, %d frame bytes, total=%d bytes)",
-				id, code, totalFrameBytes, len(dbuf.Buf))
+			log.Infof("[conn %d] streaming: forwarded compressed %s block (streaming passthrough, %d frame bytes)",
+				id, code, totalFrameBytes)
 		}
 	} else {
 		p.observer.StreamingDataBlock("uncompressed")
@@ -918,27 +935,29 @@ func (p *proxy) handleDataBlock(
 			return fmt.Errorf("block raw decode: %w", err)
 		}
 
-		encodeBlockInfoCompat(dbuf, blockInfo)
+		encBuf := &proto.Buffer{}
+		encodeBlockInfoCompat(encBuf, blockInfo)
 		if block.End() {
 			// Align with NativeWriter: empty block writes columns=0, rows=0
-			dbuf.PutUVarInt(0)
-			dbuf.PutUVarInt(0)
+			encBuf.PutUVarInt(0)
+			encBuf.PutUVarInt(0)
 		} else {
 			inputCols := resultsToInput(results)
-			if err := block.EncodeRawBlock(dbuf, revision, inputCols); err != nil {
+			if err := block.EncodeRawBlock(encBuf, revision, inputCols); err != nil {
 				return fmt.Errorf("block encode: %w", err)
 			}
 		}
 
+		if _, err := upstreamWriter.Write(encBuf.Buf); err != nil {
+			return fmt.Errorf("write uncompressed block: %w", err)
+		}
+
 		if p.cfg.LogQueries {
 			log.Infof("[conn %d] streaming: forwarded %s block (%d cols, %d rows, %d bytes)",
-				id, code, block.Columns, block.Rows, len(dbuf.Buf))
+				id, code, block.Columns, block.Rows, len(encBuf.Buf))
 		}
 	}
 
-	if _, err := upstreamWriter.Write(dbuf.Buf); err != nil {
-		return fmt.Errorf("write to upstream: %w", err)
-	}
 	return nil
 }
 
@@ -982,8 +1001,15 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		return
 	}
 
+	// P1-3: 使用 TeeReader 记录 Hello 的原始字节，实现 raw passthrough
+	// 避免 ClientHello.Encode() 可能遗漏新版本协议字段的风险
+	var helloBuf bytes.Buffer
+	teeReader := io.TeeReader(br, &helloBuf)
+	teeBr := bufio.NewReaderSize(teeReader, bufSize)
+	teeChReader := proto.NewReader(teeBr)
+
 	var hello proto.ClientHello
-	if err := hello.Decode(chReader); err != nil {
+	if err := hello.Decode(teeChReader); err != nil {
 		log.Warnf("[conn %d] streaming: Hello decode error: %v", id, err)
 		return
 	}
@@ -993,10 +1019,12 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	// 记录握手开始时间
 	handshakeStart := time.Now()
 
-	// 原样转发 ClientHello 给 upstream（不修改 revision）
-	hbuf := &proto.Buffer{}
-	hello.Encode(hbuf)
-	if _, err := upstreamConn.Write(hbuf.Buf); err != nil {
+	// 将 Hello 类型字节 + 原始解码的字节一起发送给 upstream
+	// helloBuf 包含了 TeeReader 记录的 Hello 所有原始字节（不含 typeByte）
+	helloPayload := make([]byte, 1+helloBuf.Len())
+	helloPayload[0] = typeByte
+	copy(helloPayload[1:], helloBuf.Bytes())
+	if _, err := upstreamConn.Write(helloPayload); err != nil {
 		log.Infof("[conn %d] streaming: write hello error: %v", id, err)
 		return
 	}
@@ -1144,20 +1172,27 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		}
 	}
 
-	// 注意：不再盲目 drain upBr 缓冲区。
-	// 之前的实现会将 upBr.Buffered() 中的所有数据附加到 ServerHello，
-	// 但这可能包含后续的响应数据包（如 Data block、EndOfStream），
-	// 导致 copyUpstreamToClientFromReader 丢失数据或客户端协议解析错误。
-	// ServerHello 的字段已通过 proto.Reader 精确逐字段解析完成。
-	// 如有未解析的新字段（如 password_rules 等），应在此处添加精确解析，
-	// 而不是盲目 drain。upBr 中剩余的数据将由 copyUpstreamToClientFromReader 正确处理。
+	// P0-1: ServerHello 尾部字段透传
+	// FeatureChunkedPackets 之后可能还有 password_rules, nonce, settings,
+	// query_plan_serialization_version 等字段。这些字段对 proxy 透明，
+	// 直接从 upBr 缓冲区中取出原样透传给客户端。
+	// 关键：必须在 close(handshakeDone) 之前完成，否则 copyUpstreamToClientFromReader
+	// 启动后会用 ChunkedReader 解析这些非 chunked 的 ServerHello 尾部数据，导致协议错误。
+	if tailN := upBr.Buffered(); tailN > 0 {
+		tail := make([]byte, tailN)
+		n, _ := upBr.Read(tail)
+		if n > 0 {
+			serverHelloBuf.Buf = append(serverHelloBuf.Buf, tail[:n]...)
+			log.Infof("[conn %d] streaming: ServerHello tail passthrough: %d bytes", id, n)
+		}
+	}
 
-	// 将解析重组后的完整 ServerHello 发给客户端
+	// 将解析重组后的完整 ServerHello（含尾部字段）发给客户端
 	if _, err := clientConn.Write(serverHelloBuf.Buf); err != nil {
 		log.Errorf("[conn %d] streaming: write ServerHello to client error: %v", id, err)
 		return
 	}
-	log.Infof("[conn %d] streaming: ServerHello forwarded (%d bytes, chunked=disabled)", id, len(serverHelloBuf.Buf))
+	log.Infof("[conn %d] streaming: ServerHello forwarded (%d bytes)", id, len(serverHelloBuf.Buf))
 
 	// 使用 min(clientRevision, serverRevision) 作为协商后的有效 revision
 	revision := clientRevision
@@ -1169,7 +1204,6 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	p.observer.HandshakeCompleted(time.Since(handshakeStart).Seconds())
 
 	// 先释放握手锁让 copyUpstreamToClient 启动
-	// 它会 raw-copy ServerHello 的剩余字段（password rules, nonce, settings 等）+ 后续所有响应
 	close(handshakeDone)
 	handshakeClosed = true
 
@@ -1465,16 +1499,28 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 
 		case clientCodeMergeTreeReadTaskResponse:
-			// MergeTreeReadTaskResponse: 复杂序列化格式，当前无法精确解析，回退到 raw 转发
+			// P1-1: MergeTreeReadTaskResponse 精确解析
+			// 根据 ClickHouse TCPHandler::receiveMergeTreeReadTaskResponseAssumeLocked:
+			// 格式: [segment: VarInt][mark: VarInt]
 			p.observer.ClientPacket("MergeTreeReadTaskResponse")
 			p.stats.inc("MergeTreeReadTaskResponse")
-			log.Warnf("[conn %d] streaming: MergeTreeReadTaskResponse received, fallback to raw copy (subsequent queries on this connection will NOT be rewritten)", id)
-			p.observer.Fallback("MergeTreeReadTaskResponse")
-			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
+			segment, err := chReader.UVarInt()
+			if err != nil {
+				log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse segment error: %v", id, err)
 				return
 			}
-			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
-			return
+			mark, err := chReader.UVarInt()
+			if err != nil {
+				log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse mark error: %v", id, err)
+				return
+			}
+			mbuf := &proto.Buffer{}
+			mbuf.PutByte(byte(clientCodeMergeTreeReadTaskResponse))
+			mbuf.PutUVarInt(segment)
+			mbuf.PutUVarInt(mark)
+			if _, err := upstreamWriter.Write(mbuf.Buf); err != nil {
+				return
+			}
 
 		default:
 			log.Warnf("[conn %d] streaming: unknown packet type %d, forwarding + fallback", id, codeByte)
