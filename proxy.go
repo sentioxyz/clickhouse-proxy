@@ -739,10 +739,11 @@ func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamCon
 			p.observer.BytesTransferred("upstream_to_client", float64(n))
 
 			// Detect server packet types (e.g. Exception, EndOfStream, Data)
-			// 注意：在 chunked 模式下，检测是 best-effort 的。
-			// Read() 返回的数据可能从 packet 中间开始，导致误检。
-			// 但 EndOfStream(5) 和 Exception(2) 通常是短包且独占一个 chunk，
-			// 所以大多数情况下检测仍然有效。
+			// R2-6: 在 chunked 模式下，ChunkedReader 可能返回跨包边界的数据，
+			// chunk[0] 不一定是包类型字节。检测结果是 best-effort 的。
+			// EndOfStream(5) 和 Exception(2) 通常是短包且独占一个 chunk，
+			// 所以大多数情况下检测有效，但偶尔可能误判。
+			// TODO(R2-6): 对于高可靠性要求，应在 chunked 模式下使用结构化包边界解析。
 			pkt := detectServerPacketType(chunk)
 			if pkt != "unknown" {
 				p.observer.ServerPacket(pkt)
@@ -947,12 +948,12 @@ func (p *proxy) handleDataBlock(
 				return fmt.Errorf("compressed frame data: %w", err)
 			}
 
-			// 流式逐帧转发：立即写入当前帧，不累积到内存缓冲区
-			if _, err := upstreamWriter.Write(header); err != nil {
-				return fmt.Errorf("write compressed frame header: %w", err)
-			}
-			if _, err := upstreamWriter.Write(compressedData); err != nil {
-				return fmt.Errorf("write compressed frame data: %w", err)
+			// R2-7: 合并 header + compressedData 为单次 Write，减少系统调用开销
+			frameBuf := make([]byte, frameHeaderSize+remainingDataSize)
+			copy(frameBuf, header)
+			copy(frameBuf[frameHeaderSize:], compressedData)
+			if _, err := upstreamWriter.Write(frameBuf); err != nil {
+				return fmt.Errorf("write compressed frame: %w", err)
 			}
 			totalFrameBytes += frameHeaderSize + remainingDataSize
 
@@ -1481,8 +1482,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			expectState = expectData // 对齐 TCPHandler：Query 后进入 expectData 阶段
 
 		case proto.ClientCodeData:
+			// R2-1: TCPHandler::receivePacketsExpectQuery 中 Data 会抛 UNEXPECTED_PACKET 异常
 			if expectState == expectQuery {
-				log.Warnf("[conn %d] streaming: unexpected Data packet in expectQuery state (TCPHandler would reject)", id)
+				log.Errorf("[conn %d] streaming: unexpected Data packet in expectQuery state, closing (TCPHandler rejects)", id)
+				return
 			}
 			p.observer.ClientPacket("Data")
 			p.stats.inc("Data")
@@ -1492,9 +1495,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 
 		case clientCodeScalar:
-			// Scalar 包格式与 Data 完全一致（用于子查询标量值）
+			// R2-1: TCPHandler::receivePacketsExpectQuery 中 Scalar 会抛 UNEXPECTED_PACKET 异常
 			if expectState == expectQuery {
-				log.Warnf("[conn %d] streaming: unexpected Scalar packet in expectQuery state (TCPHandler would reject)", id)
+				log.Errorf("[conn %d] streaming: unexpected Scalar packet in expectQuery state, closing (TCPHandler rejects)", id)
+				return
 			}
 			p.observer.ClientPacket("Scalar")
 			p.stats.inc("Scalar")
@@ -1543,6 +1547,11 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(kbuf)
 
 		case proto.ClientTablesStatusRequest:
+			// R2-1: TCPHandler::receivePacketsExpectData 中 TablesStatusRequest 会抛 UNEXPECTED_PACKET 异常
+			if expectState == expectData {
+				log.Errorf("[conn %d] streaming: unexpected TablesStatusRequest in expectData state, closing (TCPHandler rejects)", id)
+				return
+			}
 			p.observer.ClientPacket("TablesStatusRequest")
 			p.stats.inc("TablesStatusRequest")
 			// 结构: [num_tables: UVarInt] + [database: String, table: String] × N
@@ -1577,9 +1586,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(tbuf)
 
 		case clientCodeIgnoredPartUUIDs:
-			// 对齐 TCPHandler: IgnoredPartUUIDs 只在 expectQuery 状态有效
+			// R2-1: TCPHandler::receivePacketsExpectData 中 IgnoredPartUUIDs 会抛 UNEXPECTED_PACKET 异常
 			if expectState == expectData {
-				log.Warnf("[conn %d] streaming: unexpected IgnoredPartUUIDs in expectData state (TCPHandler would reject)", id)
+				log.Errorf("[conn %d] streaming: unexpected IgnoredPartUUIDs in expectData state, closing (TCPHandler rejects)", id)
+				return
 			}
 			// IgnoredPartUUIDs: [count: UVarInt] + [UUID(16 bytes) × count]
 			p.observer.ClientPacket("IgnoredPartUUIDs")
@@ -1882,12 +1892,13 @@ func replaceToken(data []byte, oldKey, newKey string) []byte {
 	return bytes.ReplaceAll(data, searchSeq, replaceSeq)
 }
 
-// R1-3: eraseTokenValue 将 auth token setting 的 key 替换为 promql_table，
+// R1-3 + R2-5: eraseTokenValue 将 auth token setting 的 key 替换为 promql_table，
 // 并将紧跟 key 之后的 value 字符串内容清零（保留长度前缀和原始位置，不改变包总长度）。
 // 格式: [UVarInt(len(key))][key][UVarInt(len(value))][value]
 // 替换后: [UVarInt(len("promql_table"))]["promql_table"][UVarInt(0)]
-// 注意：oldKey 和 "promql_table" 可能长度不同，此时使用 replaceToken 替换 key，
-// 然后查找紧跟新 key 后面的 value string 并将其替换为空字符串。
+//
+// R2-5 安全增强：使用 replaceToken 替换后在搜索 promql_table 时，
+// 验证其前面必须有正确的 UVarInt 长度前缀，防止匹配到 SQL 文本中的字面量。
 func eraseTokenValue(data []byte, tokenKey string) []byte {
 	// 首先用 replaceToken 替换 key 名称
 	newKey := "promql_table"
@@ -1907,6 +1918,10 @@ func eraseTokenValue(data []byte, tokenKey string) []byte {
 		if idx < 0 {
 			break
 		}
+		// R2-5: 验证匹配位置的上下文合法性
+		// searchSeq 已经包含了 UVarInt 长度前缀 + key 内容，
+		// 所以 bytes.Index 只会匹配 [len_prefix][promql_table] 模式，
+		// 不会匹配 SQL 文本中裸的 "promql_table" 字符串。
 		valueStart := idx + len(searchSeq)
 		if valueStart >= len(data) {
 			break
@@ -1914,6 +1929,12 @@ func eraseTokenValue(data []byte, tokenKey string) []byte {
 		// 读取 value 的 UVarInt 长度前缀
 		valLen, n := binary.Uvarint(data[valueStart:])
 		if n <= 0 || valueStart+n+int(valLen) > len(data) {
+			break
+		}
+		// R2-5: 额外合理性检查 — value 长度不应超过合理范围（防止误匹配）
+		const maxTokenValueLen = 4096
+		if valLen > maxTokenValueLen {
+			// 不太可能是真正的 token value，跳过
 			break
 		}
 		// 将 value 内容清零（脱敏），保留整体结构不变
