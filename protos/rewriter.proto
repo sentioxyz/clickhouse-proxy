@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package rewriter;
+option go_package = "ck_remote_proxy/protos";
+
+enum RewriteOp {
+    TableNameRewrite = 0;
+    LimitRewrite = 1;
+    OffsetRewrite = 2;
+    SettingsRewrite = 3;
+    CommonTableExprRewrite = 4;
+}
+
+message RewriteTableNameArgs {
+    message RemoteTable {
+        string addr = 1;
+        string database = 2;
+        string table = 3;
+        string user = 4;
+        string password = 5;
+    }
+    message TableWithDatabase {
+        string database = 1;
+        string table = 2;
+    }
+    map<string, string> table_map = 1;
+    map<string, RemoteTable> remote_table_map = 2;
+    map<string, TableWithDatabase> table_with_database_map = 3;
+}
+
+message RewriteLimitArgs {
+    int32 limit = 1 [deprecated = true];
+
+    message ReplaceLimit {
+        int32 threshold = 1;
+        int32 replace_to = 2;
+    }
+    oneof value {
+        ReplaceLimit replace_limit = 2;
+        int32 force_limit = 3;
+    }
+}
+
+message RewriteOffsetArgs {
+    int32 offset = 1;
+}
+
+message RewriteCommonTableExprArgs {
+    message CommonTableExpr {
+        string alias = 1;
+        string sql = 2;
+    }
+    map<string, CommonTableExpr> cte_map = 1;
+}
+
+enum SettingType {
+    String = 0;
+    Bool = 1;
+    Int = 2;
+    Uint64 = 3;
+}
+
+message RewriteSettingsArgs {
+    message Setting {
+        string key = 1;
+        SettingType type = 2;
+        oneof value {
+            string string_value = 3;
+            bool bool_value = 4;
+            int32 int_value = 5;
+            uint64 uint64_value = 6;
+        }
+    }
+    repeated Setting settings = 1;
+}
+
+message RewriteOption {
+    RewriteOp op = 1;
+    oneof value {
+        RewriteTableNameArgs table_name_args = 2;
+        RewriteLimitArgs limit_args = 3;
+        RewriteOffsetArgs offset_args = 4;
+        RewriteSettingsArgs settings_args = 5;
+        RewriteCommonTableExprArgs common_table_expr_args = 6;
+    }
+}
+
+message RewriteSQLRequest {
+    string sql = 1;
+    repeated RewriteOption options = 2;
+}
+
+enum RewriteCode {
+    Success = 0;
+    SyntaxError = 1;
+    RewriteError = 2;
+}
+
+message RewriteSQLResponse {
+    RewriteCode code = 1;
+    string message = 2;
+    string sql_after_rewrite = 3;
+    repeated string original_accessed_table_names = 4;
+}
+
+service RewriterService {
+    rpc Rewrite (RewriteSQLRequest) returns (RewriteSQLResponse) {}
+    rpc RewriteErrorMessage (RewriteErrorMessageRequest) returns (RewriteErrorMessageResponse) {}
+}
+
+message RewriteErrorMessageRequest {
+    string sql = 1;
+    string error_message = 2;
+    repeated RewriteOption options = 3;
+}
+
+message RewriteErrorMessageResponse {
+    RewriteCode code = 1;
+    string message = 2;
+    string error_after_rewrite = 3;
+}
