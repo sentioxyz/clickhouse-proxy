@@ -7,8 +7,12 @@ require (
 	github.com/ClickHouse/clickhouse-go/v2 v2.38.1
 	github.com/ethereum/go-ethereum v1.16.8
 	github.com/prometheus/client_golang v1.23.2
+	github.com/segmentio/asm v1.2.1
+	go.opentelemetry.io/otel/trace v1.38.0
+	go.yaml.in/yaml/v3 v3.0.4
 	golang.org/x/crypto v0.47.0
 	google.golang.org/grpc v1.78.0
+	google.golang.org/protobuf v1.36.10
 	sentioxyz/sentio-core v0.0.0-20251222093952-5940f52963a7
 )
 
@@ -30,19 +34,15 @@ require (
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect
 	github.com/rogpeppe/go-internal v1.13.1 // indirect
-	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
 	go.opentelemetry.io/otel v1.38.0 // indirect
-	go.opentelemetry.io/otel/trace v1.38.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
 	go.uber.org/zap v1.27.0 // indirect
 	go.yaml.in/yaml/v2 v2.4.2 // indirect
-	go.yaml.in/yaml/v3 v3.0.4 // indirect
 	golang.org/x/net v0.48.0 // indirect
 	golang.org/x/sys v0.40.0 // indirect
 	golang.org/x/text v0.33.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20251029180050-ab9386a59fda // indirect
-	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1 // indirect
 )
 

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,6 +16,8 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+
+	"go.yaml.in/yaml/v3"
 )
 
 // Rewriter 负责将 Sentio-Network 模式 SQL 重写为真实 SQL
@@ -73,7 +76,7 @@ type SentioNetworkRewriter struct {
 	config       RewriterConfig
 	networkState NetworkState
 	grpcConn     *grpc.ClientConn
-	mu           sync.RWMutex
+	grpcClient   pb.RewriterServiceClient // cached gRPC client stub
 }
 
 // sentioNetworkTableRegex 匹配 Sentio-Network 模式表名
@@ -94,18 +97,17 @@ func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState) (*Senti
 		networkState: state,
 	}
 
-	// 建立 gRPC 连接
+	// 建立 gRPC 连接 (lazy connect, 不阻塞启动)
 	if config.ServiceAddr != "" {
-		conn, err := grpc.Dial(
+		conn, err := grpc.NewClient(
 			config.ServiceAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
-			grpc.WithBlock(),
-			grpc.WithTimeout(5*time.Second),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to connect to rewriter service at %s: %w", config.ServiceAddr, err)
+			return nil, fmt.Errorf("failed to create rewriter client for %s: %w", config.ServiceAddr, err)
 		}
 		rewriter.grpcConn = conn
+		rewriter.grpcClient = pb.NewRewriterServiceClient(conn)
 	}
 
 	return rewriter, nil
@@ -174,7 +176,8 @@ func (r *SentioNetworkRewriter) Rewrite(ctx context.Context, sql string) (string
 				User:     r.config.CHUser,
 				Password: r.config.CHPassword,
 			}
-			log.Debugf("remote table rewrite: %s -> remote('%s', '%s', '%s')", table.FullMatch, addr, database, physicalTable)
+			log.Debugf("remote table rewrite: %s -> remote('%s', '%s', '%s', '%s', '***')",
+				table.FullMatch, addr, database, physicalTable, r.config.CHUser)
 		}
 	}
 
@@ -263,7 +266,7 @@ type RemoteTable struct {
 
 // callRewriterService 调用 sql-rewriter gRPC 服务
 func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql string, tableWithDatabase map[string]TableWithDatabase, remoteTable map[string]RemoteTable) (string, error) {
-	client := pb.NewRewriterServiceClient(r.grpcConn)
+	client := r.grpcClient
 
 	// Convert maps to proto
 	tableNameArgs := &pb.RewriteTableNameArgs{
@@ -339,6 +342,14 @@ func (r *SentioNetworkRewriter) Close() error {
 	return nil
 }
 
+// maskPassword masks a password string for safe logging.
+func maskPassword(password string) string {
+	if len(password) <= 2 {
+		return "***"
+	}
+	return password[:1] + strings.Repeat("*", len(password)-2) + password[len(password)-1:]
+}
+
 // NoopRewriter 空实现，不进行任何重写
 type NoopRewriter struct{}
 
@@ -387,57 +398,38 @@ func (s *InMemoryNetworkState) GetProcessorInfo(processorId string) (ProcessorIn
 	return info, ok
 }
 
-// LoadNetworkStateFromYAML 从 YAML 配置加载网络状态
+// networkStateYAML defines the YAML file structure for network state.
+type networkStateYAML struct {
+	IndexerInfos         map[uint64]IndexerInfo           `yaml:"indexer_infos"`
+	ProcessorAllocations map[string][]ProcessorAllocation `yaml:"processor_allocations"`
+	ProcessorInfos       map[string]ProcessorInfo         `yaml:"processor_infos"`
+}
+
+// LoadNetworkStateFromYAML loads network state from a YAML configuration file.
 func LoadNetworkStateFromYAML(path string) (*InMemoryNetworkState, error) {
-	// TODO: 实现 YAML 加载
-	// 临时返回模拟数据，以支持测试
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read network state file %s: %w", path, err)
+	}
+
+	var raw networkStateYAML
+	if err := yaml.Unmarshal(data, &raw); err != nil {
+		return nil, fmt.Errorf("parse network state YAML %s: %w", path, err)
+	}
+
 	state := NewInMemoryNetworkState()
-
-	// Indexer 1: 本地节点（对应 Proxy1 → ClickHouse1）
-	state.IndexerInfos[1] = IndexerInfo{
-		IndexerId:           1,
-		IndexerUrl:          "127.0.0.1",
-		ClickhouseProxyPort: 19001,
+	for id, info := range raw.IndexerInfos {
+		state.IndexerInfos[id] = info
 	}
-	// Indexer 2: 远程节点（对应 Proxy2 → ClickHouse2）
-	state.IndexerInfos[2] = IndexerInfo{
-		IndexerId:           2,
-		IndexerUrl:          "127.0.0.1",
-		ClickhouseProxyPort: 29001,
+	for pid, allocs := range raw.ProcessorAllocations {
+		state.ProcessorAllocations[pid] = allocs
+	}
+	for pid, info := range raw.ProcessorInfos {
+		state.ProcessorInfos[pid] = info
 	}
 
-	// Processor "local_users": 分配到本地 Indexer 1，数据库 test_db
-	state.ProcessorAllocations["local_users"] = []ProcessorAllocation{
-		{ProcessorId: "local_users", IndexerId: 1},
-	}
-	state.ProcessorInfos["local_users"] = ProcessorInfo{
-		ProcessorId:  "local_users",
-		EntitySchema: "test_db",
-	}
-
-	// Processor "remote_orders": 分配到远程 Indexer 2，数据库 test_db
-	state.ProcessorAllocations["remote_orders"] = []ProcessorAllocation{
-		{ProcessorId: "remote_orders", IndexerId: 2},
-	}
-	state.ProcessorInfos["remote_orders"] = ProcessorInfo{
-		ProcessorId:  "remote_orders",
-		EntitySchema: "test_db",
-	}
-
-	// 保留原有测试数据
-	state.ProcessorAllocations["coinbase"] = []ProcessorAllocation{
-		{ProcessorId: "coinbase", IndexerId: 1},
-	}
-	state.ProcessorInfos["coinbase"] = ProcessorInfo{
-		ProcessorId: "coinbase",
-	}
-
-	state.ProcessorAllocations["pancakeswap123"] = []ProcessorAllocation{
-		{ProcessorId: "pancakeswap123", IndexerId: 2},
-	}
-	state.ProcessorInfos["pancakeswap123"] = ProcessorInfo{
-		ProcessorId: "pancakeswap123",
-	}
+	log.Infof("loaded network state from %s: %d indexers, %d processor allocations, %d processor infos",
+		path, len(state.IndexerInfos), len(state.ProcessorAllocations), len(state.ProcessorInfos))
 
 	return state, nil
 }

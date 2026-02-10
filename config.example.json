@@ -10,7 +10,7 @@
     "max_data_log_bytes": 200,
     "metrics_listen": ":19091",
     "auth_enabled": false,
-    "rewriter_enabled": true,
+    "rewriter_enabled": false,
     "rewriter_service_addr": "",
     "rewriter_local_indexer_id": 1,
     "rewriter_timeout": "5s",

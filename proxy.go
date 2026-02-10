@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/ClickHouse/ch-go/compress"
 	"github.com/ClickHouse/ch-go/proto"
 )
 
@@ -583,8 +582,12 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		handshakeDone := make(chan struct{})
 		// upstream 的 bufio.Reader，由 copyClientToUpstreamStreaming 设置
 		var upstreamBr *bufio.Reader
-		// queryDone 标志：upstream 返回 EndOfStream(5)/Exception(2) 时由 goroutine B 设置，
-		// goroutine A（包循环）检测后重置 queryCompression。对齐 TCPHandler 的串行化处理。
+		// queryDone flag: set by goroutine B when upstream returns EndOfStream(5)/Exception(2).
+		// Goroutine A (packet loop) checks this at the top of each iteration to reset queryCompression.
+		// NOTE: Detection has a ~1 iteration delay. This is safe for standard ClickHouse clients
+		// which strictly follow the sendQuery() -> receivePackets() -> sendQuery() serial model,
+		// i.e. they never send a new Query before receiving EndOfStream/Exception.
+		// If non-standard clients need support in the future, replace with channel communication.
 		var queryDone atomic.Int32
 
 		go func() {
@@ -713,20 +716,6 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					return
 				}
 
-				// SQL Rewriting: rewrite Sentio-Network pattern tables to physical tables
-				if p.rewriter != nil && p.cfg.RewriterEnabled {
-					rewrittenSQL, err := p.rewriter.Rewrite(ctx, parsed.SQL)
-					if err != nil {
-						log.Warnf("[conn %d] SQL rewrite failed: %v, using original SQL", id, err)
-					} else if rewrittenSQL != parsed.SQL {
-						log.Infof("[conn %d] SQL rewritten: %q -> %q", id, parsed.SQL, rewrittenSQL)
-						// Update the chunk with rewritten SQL
-						// Note: This is a simplified replacement; proper implementation
-						// should re-encode the Query packet with the new SQL
-						chunk = replaceQuerySQL(chunk, parsed.SQL, rewrittenSQL)
-					}
-				}
-
 				if p.cfg.LogQueries {
 					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, parsed.SQL)
 					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(parsed.SQL))
@@ -735,66 +724,6 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 
 			if p.cfg.LogData && pkt == "Data" {
 				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
-			}
-
-			// Raw SQL Rewriting: 当 parser 未能解析 SQL 时，直接在原始字节中搜索并替换 Sentio 模式表名
-			// 这是一个独立于 parser 的降级方案，确保即使协议版本不匹配也能进行 SQL 重写
-			if p.rewriter != nil && p.cfg.RewriterEnabled && len(sqls) == 0 && pkt == "Query" {
-				// 从 chunk 中提取纯 SQL 文本
-				oldSQL := extractApproxSQL(chunk)
-				if oldSQL != "" && sentioNetworkTableRegex.MatchString(oldSQL) {
-					// 构建替换映射
-					replacements := make(map[string]string)
-					tableMatches := sentioNetworkTableRegex.FindAllStringSubmatch(oldSQL, -1)
-					for _, match := range tableMatches {
-						if len(match) != 3 {
-							continue
-						}
-						fullMatch := match[0]
-						if _, exists := replacements[fullMatch]; exists {
-							continue // 去重
-						}
-						rewrittenSQL, err := p.rewriter.Rewrite(ctx, "SELECT * FROM "+fullMatch)
-						if err != nil {
-							log.Warnf("[conn %d] raw rewrite failed for %s: %v", id, fullMatch, err)
-							continue
-						}
-						replacement := strings.TrimPrefix(rewrittenSQL, "SELECT * FROM ")
-						if replacement != fullMatch {
-							replacements[fullMatch] = replacement
-							log.Infof("[conn %d] raw rewrite: %q -> %q", id, fullMatch, replacement)
-						}
-					}
-
-					// 对每个替换直接在 chunk 中做裸字节替换
-					// replaceQuerySQL 搜索 [UVarInt(len)][content] 并替换
-					// 但对于表名子串，我们直接做字节替换更可靠
-					if len(replacements) > 0 {
-						for oldName, newName := range replacements {
-							chunk = bytes.ReplaceAll(chunk, []byte(oldName), []byte(newName))
-						}
-						// 修正 SQL 字符串的 UVarInt 长度前缀
-						// 长度差 = (新名长度 - 旧名长度) * 出现次数
-						totalDelta := 0
-						for oldName, newName := range replacements {
-							delta := len(newName) - len(oldName)
-							count := strings.Count(oldSQL, oldName)
-							totalDelta += delta * count
-						}
-						if totalDelta != 0 {
-							// 需要修正 SQL 字符串的长度前缀
-							// 原 SQL 长度
-							oldLen := len(oldSQL)
-							newLen := oldLen + totalDelta
-							chunk = fixSQLLengthPrefix(chunk, uint64(oldLen), uint64(newLen))
-						}
-						newSQL := oldSQL
-						for oldName, newName := range replacements {
-							newSQL = strings.ReplaceAll(newSQL, oldName, newName)
-						}
-						log.Infof("[conn %d] Full SQL rewrite: %q -> %q", id, oldSQL, newSQL)
-					}
-				}
 			}
 
 			// Raw Patching: Strip/Replace Authentication Tokens
@@ -832,7 +761,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 // copyClientToUpstreamStreaming 使用 ch-go 官方协议库做流式解析和 SQL 重写。
 // 精确解码 Hello/Query 包，完全消除裸字节扫描的分包和误匹配风险。
 // handleDataBlock 统一处理压缩和非压缩的 Data/Scalar block。
-// 压缩模式: compress.Reader 解压（自动处理多帧） → 解码 BlockInfo + RawBlock → 编码 → compress.Writer 重压缩
+// 压缩模式: raw passthrough — read compressed frame header to determine size, forward raw bytes
 // 非压缩模式: 直接解码 BlockInfo + RawBlock → 编码
 func (p *proxy) handleDataBlock(
 	id int64,
@@ -849,55 +778,59 @@ func (p *proxy) handleDataBlock(
 		return fmt.Errorf("block name: %w", err)
 	}
 
-	// 编码输出缓冲
+	// 编码输出缓冲：packet_code + block_name
 	dbuf := &proto.Buffer{}
 	dbuf.PutByte(byte(code))
 	dbuf.PutString(blockName)
 
 	if queryCompression == proto.CompressionEnabled {
-		// ========== 压缩模式: 解压 → 解码 → 编码 → 重压缩 ==========
-		// 使用 compress.Reader 自动处理多帧读取
-		compReader := compress.NewReader(br)
-		decompReader := proto.NewReader(compReader)
+		// ========== 压缩模式: raw passthrough ==========
+		// ClickHouse compressed frame format:
+		//   [16 bytes: CityHash128 checksum]
+		//   [1 byte: compression method (0x82=LZ4, 0x90=ZSTD, 0x02=none)]
+		//   [4 bytes LE: compressed_size (includes 9-byte sub-header + compressed data)]
+		//   [4 bytes LE: decompressed_size]
+		//   [N bytes: compressed data, where N = compressed_size - 9]
+		// Total frame size = 16 (checksum) + compressed_size
+		//
+		// Since Data/Scalar blocks are never modified by the proxy,
+		// we read the frame header to determine size and forward raw bytes.
 
-		blockInfo, err := decodeBlockInfoCompat(decompReader)
-		if err != nil {
-			return fmt.Errorf("compressed BlockInfo decode: %w", err)
+		const frameHeaderSize = 16 + 1 + 4 + 4 // = 25 bytes
+
+		header := make([]byte, frameHeaderSize)
+		if _, err := io.ReadFull(br, header); err != nil {
+			return fmt.Errorf("compressed frame header: %w", err)
 		}
 
-		var block proto.Block
-		var results proto.Results
-		if err := block.DecodeRawBlock(decompReader, revision, results.Auto()); err != nil {
-			return fmt.Errorf("compressed block raw decode: %w", err)
+		// Extract compressed_size from header[17:21] (little-endian uint32)
+		compressedSize := binary.LittleEndian.Uint32(header[17:21])
+
+		// Sanity check: compressed_size must be >= 9 (sub-header size)
+		if compressedSize < 9 {
+			return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
 		}
 
-		// 编码明文 block 数据到临时缓冲
-		plainBuf := &proto.Buffer{}
-		encodeBlockInfoCompat(plainBuf, blockInfo)
-		if block.End() {
-			// P2 风险 7：对齐 NativeWriter，空 block 直接写 columns=0, rows=0
-			plainBuf.PutUVarInt(0)
-			plainBuf.PutUVarInt(0)
-		} else {
-			inputCols := resultsToInput(results)
-			if err := block.EncodeRawBlock(plainBuf, revision, inputCols); err != nil {
-				return fmt.Errorf("compressed block encode: %w", err)
-			}
+		// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
+		remainingDataSize := int(compressedSize) - 9
+
+		// Read the remaining compressed data
+		compressedData := make([]byte, remainingDataSize)
+		if _, err := io.ReadFull(br, compressedData); err != nil {
+			return fmt.Errorf("compressed frame data: %w", err)
 		}
 
-		// 使用 compress.Writer 重压缩（LZ4）
-		compWriter := compress.NewWriter(compress.LevelZero, compress.LZ4)
-		if err := compWriter.Compress(plainBuf.Buf); err != nil {
-			return fmt.Errorf("compress: %w", err)
-		}
-		dbuf.Buf = append(dbuf.Buf, compWriter.Data...)
+		// Forward: dbuf (code+blockName) + header + compressedData
+		dbuf.Buf = append(dbuf.Buf, header...)
+		dbuf.Buf = append(dbuf.Buf, compressedData...)
 
 		if p.cfg.LogQueries {
-			log.Infof("[conn %d] streaming: forwarded compressed %s block (%d cols, %d rows, %d bytes)",
-				id, code, block.Columns, block.Rows, len(dbuf.Buf))
+			log.Infof("[conn %d] streaming: forwarded compressed %s block (raw passthrough, frame=%d bytes, total=%d bytes)",
+				id, code, int(compressedSize)+16, len(dbuf.Buf))
 		}
 	} else {
 		// ========== 非压缩模式: 直接解码 + 编码 ==========
+		// Uncompressed blocks need decode-encode to determine block boundaries.
 		blockInfo, err := decodeBlockInfoCompat(chReader)
 		if err != nil {
 			return fmt.Errorf("BlockInfo decode: %w", err)
@@ -911,7 +844,7 @@ func (p *proxy) handleDataBlock(
 
 		encodeBlockInfoCompat(dbuf, blockInfo)
 		if block.End() {
-			// P2 风险 7：对齐 NativeWriter，空 block 直接写 columns=0, rows=0
+			// Align with NativeWriter: empty block writes columns=0, rows=0
 			dbuf.PutUVarInt(0)
 			dbuf.PutUVarInt(0)
 		} else {
@@ -1098,7 +1031,11 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			return
 		}
 		log.Infof("[conn %d] streaming: ServerHello chunked: send=%q recv=%q", id, srvSendChunked, srvRecvChunked)
-		// 覆盖为 notchunked，告诉客户端不要使用 chunked protocol
+		// Override to notchunked: proxy does not support chunked protocol framing.
+		// Without this, high-version ClickHouse (>= 54470) would use chunked transfer,
+		// and the proxy would misinterpret chunk headers as protocol data.
+		log.Warnf("[conn %d] chunked protocol not supported by proxy, forcing notchunked (server: send=%q recv=%q)",
+			id, srvSendChunked, srvRecvChunked)
 		serverHelloBuf.PutString("notchunked")
 		serverHelloBuf.PutString("notchunked")
 	}
@@ -1169,7 +1106,7 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			log.Infof("[conn %d] streaming: client chunked negotiation: send=%q recv=%q, overriding to notchunked",
 				id, protoSendChunked, protoRecvChunked)
 
-			// 强制覆盖为 notchunked，proxy 不支持 chunked protocol
+			// Override client chunked to notchunked: proxy does not support chunked protocol framing
 			abuf.PutString("notchunked")
 			abuf.PutString("notchunked")
 		}
@@ -1194,12 +1131,12 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	// ========== Phase 2: 包循环 ==========
 	// 跟踪当前 Query 的压缩状态，用于决定 Data 块的处理方式
 	var queryCompression proto.Compression
-	var inQuery bool // P2 风险 6：对齐 TCPHandler 串行化，跟踪是否在 Query 执行中
+	var inQuery bool // track whether we are inside a Query execution (aligned with TCPHandler serial model)
 	for {
-		// P1 风险 4 + P2 风险 6：检查 upstream 是否返回了 EndOfStream/Exception
+		// Check if upstream returned EndOfStream/Exception (set by goroutine B via queryDone)
 		if inQuery && queryDone != nil && queryDone.Load() != 0 {
 			inQuery = false
-			queryDone.Store(0) // 重置标志，准备接受下一个 Query
+			queryDone.Store(0) // reset for next Query
 			queryCompression = proto.CompressionDisabled
 		}
 
@@ -1400,50 +1337,6 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	}
 }
 
-// extractServerRevision 从 ServerHello 原始字节中提取 server_revision。
-// ServerHello 格式: [packet_type: UVarInt=0] [name: String] [major: UVarInt] [minor: UVarInt] [revision: UVarInt] ...
-// 解析失败时返回 0（安全默认值，不启用高版本特性）。
-func extractServerRevision(data []byte) int {
-	offset := 0
-	// 1. packet_type (UVarInt)
-	_, n := binary.Uvarint(data[offset:])
-	if n <= 0 {
-		return 0
-	}
-	offset += n
-
-	// 2. server_name (String = [length: UVarInt][data: bytes])
-	strLen, n := binary.Uvarint(data[offset:])
-	if n <= 0 {
-		return 0
-	}
-	offset += n + int(strLen)
-	if offset >= len(data) {
-		return 0
-	}
-
-	// 3. major (UVarInt)
-	_, n = binary.Uvarint(data[offset:])
-	if n <= 0 {
-		return 0
-	}
-	offset += n
-
-	// 4. minor (UVarInt)
-	_, n = binary.Uvarint(data[offset:])
-	if n <= 0 {
-		return 0
-	}
-	offset += n
-
-	// 5. revision (UVarInt)
-	revision, n := binary.Uvarint(data[offset:])
-	if n <= 0 {
-		return 0
-	}
-	return int(revision)
-}
-
 // fallbackRawCopy 回退到原始逐 chunk 转发模式
 func (p *proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn, upstreamConn net.Conn) {
 	log.Infof("[conn %d] falling back to raw copy mode", id)
@@ -1516,33 +1409,6 @@ func replaceToken(data []byte, oldKey, newKey string) []byte {
 	return bytes.ReplaceAll(data, searchSeq, replaceSeq)
 }
 
-// replaceQuerySQL replaces the SQL statement in a Query packet.
-// This is a simplified implementation that does direct string replacement.
-// A proper implementation should re-encode the Query packet with the new SQL.
-func replaceQuerySQL(data []byte, oldSQL, newSQL string) []byte {
-	// For ClickHouse Native Protocol, the SQL body is length-prefixed.
-	// We need to find and replace both the length prefix and the SQL string.
-	oldSQLBytes := []byte(oldSQL)
-	newSQLBytes := []byte(newSQL)
-
-	// Build the old sequence with length prefix
-	oldLenBuf := make([]byte, binary.MaxVarintLen64)
-	nOld := binary.PutUvarint(oldLenBuf, uint64(len(oldSQLBytes)))
-	oldSeq := make([]byte, nOld+len(oldSQLBytes))
-	copy(oldSeq, oldLenBuf[:nOld])
-	copy(oldSeq[nOld:], oldSQLBytes)
-
-	// Build the new sequence with length prefix
-	newLenBuf := make([]byte, binary.MaxVarintLen64)
-	nNew := binary.PutUvarint(newLenBuf, uint64(len(newSQLBytes)))
-	newSeq := make([]byte, nNew+len(newSQLBytes))
-	copy(newSeq, newLenBuf[:nNew])
-	copy(newSeq[nNew:], newSQLBytes)
-
-	// Replace in the data
-	return bytes.ReplaceAll(data, oldSeq, newSeq)
-}
-
 func printStats(stats *packetStats) {
 	snap := stats.snapshot()
 	log.Infof("==== ck_remote_proxy stats ====")
@@ -1611,99 +1477,4 @@ func extractQuerySummary(chunk []byte, maxLen int) string {
 		clean = clean[:maxLen]
 	}
 	return strings.TrimSpace(clean)
-}
-
-// extractApproxSQL 从 Query 包的原始字节中提取近似 SQL 文本。
-// 策略：先提取所有连续可打印字符块（>=10 字节），然后在最长的包含 SQL 关键字的块中定位 SQL。
-func extractApproxSQL(chunk []byte) string {
-	// 提取所有连续可打印字符块（包含换行、回车、制表符）
-	var blocks []string
-	var current strings.Builder
-	for _, b := range chunk {
-		if (b >= 32 && b <= 126) || b == '\n' || b == '\r' || b == '\t' {
-			current.WriteByte(b)
-		} else {
-			if current.Len() >= 10 { // 只关注足够长的块
-				blocks = append(blocks, current.String())
-			}
-			current.Reset()
-		}
-	}
-	if current.Len() >= 10 {
-		blocks = append(blocks, current.String())
-	}
-
-	// 在提取的块中搜索包含 SQL 关键字的块
-	keywords := []string{"SELECT ", "INSERT ", "CREATE ", "DROP ", "ALTER ", "SHOW ", "DESCRIBE ", "EXPLAIN "}
-	for _, block := range blocks {
-		upper := strings.ToUpper(block)
-		for _, kw := range keywords {
-			if idx := strings.Index(upper, kw); idx >= 0 {
-				// 从关键字位置开始返回
-				return strings.TrimSpace(block[idx:])
-			}
-		}
-	}
-
-	return ""
-}
-
-// findSentioSQL 在 chunk 中扫描所有可能的 UVarInt 前缀字符串，
-// 找到包含 sentio_xxx.yyy 模式的那个（即 SQL 字符串）。
-func findSentioSQL(chunk []byte) string {
-	// 在 chunk 中逐字节扫描，尝试在每个位置解析 UVarInt 前缀字符串
-	for i := 0; i < len(chunk)-2; i++ {
-		// 尝试读取 UVarInt 长度
-		l, n := binary.Uvarint(chunk[i:])
-		if n <= 0 || n > 5 { // UVarInt 最多 5 字节
-			continue
-		}
-		if l == 0 || l > 65536 { // 不太可能的 SQL 长度
-			continue
-		}
-		end := i + n + int(l)
-		if end > len(chunk) {
-			continue
-		}
-		// 提取候选字符串
-		candidate := string(chunk[i+n : end])
-		// 检查是否包含 sentio 模式
-		if sentioNetworkTableRegex.MatchString(candidate) {
-			// 验证这看起来像 SQL（包含常见关键字）
-			lower := strings.ToLower(candidate)
-			for _, kw := range []string{"select", "insert", "create", "show", "describe", "explain"} {
-				if strings.Contains(lower, kw) {
-					return candidate
-				}
-			}
-		}
-	}
-	return ""
-}
-
-// fixSQLLengthPrefix 在 chunk 中找到旧的 SQL 长度 UVarInt 前缀并替换为新长度的 UVarInt 前缀。
-func fixSQLLengthPrefix(chunk []byte, oldLen, newLen uint64) []byte {
-	oldLenBuf := make([]byte, binary.MaxVarintLen64)
-	nOld := binary.PutUvarint(oldLenBuf, oldLen)
-
-	newLenBuf := make([]byte, binary.MaxVarintLen64)
-	nNew := binary.PutUvarint(newLenBuf, newLen)
-
-	oldPrefix := oldLenBuf[:nOld]
-	newPrefix := newLenBuf[:nNew]
-
-	// 在 chunk 中搜索旧的长度前缀并替换第一个匹配
-	idx := bytes.Index(chunk, oldPrefix)
-	if idx < 0 {
-		log.Infof("fixSQLLengthPrefix: old length prefix %d (bytes: %x) not found", oldLen, oldPrefix)
-		return chunk
-	}
-
-	result := make([]byte, 0, len(chunk)-nOld+nNew)
-	result = append(result, chunk[:idx]...)
-	result = append(result, newPrefix...)
-	result = append(result, chunk[idx+nOld:]...)
-
-	log.Infof("fixSQLLengthPrefix: updated length %d -> %d at offset %d", oldLen, newLen, idx)
-	return result
 }

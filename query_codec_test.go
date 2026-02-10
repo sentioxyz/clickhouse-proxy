@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"strconv"
 	"testing"
 
 	"github.com/ClickHouse/ch-go/proto"
@@ -180,7 +181,7 @@ func TestQueryCodecRoundTrip_ByteLevel(t *testing.T) {
 	revisions := []int{54412, 54420, 54429, 54441, 54459, 54472, 54476}
 
 	for _, rev := range revisions {
-		t.Run("rev_"+itoa(rev), func(t *testing.T) {
+		t.Run("rev_"+strconv.Itoa(rev), func(t *testing.T) {
 			original := &ExtQuery{}
 			original.ID = "byte-test"
 			original.Stage = proto.StageComplete
@@ -247,7 +248,7 @@ func TestQueryCodecRoundTrip_StageNotHardcoded(t *testing.T) {
 	}
 
 	for _, stage := range stages {
-		t.Run("stage_"+itoa(int(stage)), func(t *testing.T) {
+		t.Run("stage_"+strconv.Itoa(int(stage)), func(t *testing.T) {
 			original := &ExtQuery{}
 			original.ID = "stage-test"
 			original.Stage = stage
@@ -290,27 +291,4 @@ func TestQueryCodecRoundTrip_EmptyQuery(t *testing.T) {
 	if decoded.Body != "" {
 		t.Errorf("Body: got %q, want empty", decoded.Body)
 	}
-}
-
-// itoa is a small helper to avoid importing strconv in tests.
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	var buf [20]byte
-	pos := len(buf)
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	for n > 0 {
-		pos--
-		buf[pos] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		pos--
-		buf[pos] = '-'
-	}
-	return string(buf[pos:])
 }
