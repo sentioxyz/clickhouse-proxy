@@ -633,9 +633,10 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		handshakeDone := make(chan struct{})
 		// upstream 的 bufio.Reader，由 copyClientToUpstreamStreaming 设置
 		var upstreamBr *bufio.Reader
-		// queryDoneCounter: upstream goroutine 在检测到 EndOfStream(5)/Exception(2) 时 Add(1)，
-		// 包循环检测到 counter>0 时重置压缩状态。使用 atomic 避免 channel buffer=1 信号丢失。
-		var queryDoneCounter atomic.Int64
+		// queryDoneCh: upstream goroutine 在检测到 EndOfStream(5)/Exception(2) 时发送信号，
+		// 包循环通过 select 非阻塞接收来重置压缩状态。
+		// 缓冲区大小设为 8，确保多个快速连续的 EndOfStream 不会丢失信号。
+		queryDoneCh := make(chan struct{}, 8)
 		// chunked 协商结果，由 copyClientToUpstreamStreaming 在握手时设置
 		var srvSendChunked, clientRecvChunked string
 
@@ -643,13 +644,13 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 			defer wg.Done()
 			// 等握手完成后再开始 upstream→client copy
 			<-handshakeDone
-			p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, upstreamBr, &queryDoneCounter, srvSendChunked, clientRecvChunked)
+			p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, upstreamBr, queryDoneCh, srvSendChunked, clientRecvChunked)
 			closeBoth()
 		}()
 
 		go func() {
 			defer wg.Done()
-			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, &queryDoneCounter, &srvSendChunked, &clientRecvChunked)
+			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, queryDoneCh, &srvSendChunked, &clientRecvChunked)
 			closeBoth()
 		}()
 	} else {
@@ -677,7 +678,7 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 
 // copyUpstreamToClientFromReader 从 upstream 读数据转发给 client。
 // 如果 upstreamBr 不为 nil，从 bufio.Reader 读取（streaming 模式，防止丢失 ServerHello 后的缓存数据）。
-func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCounter *atomic.Int64, srvSendChunked, clientRecvChunked string) {
+func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCh chan struct{}, srvSendChunked, clientRecvChunked string) {
 	// 根据 chunked 协商结果包裹 Reader/Writer
 	// srvSendChunked: server 发送到 proxy 时是否用 chunked（需要 ChunkedReader 解帧）
 	// clientRecvChunked: proxy 发送到 client 时 client 期望 chunked（需要 ChunkedWriter 封帧）
@@ -722,9 +723,14 @@ func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamCon
 
 			// 检测 upstream EndOfStream(5)/Exception(2)，通知包循环重置压缩状态
 			// 对齐 ClickHouse 客户端 Connection::receivePacket 的行为
-			// 使用 atomic 计数器，永远不会丢失信号
-			if queryDoneCounter != nil && (pkt == "EndOfStream" || pkt == "Exception") {
-				queryDoneCounter.Add(1)
+			// 使用 buffered channel，非阻塞发送确保不丢失信号
+			if queryDoneCh != nil && (pkt == "EndOfStream" || pkt == "Exception") {
+				select {
+				case queryDoneCh <- struct{}{}:
+				default:
+					// channel 满时跳过（不应该发生，因为 buffer=8）
+					log.Warnf("[conn %d] queryDoneCh full, signal dropped", id)
+				}
 			}
 
 			if p.cfg.IdleTimeout.Duration > 0 {
@@ -1024,7 +1030,7 @@ func (p *proxy) handleDataBlock(
 	return nil
 }
 
-func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn, upstreamConn net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCounter *atomic.Int64, srvSendChunkedOut, clientRecvChunkedOut *string) {
+func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn, upstreamConn net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan struct{}, srvSendChunkedOut, clientRecvChunkedOut *string) {
 	// 确保 handshakeDone 在函数退出时被关闭，避免 copyUpstreamToClient goroutine 永远阻塞
 	handshakeClosed := false
 	defer func() {
@@ -1219,16 +1225,24 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		}
 	}
 
-	// P0-1: 将 teeUpBr 中剩余的缓冲数据 drain 到 serverHelloRaw
+	// P0-3 Fix: 将 teeUpBr 中剩余的缓冲数据完整 drain 到 serverHelloRaw。
+	// 使用循环 drain 确保即使 bufio 内部分批返回数据也能全部读完。
 	// 这些数据是 ServerHello 的尾部字段（password_rules, nonce, settings 等），
-	// 已被 bufio 预读到缓冲区中但尚未被 teeReader 处理。
+	// 已被底层 socket 或 bufio 预读但尚未被 teeReader 处理。
 	// 必须在 close(handshakeDone) 之前完成，否则 copyUpstreamToClientFromReader
 	// 启动后会用 ChunkedReader 解析这些非 chunked 的 ServerHello 尾部数据。
-	if buffered := teeUpBr.Buffered(); buffered > 0 {
+	for {
+		buffered := teeUpBr.Buffered()
+		if buffered <= 0 {
+			break
+		}
 		drainBuf := make([]byte, buffered)
-		n, _ := teeUpBr.Read(drainBuf)
+		n, err := teeUpBr.Read(drainBuf)
 		if n > 0 {
 			log.Infof("[conn %d] streaming: ServerHello tail drained: %d bytes", id, n)
+		}
+		if err != nil {
+			break
 		}
 	}
 
@@ -1349,14 +1363,26 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 	// 跟踪当前 Query 的压缩状态，用于决定 Data 块的处理方式
 	var queryCompression proto.Compression
-	var inQuery bool // track whether we are inside a Query execution (aligned with TCPHandler serial model)
+
+	// 两阶段包循环状态机，对齐 ClickHouse TCPHandler 的
+	// receivePacketsExpectQuery / receivePacketsExpectData 模式。
+	// expectQuery: 等待新 Query（只接受 Query/Ping/Cancel/TablesStatusRequest/IgnoredPartUUIDs）
+	// expectData: Query 执行中（只接受 Data/Scalar/Ping/Cancel/ReadTaskResponse 等）
+	const (
+		expectQuery = 0
+		expectData  = 1
+	)
+	expectState := expectQuery
+
 	for {
-		// 通过 atomic 计数器检测 upstream EndOfStream/Exception，重置压缩状态
-		// 使用 Swap 原子性读取并清零，确保不丢失任何信号
-		if inQuery && queryDoneCounter != nil {
-			if queryDoneCounter.Swap(0) > 0 {
-				inQuery = false
+		// 通过 channel 检测 upstream EndOfStream/Exception，重置压缩状态
+		// 非阻塞 select：有信号就处理，没有就继续
+		if expectState == expectData && queryDoneCh != nil {
+			select {
+			case <-queryDoneCh:
+				expectState = expectQuery
 				queryCompression = proto.CompressionDisabled
+			default:
 			}
 		}
 
@@ -1423,9 +1449,12 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 			// 保存压缩状态，影响后续 Data 块的处理方式
 			queryCompression = eq.Compression
-			inQuery = true // P2 风险 6：对齐 TCPHandler 串行化
+			expectState = expectData // 对齐 TCPHandler：Query 后进入 expectData 阶段
 
 		case proto.ClientCodeData:
+			if expectState == expectQuery {
+				log.Warnf("[conn %d] streaming: unexpected Data packet in expectQuery state (TCPHandler would reject)", id)
+			}
 			p.observer.ClientPacket("Data")
 			p.stats.inc("Data")
 			if err := p.handleDataBlock(ctx, id, proto.ClientCodeData, chReader, br, upstreamWriter, queryCompression, revision); err != nil {
@@ -1435,6 +1464,9 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 		case clientCodeScalar:
 			// Scalar 包格式与 Data 完全一致（用于子查询标量值）
+			if expectState == expectQuery {
+				log.Warnf("[conn %d] streaming: unexpected Scalar packet in expectQuery state (TCPHandler would reject)", id)
+			}
 			p.observer.ClientPacket("Scalar")
 			p.stats.inc("Scalar")
 			if err := p.handleDataBlock(ctx, id, clientCodeScalar, chReader, br, upstreamWriter, queryCompression, revision); err != nil {
@@ -1466,7 +1498,7 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			// P1-4: Cancel 后重置查询状态
 			// 对齐 ClickHouse TCPHandler::processCancel 的行为：
 			// Cancel 表示客户端要求中止当前查询，不应继续用旧的压缩状态
-			inQuery = false
+			expectState = expectQuery
 			queryCompression = proto.CompressionDisabled
 
 		case clientCodeKeepAlive:
@@ -1516,6 +1548,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(tbuf)
 
 		case clientCodeIgnoredPartUUIDs:
+			// 对齐 TCPHandler: IgnoredPartUUIDs 只在 expectQuery 状态有效
+			if expectState == expectData {
+				log.Warnf("[conn %d] streaming: unexpected IgnoredPartUUIDs in expectData state (TCPHandler would reject)", id)
+			}
 			// IgnoredPartUUIDs: [count: UVarInt] + [UUID(16 bytes) × count]
 			p.observer.ClientPacket("IgnoredPartUUIDs")
 			p.stats.inc("IgnoredPartUUIDs")
@@ -1573,10 +1609,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				return
 			}
 			// 临时 raw passthrough —— 等待查询完成后恢复 streaming
-			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCounter) {
+			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCh) {
 				return
 			}
-			inQuery = false
+			expectState = expectQuery
 			queryCompression = proto.CompressionDisabled
 			log.Infof("[conn %d] streaming: resumed streaming after MergeTreeReadTaskResponse", id)
 			continue
@@ -1590,10 +1626,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCounter) {
+			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCh) {
 				return
 			}
-			inQuery = false
+			expectState = expectQuery
 			queryCompression = proto.CompressionDisabled
 			log.Infof("[conn %d] streaming: resumed streaming after QueryPlan", id)
 			continue
@@ -1612,49 +1648,66 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 }
 
 // forwardUntilQueryDone 临时 raw passthrough 模式：逐块转发客户端数据到 upstream，
-// 直到 queryDoneCounter 表明当前查询已完成（upstream 返回 EndOfStream/Exception）。
+// 直到 queryDoneCh 收到信号表明当前查询已完成（upstream 返回 EndOfStream/Exception）。
 // 返回 true 表示查询完成可恢复 streaming，false 表示连接错误应退出。
-func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCounter *atomic.Int64) bool {
-	buf := make([]byte, 64*1024)
-	for {
-		// 检查查询是否完成
-		if queryDoneCounter != nil && queryDoneCounter.Swap(0) > 0 {
-			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
-			return true
-		}
+//
+// P0-2 Fix: 使用 channel + select 替代 100ms Peek(1) 忙等轮询，
+// 消除高并发下的无效系统调用开销。
+func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCh chan struct{}) bool {
+	// 用 goroutine 将阻塞的 br.Read 包装为 channel，与 queryDoneCh 一起 select
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	readCh := make(chan readResult, 1)
 
-		if p.cfg.IdleTimeout.Duration > 0 {
-			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
-		}
-
-		// 使用短超时 Peek 来非阻塞检查是否有数据
-		// 如果没有数据则重复检查 queryDoneCounter
-		if br.Buffered() == 0 {
-			// 没有 buffered 数据，设置短超时来轮询
-			_ = clientConn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
-			_, err := br.Peek(1)
+	// 启动读取 goroutine
+	go func() {
+		buf := make([]byte, 64*1024)
+		for {
+			if p.cfg.IdleTimeout.Duration > 0 {
+				_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+			}
+			n, err := br.Read(buf)
+			if n > 0 {
+				// 复制数据，因为 buf 会被复用
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				readCh <- readResult{data: data}
+			}
 			if err != nil {
-				if isTimeout(err) {
-					// 超时 — 继续循环检查 queryDoneCounter
-					continue
-				}
-				// 真正的错误
-				return false
+				readCh <- readResult{err: err}
+				return
 			}
 		}
+	}()
 
-		// 有数据可读，正常转发
-		if p.cfg.IdleTimeout.Duration > 0 {
-			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
-		}
-		n, err := br.Read(buf)
-		if n > 0 {
-			if _, werr := upstreamWriter.Write(buf[:n]); werr != nil {
+	for {
+		select {
+		case <-queryDoneCh:
+			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
+			// drain 已读但未发送的数据
+			for {
+				select {
+				case res := <-readCh:
+					if res.err != nil {
+						return false
+					}
+					if _, werr := upstreamWriter.Write(res.data); werr != nil {
+						return false
+					}
+				default:
+					return true
+				}
+			}
+
+		case res := <-readCh:
+			if res.err != nil {
 				return false
 			}
-		}
-		if err != nil {
-			return false
+			if _, werr := upstreamWriter.Write(res.data); werr != nil {
+				return false
+			}
 		}
 	}
 }

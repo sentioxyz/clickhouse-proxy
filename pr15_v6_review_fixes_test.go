@@ -6,7 +6,6 @@ import (
 	"encoding/binary"
 	"io"
 	"net"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -440,7 +439,7 @@ func TestBlockInfoUnknownField(t *testing.T) {
 // ============================================================================
 
 func TestForwardUntilQueryDone(t *testing.T) {
-	t.Run("queryDoneCounter 触发恢复", func(t *testing.T) {
+	t.Run("queryDoneCh 触发恢复", func(t *testing.T) {
 		p := &proxy{cfg: defaultConfig()}
 		p.cfg.IdleTimeout = Duration{500 * time.Millisecond}
 
@@ -453,14 +452,14 @@ func TestForwardUntilQueryDone(t *testing.T) {
 		defer upstreamRead.Close()
 		defer upstreamWrite.Close()
 
-		var counter atomic.Int64
+		queryDoneCh := make(chan struct{}, 8)
 
 		// 在后台写入一些数据然后发出 queryDone 信号
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			clientWrite.Write([]byte("some_raw_data"))
 			time.Sleep(100 * time.Millisecond)
-			counter.Add(1) // 模拟 upstream 返回 EndOfStream
+			queryDoneCh <- struct{}{} // 模拟 upstream 返回 EndOfStream
 		}()
 
 		// 在后台消费 upstream 写入的数据
@@ -475,7 +474,7 @@ func TestForwardUntilQueryDone(t *testing.T) {
 		}()
 
 		br := bufio.NewReader(clientRead)
-		result := p.forwardUntilQueryDone(1, br, clientRead, upstreamWrite, &counter)
+		result := p.forwardUntilQueryDone(1, br, clientRead, upstreamWrite, queryDoneCh)
 
 		if !result {
 			t.Error("forwardUntilQueryDone should return true when query done")
@@ -493,7 +492,7 @@ func TestForwardUntilQueryDone(t *testing.T) {
 		defer upstreamRead.Close()
 		defer upstreamWrite.Close()
 
-		var counter atomic.Int64
+		queryDoneCh := make(chan struct{}, 8)
 
 		// 在后台关闭客户端连接
 		go func() {
@@ -513,7 +512,7 @@ func TestForwardUntilQueryDone(t *testing.T) {
 		}()
 
 		br := bufio.NewReader(clientRead)
-		result := p.forwardUntilQueryDone(1, br, clientRead, upstreamWrite, &counter)
+		result := p.forwardUntilQueryDone(1, br, clientRead, upstreamWrite, queryDoneCh)
 
 		if result {
 			t.Error("forwardUntilQueryDone should return false when connection closed")
