@@ -139,6 +139,7 @@ func (cw *ChunkedWriter) Enabled() bool {
 // Write 实现 io.Writer。
 // 当 enabled=true 时，将数据包裹在 chunk 帧中：[size: 4 bytes LE][data][end: 4 bytes 0x00]
 // 当 enabled=false 时，直接透传到底层 Writer。
+// 优化：将 header + data + endMarker 合并为单次 Write 调用，减少系统调用开销。
 func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 	if !cw.enabled {
 		return cw.w.Write(p)
@@ -147,26 +148,18 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	// 写入 chunk header: [4 bytes LE: size]
-	var header [chunkedHeaderSize]byte
-	binary.LittleEndian.PutUint32(header[:], uint32(len(p)))
-	if _, err := cw.w.Write(header[:]); err != nil {
-		return 0, fmt.Errorf("chunked: write frame header: %w", err)
+	// 合并为一次写入: [header:4][data:N][endMarker:4]
+	frameSize := chunkedHeaderSize + len(p) + chunkedHeaderSize
+	frame := make([]byte, frameSize)
+	binary.LittleEndian.PutUint32(frame[:chunkedHeaderSize], uint32(len(p)))
+	copy(frame[chunkedHeaderSize:], p)
+	// endMarker 位于 frame[chunkedHeaderSize+len(p):]，零值即 0x00000000，无需额外设置
+
+	if _, err := cw.w.Write(frame); err != nil {
+		return 0, fmt.Errorf("chunked: write frame: %w", err)
 	}
 
-	// 写入数据
-	n, err := cw.w.Write(p)
-	if err != nil {
-		return n, fmt.Errorf("chunked: write frame data: %w", err)
-	}
-
-	// 写入 chunk 结束标记: [4 bytes: 0x00000000]
-	var endMarker [chunkedHeaderSize]byte
-	if _, err := cw.w.Write(endMarker[:]); err != nil {
-		return n, fmt.Errorf("chunked: write frame end marker: %w", err)
-	}
-
-	return n, nil
+	return len(p), nil
 }
 
 // chunkedNegotiate 根据双方的 chunked 能力协商实际使用模式。

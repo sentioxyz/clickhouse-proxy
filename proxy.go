@@ -102,6 +102,7 @@ type proxy struct {
 	rewriter          Rewriter
 	observer          *MetricsObserver
 	compressedBufPool sync.Pool // P2 #7: 复用压缩块 buffer，减少 GC 压力
+	bufferPool        sync.Pool // 复用 proto.Buffer，减少包循环中的分配
 }
 
 func newProxy(cfg Config, v Validator, r Rewriter) *proxy {
@@ -117,6 +118,24 @@ func newProxy(cfg Config, v Validator, r Rewriter) *proxy {
 		validator: v,
 		rewriter:  r,
 		observer:  NewMetricsObserver(),
+	}
+}
+
+// getBuffer 从 bufferPool 获取一个 proto.Buffer，并重置其内容。
+func (p *proxy) getBuffer() *proto.Buffer {
+	if v := p.bufferPool.Get(); v != nil {
+		b := v.(*proto.Buffer)
+		b.Reset()
+		return b
+	}
+	return &proto.Buffer{}
+}
+
+// putBuffer 将 proto.Buffer 放回 bufferPool。超过 1MB 的不放回，避免大 buffer 堆积。
+func (p *proxy) putBuffer(b *proto.Buffer) {
+	const maxPoolBufSize = 1 * 1024 * 1024
+	if len(b.Buf) <= maxPoolBufSize {
+		p.bufferPool.Put(b)
 	}
 }
 
@@ -821,8 +840,13 @@ func (p *proxy) handleDataBlock(
 
 		const frameHeaderSize = 16 + 1 + 4 + 4 // = 25 bytes
 
-		header := make([]byte, frameHeaderSize)
-		if _, err := io.ReadFull(br, header); err != nil {
+		// 使用 chReader.ReadRaw 而非 io.ReadFull(br, ...)
+		// 原因：proto.NewReader(br) 内部创建了自己的 bufio.Reader 缓冲层，
+		// 当 chReader.Str() 读取 block_name 时可能预读过多数据到内部缓冲区，
+		// 此后直接从 br 读帧头可能发现数据已被内部缓冲消费。
+		// 通过 chReader.ReadRaw 保证从同一缓冲层读取，避免 TCP 流行为依赖。
+		header, err := chReader.ReadRaw(frameHeaderSize)
+		if err != nil {
 			return fmt.Errorf("compressed frame header: %w", err)
 		}
 
@@ -832,6 +856,11 @@ func (p *proxy) handleDataBlock(
 		// Sanity check: compressed_size must be >= 9 (sub-header size)
 		if compressedSize < 9 {
 			return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
+		}
+		// 防御性检查：compressed_size 不应超过合理限制（32MB）
+		const maxCompressedFrameSize = 32 * 1024 * 1024
+		if compressedSize > maxCompressedFrameSize {
+			return fmt.Errorf("compressed_size %d exceeds limit %d", compressedSize, maxCompressedFrameSize)
 		}
 
 		// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
@@ -849,9 +878,14 @@ func (p *proxy) handleDataBlock(
 			compressedData = compressedData[:remainingDataSize]
 		}
 		defer func() {
-			p.compressedBufPool.Put(compressedData)
+			// 避免大 buffer 堆积在 pool 中：超过 1MB 的 buffer 不放回
+			const maxPoolBufSize = 1 * 1024 * 1024
+			if cap(compressedData) <= maxPoolBufSize {
+				p.compressedBufPool.Put(compressedData)
+			}
 		}()
-		if _, err := io.ReadFull(br, compressedData); err != nil {
+		compressedData, err = chReader.ReadRaw(remainingDataSize)
+		if err != nil {
 			return fmt.Errorf("compressed frame data: %w", err)
 		}
 
@@ -1268,12 +1302,14 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 
 			// 使用自定义编码器重编码 Query（与 decodeQueryCustom 严格镜像）
-			qbuf := &proto.Buffer{}
+			qbuf := p.getBuffer()
 			encodeQueryCustom(qbuf, eq, revision)
 			if _, err := upstreamWriter.Write(qbuf.Buf); err != nil {
+				p.putBuffer(qbuf)
 				log.Infof("[conn %d] streaming: write query error: %v", id, err)
 				return
 			}
+			p.putBuffer(qbuf)
 			p.observer.QueryForwarded()
 
 			// 保存压缩状态，影响后续 Data 块的处理方式
@@ -1300,30 +1336,36 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		case proto.ClientCodePing:
 			p.observer.ClientPacket("Ping")
 			p.stats.inc("Ping")
-			pbuf := &proto.Buffer{}
+			pbuf := p.getBuffer()
 			proto.ClientCodePing.Encode(pbuf)
 			if _, err := upstreamWriter.Write(pbuf.Buf); err != nil {
+				p.putBuffer(pbuf)
 				return
 			}
+			p.putBuffer(pbuf)
 
 		case proto.ClientCodeCancel:
 			p.observer.ClientPacket("Cancel")
 			p.stats.inc("Cancel")
-			cbuf := &proto.Buffer{}
+			cbuf := p.getBuffer()
 			proto.ClientCodeCancel.Encode(cbuf)
 			if _, err := upstreamWriter.Write(cbuf.Buf); err != nil {
+				p.putBuffer(cbuf)
 				return
 			}
+			p.putBuffer(cbuf)
 
 		case clientCodeKeepAlive:
 			// KeepAlive 无 payload，只需转发类型码
 			p.observer.ClientPacket("KeepAlive")
 			p.stats.inc("KeepAlive")
-			kbuf := &proto.Buffer{}
+			kbuf := p.getBuffer()
 			kbuf.PutByte(byte(clientCodeKeepAlive))
 			if _, err := upstreamWriter.Write(kbuf.Buf); err != nil {
+				p.putBuffer(kbuf)
 				return
 			}
+			p.putBuffer(kbuf)
 
 		case proto.ClientTablesStatusRequest:
 			p.observer.ClientPacket("TablesStatusRequest")

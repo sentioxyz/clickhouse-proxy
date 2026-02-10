@@ -358,8 +358,8 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 	result.Grow(len(sql))
 	i := 0
 	for i < len(sql) {
-		// 检查是否在引号内
-		if sql[i] == '\'' || sql[i] == '"' {
+		// 检查是否在引号内（含反引号，ClickHouse 兼容 MySQL 的标识符引用语法）
+		if sql[i] == '\'' || sql[i] == '"' || sql[i] == '`' {
 			quote := sql[i]
 			result.WriteByte(quote)
 			i++
