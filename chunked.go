@@ -149,7 +149,8 @@ func (cw *ChunkedWriter) Enabled() bool {
 // Write 实现 io.Writer。
 // 当 enabled=true 时，将数据包裹在 chunk 帧中：[size: 4 bytes LE][data][end: 4 bytes 0x00]
 // 当 enabled=false 时，直接透传到底层 Writer。
-// 优化：将 header + data + endMarker 合并为单次 Write 调用，减少系统调用开销。
+// R2-3: 当数据超过 defaultChunkPayloadSize 时，分为多个 chunk 发送，
+// 对齐 ClickHouse WriteBufferFromPocoSocketChunked 的 multipart mode 行为。
 // P2 #8: 使用 sync.Pool 缓存帧缓冲区，减少高频小包写入的内存分配。
 func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 	if !cw.enabled {
@@ -159,41 +160,45 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 		return 0, nil
 	}
 
-	// 合并为一次写入: [header:4][data:N][endMarker:4]
-	frameSize := chunkedHeaderSize + len(p) + chunkedHeaderSize
-	frame := chunkedFramePool.Get().([]byte)
-	if cap(frame) < frameSize {
-		frame = make([]byte, frameSize)
-	} else {
-		frame = frame[:frameSize]
+	totalWritten := 0
+	for len(p) > 0 {
+		// R2-3: 分片 — 每个 chunk 最大 defaultChunkPayloadSize
+		chunkSize := len(p)
+		if chunkSize > defaultChunkPayloadSize {
+			chunkSize = defaultChunkPayloadSize
+		}
+		chunk := p[:chunkSize]
+		p = p[chunkSize:]
+
+		// 合并为一次写入: [header:4][data:N][endMarker:4]
+		frameSize := chunkedHeaderSize + chunkSize + chunkedHeaderSize
+		frame := chunkedFramePool.Get().([]byte)
+		if cap(frame) < frameSize {
+			frame = make([]byte, frameSize)
+		} else {
+			frame = frame[:frameSize]
+		}
+		binary.LittleEndian.PutUint32(frame[:chunkedHeaderSize], uint32(chunkSize))
+		copy(frame[chunkedHeaderSize:], chunk)
+		// endMarker 位于 frame[chunkedHeaderSize+chunkSize:]
+		binary.LittleEndian.PutUint32(frame[chunkedHeaderSize+chunkSize:], 0)
+
+		_, err := cw.w.Write(frame)
+
+		// 归还到 pool（超大帧不放回，避免 pool 中堆积大 buffer）
+		// R4-6: 写入失败也归还 — buffer 在下次使用时通过 frame[:frameSize] 重切，
+		// 旧数据会被完全覆盖，不存在脏数据残留风险。
+		const maxPoolFrameSize = 256 * 1024 // 256KB
+		if cap(frame) <= maxPoolFrameSize {
+			chunkedFramePool.Put(frame)
+		}
+
+		if err != nil {
+			return totalWritten, fmt.Errorf("chunked: write frame: %w", err)
+		}
+
+		totalWritten += chunkSize
 	}
-	binary.LittleEndian.PutUint32(frame[:chunkedHeaderSize], uint32(len(p)))
-	copy(frame[chunkedHeaderSize:], p)
-	// endMarker 位于 frame[chunkedHeaderSize+len(p):]
-	binary.LittleEndian.PutUint32(frame[chunkedHeaderSize+len(p):], 0)
 
-	_, err := cw.w.Write(frame)
-
-	if err != nil {
-		// P1-2: Write 失败时不归还 buffer 到 pool，避免脏数据残留
-		return 0, fmt.Errorf("chunked: write frame: %w", err)
-	}
-
-	// 归还到 pool（超大帧不放回，避免 pool 中堆积大 buffer）
-	const maxPoolFrameSize = 256 * 1024 // 256KB
-	if cap(frame) <= maxPoolFrameSize {
-		chunkedFramePool.Put(frame)
-	}
-
-	return len(p), nil
-}
-
-// chunkedNegotiate 根据双方的 chunked 能力协商实际使用模式。
-// 返回值：是否启用 chunked 传输。
-//
-// 规则：
-//   - 如果任一方声明 "notchunked" 或空字符串，则不启用
-//   - 如果双方都声明 "chunked"，则启用
-func chunkedNegotiate(senderCap, receiverCap string) bool {
-	return senderCap == "chunked" && receiverCap == "chunked"
+	return totalWritten, nil
 }

@@ -172,6 +172,16 @@ func (v *EthValidator) validateJWSJSON(token, sql string) error {
 		return errors.New("no signatures found in JWS JSON")
 	}
 
+	// R4-4: Payload 对所有签名相同，提升到循环外解码一次
+	payloadBytes, err := base64.RawURLEncoding.DecodeString(jws.Payload)
+	if err != nil {
+		return fmt.Errorf("invalid payload encoding: %w", err)
+	}
+	var payload JWSPayload
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		return fmt.Errorf("invalid payload JSON: %w", err)
+	}
+
 	// All signatures must be valid and from allowed addresses
 	var authenticatedAddresses []string
 
@@ -183,16 +193,6 @@ func (v *EthValidator) validateJWSJSON(token, sql string) error {
 		var header JWSHeader
 		if err := json.Unmarshal(headerBytes, &header); err != nil {
 			return fmt.Errorf("sig[%d]: invalid header JSON: %w", i, err)
-		}
-
-		// Decode payload to verify hash/time (assuming same payload for all, which is how JWS works)
-		payloadBytes, err := base64.RawURLEncoding.DecodeString(jws.Payload)
-		if err != nil {
-			return fmt.Errorf("invalid payload encoding: %w", err)
-		}
-		var payload JWSPayload
-		if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-			return fmt.Errorf("invalid payload JSON: %w", err)
 		}
 
 		// Verify header and payload constraints
@@ -229,10 +229,15 @@ func (v *EthValidator) verifyPayloadAndHeader(header JWSHeader, payload JWSPaylo
 	}
 
 	// Verify timestamp
+	// R4-7: 允许 5 秒时钟偏差，适应分布式系统中客户端与服务端的时间差异
+	const clockSkewTolerance int64 = 5
 	now := time.Now().Unix()
 	tokenAge := now - payload.Iat
-	if tokenAge < 0 {
+	if tokenAge < -clockSkewTolerance {
 		return errors.New("token issued in the future")
+	}
+	if tokenAge < 0 {
+		tokenAge = 0 // 在时钟偏差容忍范围内，视为刚签发
 	}
 	if time.Duration(tokenAge)*time.Second > v.MaxTokenAge {
 		return fmt.Errorf("token expired: age %ds exceeds max %s", tokenAge, v.MaxTokenAge)

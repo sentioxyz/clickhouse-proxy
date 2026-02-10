@@ -273,6 +273,9 @@ type RemoteTable struct {
 }
 
 // callRewriterService 调用 sql-rewriter gRPC 服务
+// R4-5 安全说明: RemoteTable.Password 以明文发送给 sql-rewriter gRPC 服务，
+// sql-rewriter 需要它来生成 remote() 函数调用。此通信仅在可信内网进行，
+// 如果部署环境变更（跨网络/公网），应切换到 TLS 加密通道。
 func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql string, tableWithDatabase map[string]TableWithDatabase, remoteTable map[string]RemoteTable) (string, error) {
 	client := r.grpcClient
 

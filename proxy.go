@@ -33,6 +33,8 @@ var packetNames = map[uint64]string{
 	9:  "ReadTaskResponse",
 	10: "MergeTreeReadTaskResponse",
 	11: "QueryPlan",
+	// R7-1: type 12 未被 ClickHouse TCPHandler 使用（保留），type 13 是 ClusterFunctionReadTaskResponse
+	13: "ClusterFunctionReadTaskResponse",
 }
 
 // 预编译正则表达式，避免每次调用时重复编译
@@ -77,6 +79,8 @@ const (
 	clientCodeReadTaskResponse          proto.ClientCode = 9
 	clientCodeMergeTreeReadTaskResponse proto.ClientCode = 10
 	clientCodeQueryPlan                 proto.ClientCode = 11
+	// R1-5: ClickHouse TCPHandler 中存在的 ClusterFunctionReadTaskResponse (type 13)
+	clientCodeClusterFunctionReadTaskResponse proto.ClientCode = 13
 )
 
 // 协议与缓冲区相关常量
@@ -195,14 +199,14 @@ func (p *queryParser) resetBuf() {
 }
 
 // consumeBuf removes the first n bytes from the buffer.
+// R1-13: 使用原地移动替代新分配，减少 GC 压力
 func (p *queryParser) consumeBuf(n int) {
 	if n >= len(p.buf) {
 		p.buf = nil
 		return
 	}
-	remaining := make([]byte, len(p.buf)-n)
-	copy(remaining, p.buf[n:])
-	p.buf = remaining
+	copy(p.buf, p.buf[n:])
+	p.buf = p.buf[:len(p.buf)-n]
 }
 
 // skipAddendum attempts to consume the optional "addendum" section.
@@ -415,11 +419,11 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 					p.consumeBuf(n + consumed)
 					continue
 				}
-				// 最终解析也失败，尝试从原始字节中提取 SQL
-				log.Infof("Query decode failed, attempting raw SQL extraction")
+				// R5-5: 两种解码方式都失败，包含两个错误信息协助排查
+				log.Infof("Query decode failed: primary=%v, fallback=%v", err, derr)
 				p.resetBuf()
 				p.disabled = true
-				return out, err
+				return out, fmt.Errorf("query decode: primary: %v; fallback: %w", err, derr)
 			}
 			// Extract settings from proto.Query
 			settings := make(map[string]string)
@@ -430,7 +434,8 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
 		case 3, 4: // Cancel or Ping
-			// These packets have no body, just consume the type byte.
+			// R3-6: Cancel(3) 和 Ping(4) 均为无 payload 包（与 TCPHandler 一致）。
+			// n 是 UVarInt 类型码本身的编码字节数（通常为 1 字节）。
 			p.consumeBuf(n)
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.
@@ -486,6 +491,7 @@ func detectServerPacketType(chunk []byte) string {
 	return "unknown"
 }
 
+// R1-16: 添加 graceful shutdown 排水机制
 func (p *proxy) serve(ctx context.Context) error {
 	lc := net.ListenConfig{KeepAlive: 30 * time.Second}
 	ln, err := lc.Listen(ctx, "tcp", p.cfg.Listen)
@@ -506,12 +512,32 @@ func (p *proxy) serve(ctx context.Context) error {
 		ln.Close()
 	}()
 
+	// R1-16: 使用 WaitGroup 追踪在途连接，支持 graceful shutdown
+	var connWg sync.WaitGroup
+
 	var connID int64
 	for {
 		clientConn, err := ln.Accept()
 		if err != nil {
 			select {
 			case <-ctx.Done():
+				// 等待在途连接完成（带超时）
+				shutdownTimeout := p.cfg.ShutdownTimeout.Duration
+				if shutdownTimeout <= 0 {
+					shutdownTimeout = 30 * time.Second
+				}
+				log.Infof("shutting down, waiting up to %s for in-flight connections...", shutdownTimeout)
+				drainDone := make(chan struct{})
+				go func() {
+					connWg.Wait()
+					close(drainDone)
+				}()
+				select {
+				case <-drainDone:
+					log.Infof("all in-flight connections drained")
+				case <-time.After(shutdownTimeout):
+					log.Infof("shutdown timeout exceeded, forcing close")
+				}
 				printStats(p.stats)
 				return nil
 			default:
@@ -526,11 +552,21 @@ func (p *proxy) serve(ctx context.Context) error {
 		id := atomic.AddInt64(&connID, 1)
 		log.Infof("[conn %d] new connection from %s", id, clientConn.RemoteAddr())
 
-		go p.handleConnection(ctx, id, clientConn)
+		connWg.Add(1)
+		go func() {
+			defer connWg.Done()
+			p.handleConnection(ctx, id, clientConn)
+		}()
 	}
 }
 
 func (p *proxy) runStatsPrinter(ctx context.Context) {
+	// R7-2: 防止 panic 导致整个进程崩溃（与 R6-3 一致）
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("runStatsPrinter panic recovered: %v", r)
+		}
+	}()
 	ticker := time.NewTicker(p.cfg.StatsInterval.Duration)
 	defer ticker.Stop()
 	for {
@@ -545,6 +581,12 @@ func (p *proxy) runStatsPrinter(ctx context.Context) {
 }
 
 func (p *proxy) runHealthCheck(ctx context.Context) {
+	// R6-3: 防止 panic 导致整个进程崩溃
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("runHealthCheck panic recovered: %v", r)
+		}
+	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	check := func() {
@@ -712,10 +754,11 @@ func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamCon
 			p.observer.BytesTransferred("upstream_to_client", float64(n))
 
 			// Detect server packet types (e.g. Exception, EndOfStream, Data)
-			// 注意：在 chunked 模式下，检测是 best-effort 的。
-			// Read() 返回的数据可能从 packet 中间开始，导致误检。
-			// 但 EndOfStream(5) 和 Exception(2) 通常是短包且独占一个 chunk，
-			// 所以大多数情况下检测仍然有效。
+			// R2-6: 在 chunked 模式下，ChunkedReader 可能返回跨包边界的数据，
+			// chunk[0] 不一定是包类型字节。检测结果是 best-effort 的。
+			// EndOfStream(5) 和 Exception(2) 通常是短包且独占一个 chunk，
+			// 所以大多数情况下检测有效，但偶尔可能误判。
+			// TODO(R2-6): 对于高可靠性要求，应在 chunked 模式下使用结构化包边界解析。
 			pkt := detectServerPacketType(chunk)
 			if pkt != "unknown" {
 				p.observer.ServerPacket(pkt)
@@ -802,12 +845,12 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 				p.logPacket(id, clientConn.RemoteAddr().String(), pkt, chunk)
 			}
 
-			// Raw Patching: Strip/Replace Authentication Tokens
+			// R1-3: Raw Patching: Strip/Replace Authentication Tokens
 			// AFTER validation, BEFORE forwarding.
-			// 1. x_auth_token (12) -> promql_table (12)
-			chunk = replaceToken(chunk, "x_auth_token", "promql_table")
-			// 2. SQL_x_auth_token (16) -> promql_table (12)
-			chunk = replaceToken(chunk, "SQL_x_auth_token", "promql_table")
+			// 安全修复: 除了替换 key 名称外，还需要将 token 的值进行脱敏
+			// 使用 eraseTokenValue 将 key 替换为 promql_table 并擦除值内容
+			chunk = eraseTokenValue(chunk, "x_auth_token")
+			chunk = eraseTokenValue(chunk, "SQL_x_auth_token")
 
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -920,18 +963,22 @@ func (p *proxy) handleDataBlock(
 				return fmt.Errorf("compressed frame data: %w", err)
 			}
 
-			// 流式逐帧转发：立即写入当前帧，不累积到内存缓冲区
-			if _, err := upstreamWriter.Write(header); err != nil {
-				return fmt.Errorf("write compressed frame header: %w", err)
+			// R6-1: 使用 bufferPool 减少高频 INSERT 场景的压缩帧内存分配
+			fBuf := p.getBuffer()
+			fBuf.Buf = append(fBuf.Buf[:0], header...)
+			fBuf.Buf = append(fBuf.Buf, compressedData...)
+			if _, err := upstreamWriter.Write(fBuf.Buf); err != nil {
+				p.putBuffer(fBuf)
+				return fmt.Errorf("write compressed frame: %w", err)
 			}
-			if _, err := upstreamWriter.Write(compressedData); err != nil {
-				return fmt.Errorf("write compressed frame data: %w", err)
-			}
+			p.putBuffer(fBuf)
 			totalFrameBytes += frameHeaderSize + remainingDataSize
 
-			// 检测是否有后续压缩帧：peek 完整帧头 (25 字节)
-			// 同时验证 compressed_size 和 decompressed_size 的合理性，
-			// 避免 CityHash128 checksum 中恰好出现 0x82/0x90/0x02 导致误判。
+			// R1-4: 检测是否有后续压缩帧
+			// 修复: 使用 chReader 的底层 bufio.Reader 进行 peek，确保与 ReadRaw 在同一缓冲层。
+			// 在 chunked 模式下，br 可能是 ChunkedReader 之上的新 bufio.Reader，
+			// 而 chReader 也在同一 bufio.Reader 之上，两者一致。
+			// 注意: chReader.ReadRaw 最终从 br.Read 读取, 所以 br.Peek 与之一致。
 			nextBytes, peekErr := br.Peek(frameHeaderSize) // 25 bytes
 			if peekErr != nil || len(nextBytes) < frameHeaderSize {
 				// 无法 peek 完整帧头，当前帧是最后一帧
@@ -1414,6 +1461,30 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 			originalSQL := eq.Body
 
+			// R4-2: Streaming 模式必须调用 Validator 进行签名验证
+			// 非 streaming 模式在 copyClientToUpstream 中调用 p.validator.ValidateQuery，
+			// streaming 模式之前缺失了这一步，导致 JWS 签名验证被绕过。
+			if p.validator != nil {
+				settingsMap := make(map[string]string, len(eq.Settings)+len(eq.OldSettings))
+				for _, s := range eq.Settings {
+					settingsMap[s.Key] = s.Value
+				}
+				for _, s := range eq.OldSettings {
+					settingsMap[s.Key] = fmt.Sprintf("%d", s.Value)
+				}
+				meta := QueryMeta{
+					ConnID:       id,
+					ClientAddr:   clientConn.RemoteAddr().String(),
+					UpstreamAddr: p.cfg.Upstream,
+					SQL:          eq.Body,
+					Settings:     settingsMap,
+				}
+				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
+					log.Infof("[conn %d] streaming: query rejected by validator: %v", id, err)
+					return
+				}
+			}
+
 			// P2-1: 签名验证后截掉 auth token settings，不发送给 ClickHouse Server
 			// 在 streaming 模式下，decode 后移除 token，encode 时自然不会包含
 			eq.Settings = stripAuthTokenSettings(eq.Settings)
@@ -1452,8 +1523,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			expectState = expectData // 对齐 TCPHandler：Query 后进入 expectData 阶段
 
 		case proto.ClientCodeData:
+			// R2-1: TCPHandler::receivePacketsExpectQuery 中 Data 会抛 UNEXPECTED_PACKET 异常
 			if expectState == expectQuery {
-				log.Warnf("[conn %d] streaming: unexpected Data packet in expectQuery state (TCPHandler would reject)", id)
+				log.Errorf("[conn %d] streaming: unexpected Data packet in expectQuery state, closing (TCPHandler rejects)", id)
+				return
 			}
 			p.observer.ClientPacket("Data")
 			p.stats.inc("Data")
@@ -1463,9 +1536,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 
 		case clientCodeScalar:
-			// Scalar 包格式与 Data 完全一致（用于子查询标量值）
+			// R2-1: TCPHandler::receivePacketsExpectQuery 中 Scalar 会抛 UNEXPECTED_PACKET 异常
 			if expectState == expectQuery {
-				log.Warnf("[conn %d] streaming: unexpected Scalar packet in expectQuery state (TCPHandler would reject)", id)
+				log.Errorf("[conn %d] streaming: unexpected Scalar packet in expectQuery state, closing (TCPHandler rejects)", id)
+				return
 			}
 			p.observer.ClientPacket("Scalar")
 			p.stats.inc("Scalar")
@@ -1514,6 +1588,11 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(kbuf)
 
 		case proto.ClientTablesStatusRequest:
+			// R2-1: TCPHandler::receivePacketsExpectData 中 TablesStatusRequest 会抛 UNEXPECTED_PACKET 异常
+			if expectState == expectData {
+				log.Errorf("[conn %d] streaming: unexpected TablesStatusRequest in expectData state, closing (TCPHandler rejects)", id)
+				return
+			}
 			p.observer.ClientPacket("TablesStatusRequest")
 			p.stats.inc("TablesStatusRequest")
 			// 结构: [num_tables: UVarInt] + [database: String, table: String] × N
@@ -1548,9 +1627,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(tbuf)
 
 		case clientCodeIgnoredPartUUIDs:
-			// 对齐 TCPHandler: IgnoredPartUUIDs 只在 expectQuery 状态有效
+			// R2-1: TCPHandler::receivePacketsExpectData 中 IgnoredPartUUIDs 会抛 UNEXPECTED_PACKET 异常
 			if expectState == expectData {
-				log.Warnf("[conn %d] streaming: unexpected IgnoredPartUUIDs in expectData state (TCPHandler would reject)", id)
+				log.Errorf("[conn %d] streaming: unexpected IgnoredPartUUIDs in expectData state, closing (TCPHandler rejects)", id)
+				return
 			}
 			// IgnoredPartUUIDs: [count: UVarInt] + [UUID(16 bytes) × count]
 			p.observer.ClientPacket("IgnoredPartUUIDs")
@@ -1599,23 +1679,44 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(rbuf)
 
 		case clientCodeMergeTreeReadTaskResponse:
-			// P0-3 Fix: MergeTreeReadTaskResponse 使用临时 raw passthrough
-			// 转发 codeByte 后进入临时 raw copy 模式，等待当前查询完成后恢复 streaming
+			// R3-3: MergeTreeReadTaskResponse 结构化处理（替代 raw passthrough）
+			// 格式与 ReadTaskResponse/ClusterFunctionReadTaskResponse 完全相同: [response: String]
+			// 对齐 TCPHandler::receiveMergeTreeReadTaskResponse: readStringBinary(response)
 			p.observer.ClientPacket("MergeTreeReadTaskResponse")
 			p.stats.inc("MergeTreeReadTaskResponse")
-			log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse detected, temporary raw passthrough", id)
-			p.observer.Fallback("mergetree_read_task_response")
-			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
+			response, err := chReader.Str()
+			if err != nil {
+				log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse decode error: %v", id, err)
 				return
 			}
-			// 临时 raw passthrough —— 等待查询完成后恢复 streaming
-			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCh) {
+			mbuf := p.getBuffer()
+			mbuf.PutByte(byte(clientCodeMergeTreeReadTaskResponse))
+			mbuf.PutString(response)
+			if _, err := upstreamWriter.Write(mbuf.Buf); err != nil {
+				p.putBuffer(mbuf)
 				return
 			}
-			expectState = expectQuery
-			queryCompression = proto.CompressionDisabled
-			log.Infof("[conn %d] streaming: resumed streaming after MergeTreeReadTaskResponse", id)
-			continue
+			p.putBuffer(mbuf)
+
+		case clientCodeClusterFunctionReadTaskResponse:
+			// R1-5: ClusterFunctionReadTaskResponse (type 13)
+			// 与 TCPHandler::receiveClusterFunctionReadTaskResponse 对齐
+			// 格式: [response: String]
+			p.observer.ClientPacket("ClusterFunctionReadTaskResponse")
+			p.stats.inc("ClusterFunctionReadTaskResponse")
+			response, err := chReader.Str()
+			if err != nil {
+				log.Infof("[conn %d] streaming: ClusterFunctionReadTaskResponse decode error: %v", id, err)
+				return
+			}
+			cbuf := p.getBuffer()
+			cbuf.PutByte(byte(clientCodeClusterFunctionReadTaskResponse))
+			cbuf.PutString(response)
+			if _, err := upstreamWriter.Write(cbuf.Buf); err != nil {
+				p.putBuffer(cbuf)
+				return
+			}
+			p.putBuffer(cbuf)
 
 		case clientCodeQueryPlan:
 			// P0-3 Fix: QueryPlan 也使用临时 raw passthrough
@@ -1651,32 +1752,49 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 // 直到 queryDoneCh 收到信号表明当前查询已完成（upstream 返回 EndOfStream/Exception）。
 // 返回 true 表示查询完成可恢复 streaming，false 表示连接错误应退出。
 //
-// P0-2 Fix: 使用 channel + select 替代 100ms Peek(1) 忙等轮询，
-// 消除高并发下的无效系统调用开销。
+// R1-1 Fix: 使用 doneCh 控制 goroutine 生命周期，防止 goroutine 泄漏。
+// 当 forwardUntilQueryDone 返回时，关闭 doneCh 通知读取 goroutine 退出。
+// 读取 goroutine 在发送到 readCh 前检查 doneCh，避免向已无消费者的 channel 发送数据。
 func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCh chan struct{}) bool {
-	// 用 goroutine 将阻塞的 br.Read 包装为 channel，与 queryDoneCh 一起 select
 	type readResult struct {
 		data []byte
 		err  error
 	}
 	readCh := make(chan readResult, 1)
+	// R1-1: doneCh 用于通知读取 goroutine 退出
+	doneCh := make(chan struct{})
+	defer close(doneCh)
 
 	// 启动读取 goroutine
 	go func() {
 		buf := make([]byte, 64*1024)
 		for {
+			// R1-1: 先检查 doneCh，如果父函数已返回则立即退出
+			select {
+			case <-doneCh:
+				return
+			default:
+			}
+
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
 			n, err := br.Read(buf)
 			if n > 0 {
-				// 复制数据，因为 buf 会被复用
 				data := make([]byte, n)
 				copy(data, buf[:n])
-				readCh <- readResult{data: data}
+				// R1-1: 发送前再次检查 doneCh，防止阻塞在无消费者的 channel 上
+				select {
+				case readCh <- readResult{data: data}:
+				case <-doneCh:
+					return
+				}
 			}
 			if err != nil {
-				readCh <- readResult{err: err}
+				select {
+				case readCh <- readResult{err: err}:
+				case <-doneCh:
+				}
 				return
 			}
 		}
@@ -1686,20 +1804,32 @@ func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net
 		select {
 		case <-queryDoneCh:
 			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
-			// drain 已读但未发送的数据
+			// R3-1: drain 已读但未发送的数据
+			// 先等待一个短超时，给读取 goroutine 时间将最后一批数据发出
+			// R5-2: 不使用 defer Stop()，在每个 return 前显式 Stop
+			// 避免在长循环中 defer 累积（虽然此处实际只触发一次）
+			drainTimer := time.NewTimer(50 * time.Millisecond)
+		drainLoop:
 			for {
 				select {
 				case res := <-readCh:
 					if res.err != nil {
+						drainTimer.Stop()
 						return false
 					}
 					if _, werr := upstreamWriter.Write(res.data); werr != nil {
+						drainTimer.Stop()
 						return false
 					}
-				default:
-					return true
+					// 收到数据后重置超时，可能还有更多数据
+					drainTimer.Reset(50 * time.Millisecond)
+				case <-drainTimer.C:
+					// R3-1: 超时，不再有 in-flight 数据
+					break drainLoop
 				}
 			}
+			drainTimer.Stop()
+			return true
 
 		case res := <-readCh:
 			if res.err != nil {
@@ -1814,6 +1944,48 @@ func replaceToken(data []byte, oldKey, newKey string) []byte {
 	copy(replaceSeq[nNew:], newKeyBytes)
 
 	return bytes.ReplaceAll(data, searchSeq, replaceSeq)
+}
+
+// R1-3 + R2-5: eraseTokenValue 将 auth token setting 的 key 替换为 promql_table，
+// 并将紧跟 key 之后的 value 字符串内容清零（保留长度前缀和原始位置，不改变包总长度）。
+// 格式: [UVarInt(len(key))][key][UVarInt(len(value))][value]
+// 替换后: [UVarInt(len("promql_table"))]["promql_table"][UVarInt(0)]
+//
+// R2-5 安全增强：使用 replaceToken 替换后在搜索 promql_table 时，
+// 验证其前面必须有正确的 UVarInt 长度前缀，防止匹配到 SQL 文本中的字面量。
+func eraseTokenValue(data []byte, tokenKey string) []byte {
+	// 首先用 replaceToken 替换 key 名称
+	newKey := "promql_table"
+	data = replaceToken(data, tokenKey, newKey)
+
+	// 然后查找替换后的 key 并擦除其后的 value
+	newKeyBytes := []byte(newKey)
+	newLenBuf := make([]byte, binary.MaxVarintLen64)
+	nNew := binary.PutUvarint(newLenBuf, uint64(len(newKeyBytes)))
+	searchSeq := make([]byte, nNew+len(newKeyBytes))
+	copy(searchSeq, newLenBuf[:nNew])
+	copy(searchSeq[nNew:], newKeyBytes)
+
+	// R4-3: 查找 promql_table 并擦除其后的 value（重构：消除 for+break 反模式）
+	idx := bytes.Index(data, searchSeq)
+	if idx >= 0 {
+		// R2-5: searchSeq 已经包含了 UVarInt 长度前缀 + key 内容，
+		// 不会匹配 SQL 文本中裸的 "promql_table" 字符串。
+		valueStart := idx + len(searchSeq)
+		if valueStart < len(data) {
+			// 读取 value 的 UVarInt 长度前缀
+			valLen, n := binary.Uvarint(data[valueStart:])
+			const maxTokenValueLen = 4096
+			if n > 0 && valueStart+n+int(valLen) <= len(data) && valLen <= maxTokenValueLen {
+				// 将 value 内容清零（脱敏），保留整体结构不变
+				for i := 0; i < int(valLen); i++ {
+					data[valueStart+n+i] = '*'
+				}
+			}
+		}
+	}
+
+	return data
 }
 
 func printStats(stats *packetStats) {

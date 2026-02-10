@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -357,6 +356,7 @@ func TestChunkedWriter_EmptyWrite(t *testing.T) {
 }
 
 // TestChunkedWriter_LargePayload 测试大数据块写入
+// R2-3: 超过 defaultChunkPayloadSize 的数据会被分为多个 chunk
 func TestChunkedWriter_LargePayload(t *testing.T) {
 	payload := make([]byte, 256*1024)
 	rand.Read(payload)
@@ -372,16 +372,32 @@ func TestChunkedWriter_LargePayload(t *testing.T) {
 		t.Errorf("expected %d bytes, got %d", len(payload), n)
 	}
 
-	// 验证帧格式
+	// R2-3: 256KB / 64KB = 4 个 chunk，每个 chunk 有 header(4) + data + endMarker(4)
+	expectedChunks := len(payload) / defaultChunkPayloadSize
+	if len(payload)%defaultChunkPayloadSize != 0 {
+		expectedChunks++
+	}
+	// 每个 chunk 的 overhead = 4 (header) + 4 (endMarker) = 8 bytes
+	expectedLen := len(payload) + expectedChunks*8
 	output := buf.Bytes()
-	expectedLen := 4 + len(payload) + 4
 	if len(output) != expectedLen {
-		t.Errorf("expected total %d bytes, got %d", expectedLen, len(output))
+		t.Errorf("expected total %d bytes, got %d (expected %d chunks)", expectedLen, len(output), expectedChunks)
 	}
 
-	gotSize := binary.LittleEndian.Uint32(output[:4])
-	if gotSize != uint32(len(payload)) {
-		t.Errorf("frame size: expected %d, got %d", len(payload), gotSize)
+	// 验证第一个 chunk 的大小为 defaultChunkPayloadSize
+	firstChunkSize := binary.LittleEndian.Uint32(output[:4])
+	if int(firstChunkSize) != defaultChunkPayloadSize {
+		t.Errorf("first chunk size: expected %d, got %d", defaultChunkPayloadSize, firstChunkSize)
+	}
+
+	// 验证 roundtrip
+	cr := NewChunkedReader(bytes.NewReader(output), true)
+	decoded, err := io.ReadAll(cr)
+	if err != nil {
+		t.Fatalf("ReadAll error: %v", err)
+	}
+	if !bytes.Equal(decoded, payload) {
+		t.Errorf("roundtrip failed: expected %d bytes, got %d", len(payload), len(decoded))
 	}
 }
 
@@ -519,37 +535,6 @@ func TestChunkedRoundTrip_Disabled(t *testing.T) {
 // 调用方必须保证单 goroutine 访问，这与实际使用场景一致。
 // 原 TestChunkedWriter_Concurrent 测试已移除。
 // ============================================================================
-
-// ============================================================================
-// chunkedNegotiate 测试
-// ============================================================================
-
-// TestChunkedNegotiate 测试协商逻辑
-func TestChunkedNegotiate(t *testing.T) {
-	testCases := []struct {
-		sender   string
-		receiver string
-		expected bool
-	}{
-		{"chunked", "chunked", true},
-		{"chunked", "notchunked", false},
-		{"notchunked", "chunked", false},
-		{"notchunked", "notchunked", false},
-		{"", "", false},
-		{"chunked", "", false},
-		{"", "chunked", false},
-	}
-
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("send=%q_recv=%q", tc.sender, tc.receiver), func(t *testing.T) {
-			result := chunkedNegotiate(tc.sender, tc.receiver)
-			if result != tc.expected {
-				t.Errorf("chunkedNegotiate(%q, %q) = %v, expected %v",
-					tc.sender, tc.receiver, result, tc.expected)
-			}
-		})
-	}
-}
 
 // ============================================================================
 // 模拟真实场景测试
