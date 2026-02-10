@@ -185,15 +185,16 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 
 		_, err := cw.w.Write(frame)
 
-		if err != nil {
-			// P1-2: Write 失败时不归还 buffer 到 pool，避免脏数据残留
-			return totalWritten, fmt.Errorf("chunked: write frame: %w", err)
-		}
-
 		// 归还到 pool（超大帧不放回，避免 pool 中堆积大 buffer）
+		// R4-6: 写入失败也归还 — buffer 在下次使用时通过 frame[:frameSize] 重切，
+		// 旧数据会被完全覆盖，不存在脏数据残留风险。
 		const maxPoolFrameSize = 256 * 1024 // 256KB
 		if cap(frame) <= maxPoolFrameSize {
 			chunkedFramePool.Put(frame)
+		}
+
+		if err != nil {
+			return totalWritten, fmt.Errorf("chunked: write frame: %w", err)
 		}
 
 		totalWritten += chunkSize

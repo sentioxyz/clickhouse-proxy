@@ -1445,6 +1445,30 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 			originalSQL := eq.Body
 
+			// R4-2: Streaming 模式必须调用 Validator 进行签名验证
+			// 非 streaming 模式在 copyClientToUpstream 中调用 p.validator.ValidateQuery，
+			// streaming 模式之前缺失了这一步，导致 JWS 签名验证被绕过。
+			if p.validator != nil {
+				settingsMap := make(map[string]string, len(eq.Settings)+len(eq.OldSettings))
+				for _, s := range eq.Settings {
+					settingsMap[s.Key] = s.Value
+				}
+				for _, s := range eq.OldSettings {
+					settingsMap[s.Key] = fmt.Sprintf("%d", s.Value)
+				}
+				meta := QueryMeta{
+					ConnID:       id,
+					ClientAddr:   clientConn.RemoteAddr().String(),
+					UpstreamAddr: p.cfg.Upstream,
+					SQL:          eq.Body,
+					Settings:     settingsMap,
+				}
+				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
+					log.Infof("[conn %d] streaming: query rejected by validator: %v", id, err)
+					return
+				}
+			}
+
 			// P2-1: 签名验证后截掉 auth token settings，不发送给 ClickHouse Server
 			// 在 streaming 模式下，decode 后移除 token，encode 时自然不会包含
 			eq.Settings = stripAuthTokenSettings(eq.Settings)
@@ -1922,37 +1946,23 @@ func eraseTokenValue(data []byte, tokenKey string) []byte {
 	copy(searchSeq, newLenBuf[:nNew])
 	copy(searchSeq[nNew:], newKeyBytes)
 
-	// 查找所有出现 promql_table 的位置，擦除其后的 value
-	for {
-		idx := bytes.Index(data, searchSeq)
-		if idx < 0 {
-			break
-		}
-		// R2-5: 验证匹配位置的上下文合法性
-		// searchSeq 已经包含了 UVarInt 长度前缀 + key 内容，
-		// 所以 bytes.Index 只会匹配 [len_prefix][promql_table] 模式，
+	// R4-3: 查找 promql_table 并擦除其后的 value（重构：消除 for+break 反模式）
+	idx := bytes.Index(data, searchSeq)
+	if idx >= 0 {
+		// R2-5: searchSeq 已经包含了 UVarInt 长度前缀 + key 内容，
 		// 不会匹配 SQL 文本中裸的 "promql_table" 字符串。
 		valueStart := idx + len(searchSeq)
-		if valueStart >= len(data) {
-			break
+		if valueStart < len(data) {
+			// 读取 value 的 UVarInt 长度前缀
+			valLen, n := binary.Uvarint(data[valueStart:])
+			const maxTokenValueLen = 4096
+			if n > 0 && valueStart+n+int(valLen) <= len(data) && valLen <= maxTokenValueLen {
+				// 将 value 内容清零（脱敏），保留整体结构不变
+				for i := 0; i < int(valLen); i++ {
+					data[valueStart+n+i] = '*'
+				}
+			}
 		}
-		// 读取 value 的 UVarInt 长度前缀
-		valLen, n := binary.Uvarint(data[valueStart:])
-		if n <= 0 || valueStart+n+int(valLen) > len(data) {
-			break
-		}
-		// R2-5: 额外合理性检查 — value 长度不应超过合理范围（防止误匹配）
-		const maxTokenValueLen = 4096
-		if valLen > maxTokenValueLen {
-			// 不太可能是真正的 token value，跳过
-			break
-		}
-		// 将 value 内容清零（脱敏），保留整体结构不变
-		for i := 0; i < int(valLen); i++ {
-			data[valueStart+n+i] = '*'
-		}
-		// 只处理第一个匹配（同一个包中通常只有一个 auth token）
-		break
 	}
 
 	return data
