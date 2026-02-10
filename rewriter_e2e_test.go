@@ -72,24 +72,92 @@ func (s *MockClickHouseServer) serve() {
 
 func (s *MockClickHouseServer) handleConn(conn net.Conn) {
 	defer conn.Close()
-	buf := make([]byte, 8192)
 
+	// Phase 1: 读取 ClientHello
+	// ClickHouse Native 协议: ClientHello = [type=0: UVarInt] + [client_name: String] + [major: UVarInt] + ...
+	helloBuf := make([]byte, 4096)
+	n, err := conn.Read(helloBuf)
+	if err != nil || n == 0 {
+		return
+	}
+
+	// Phase 2: 发送 ServerHello
+	// ServerHello = [type=0: UVarInt] + [name: String] + [major: UVarInt] + [minor: UVarInt] + [revision: UVarInt]
+	//            + [timezone: String (if revision >= 54058)] + [display_name: String (if revision >= 54372)]
+	//            + [version_patch: UVarInt (if revision >= 54401)]
+	var serverHello []byte
+	var buf [binary.MaxVarintLen64]byte
+	// packet_type = 0 (ServerHello)
+	n2 := binary.PutUvarint(buf[:], 0)
+	serverHello = append(serverHello, buf[:n2]...)
+	// server_name = "MockClickHouse"
+	name := []byte("MockClickHouse")
+	n2 = binary.PutUvarint(buf[:], uint64(len(name)))
+	serverHello = append(serverHello, buf[:n2]...)
+	serverHello = append(serverHello, name...)
+	// major = 24
+	n2 = binary.PutUvarint(buf[:], 24)
+	serverHello = append(serverHello, buf[:n2]...)
+	// minor = 1
+	n2 = binary.PutUvarint(buf[:], 1)
+	serverHello = append(serverHello, buf[:n2]...)
+	// revision = 54460 (supports timezone, display_name, version_patch, settings_serialized_as_strings, etc.)
+	revision := uint64(54460)
+	n2 = binary.PutUvarint(buf[:], revision)
+	serverHello = append(serverHello, buf[:n2]...)
+	// timezone = "UTC" (revision >= 54058)
+	tz := []byte("UTC")
+	n2 = binary.PutUvarint(buf[:], uint64(len(tz)))
+	serverHello = append(serverHello, buf[:n2]...)
+	serverHello = append(serverHello, tz...)
+	// display_name = "mock" (revision >= 54372)
+	dn := []byte("mock")
+	n2 = binary.PutUvarint(buf[:], uint64(len(dn)))
+	serverHello = append(serverHello, buf[:n2]...)
+	serverHello = append(serverHello, dn...)
+	// version_patch = 0 (revision >= 54401)
+	n2 = binary.PutUvarint(buf[:], 0)
+	serverHello = append(serverHello, buf[:n2]...)
+
+	if _, err := conn.Write(serverHello); err != nil {
+		return
+	}
+
+	// Phase 3: 读取 Addendum (if any) + 包循环
+	// 读取并处理后续包
 	for {
-		n, err := conn.Read(buf)
+		conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		pktBuf := make([]byte, 65536)
+		n, err := conn.Read(pktBuf)
 		if err != nil {
 			return
 		}
 
-		// 尝试提取 SQL（简化处理）
-		data := buf[:n]
+		data := pktBuf[:n]
+
+		// 尝试提取 SQL
 		if sql := extractSQLFromPacket(data); sql != "" {
 			s.mu.Lock()
 			s.receivedSQL = append(s.receivedSQL, sql)
 			s.mu.Unlock()
 		}
 
-		// 发送最小响应 (EndOfStream)
-		conn.Write([]byte{5})
+		// 检查包类型并发送适当响应
+		if len(data) > 0 {
+			pktType, _ := binary.Uvarint(data)
+			switch pktType {
+			case 1: // ClientQuery -> 回复 EndOfStream
+				conn.Write([]byte{5}) // EndOfStream
+			case 4: // ClientPing -> 回复 Pong
+				conn.Write([]byte{7}) // ServerPong (type=7 Pong in ClickHouse protocol >= 54451)
+			case 2: // ClientData -> 回复 EndOfStream (INSERT 完成)
+				// 检查是否是空 data block (INSERT 结束标记)
+				conn.Write([]byte{5}) // EndOfStream
+			default:
+				// 其他包类型，回复 EndOfStream
+				conn.Write([]byte{5})
+			}
+		}
 	}
 }
 
@@ -118,17 +186,19 @@ func (s *MockClickHouseServer) Addr() string {
 
 // extractSQLFromPacket 从 ClickHouse Native 协议包中提取 SQL
 func extractSQLFromPacket(data []byte) string {
-	// 简化实现：查找可能的 SQL 字符串
+	// 改进实现：扫描 varint-prefixed 字符串，匹配更多 SQL 关键词
+	sqlKeywords := []string{"SELECT", "INSERT", "CREATE", "DROP", "ALTER", "SHOW", "DESCRIBE", "EXPLAIN", "TRUNCATE", "OPTIMIZE", "WITH"}
 	for i := 0; i < len(data)-10; i++ {
 		// 尝试读取 varint 长度
 		length, n := binary.Uvarint(data[i:])
-		if n > 0 && length > 10 && length < 10000 && i+n+int(length) <= len(data) {
-			potential := string(data[i+n : i+n+int(length)])
-			// 检查是否像 SQL
-			upper := strings.ToUpper(potential)
-			if strings.HasPrefix(upper, "SELECT") ||
-				strings.HasPrefix(upper, "INSERT") ||
-				strings.HasPrefix(upper, "CREATE") {
+		if n <= 0 || length < 6 || length > 100000 || i+n+int(length) > len(data) {
+			continue
+		}
+		potential := string(data[i+n : i+n+int(length)])
+		// 检查是否像 SQL
+		upper := strings.ToUpper(strings.TrimSpace(potential))
+		for _, kw := range sqlKeywords {
+			if strings.HasPrefix(upper, kw) {
 				return potential
 			}
 		}
@@ -717,6 +787,151 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	result2, _ := rewriter.Rewrite(ctx, sql)
 	if result2 == sql {
 		t.Log("Second rewrite (processor added): SQL rewritten as expected")
+	}
+}
+
+// TestEndToEnd_MultipleQueriesSameRewriter 测试同一 rewriter 连续处理多个 Query
+func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
+	state := setupTestNetworkState()
+
+	config := RewriterConfig{
+		Enabled:        true,
+		LocalIndexerId: 1,
+		CHUser:         "default",
+		CHPassword:     "secret",
+	}
+	rewriter, err := NewSentioNetworkRewriter(config, state)
+	if err != nil {
+		t.Fatalf("failed to create rewriter: %v", err)
+	}
+	defer rewriter.Close()
+
+	ctx := context.Background()
+
+	// 模拟同一连接上的连续多查询
+	queries := []string{
+		"SELECT COUNT(*) FROM sentio_coinbase.transfer",
+		"SELECT * FROM sentio_pancakeswap123.Withdrawl WHERE amount > 100",
+		"SELECT 1", // 不需要重写的查询
+		"SELECT a.*, b.* FROM sentio_coinbase.transfer a JOIN sentio_pancakeswap123.Withdrawl b ON a.id = b.id",
+		"SHOW TABLES",
+	}
+
+	for i, sql := range queries {
+		result, err := rewriter.Rewrite(ctx, sql)
+		if err != nil {
+			t.Errorf("query %d (%q) rewrite failed: %v", i, sql, err)
+			continue
+		}
+		t.Logf("Query %d: %q -> %q", i, sql, result)
+	}
+}
+
+// TestEndToEnd_ShowAndDescribeStatements 测试 SHOW/DESCRIBE 语句不被干扰
+func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
+	state := setupTestNetworkState()
+
+	config := RewriterConfig{
+		Enabled:        true,
+		LocalIndexerId: 1,
+		CHUser:         "default",
+		CHPassword:     "secret",
+	}
+	rewriter, err := NewSentioNetworkRewriter(config, state)
+	if err != nil {
+		t.Fatalf("failed to create rewriter: %v", err)
+	}
+	defer rewriter.Close()
+
+	ctx := context.Background()
+
+	testCases := []struct {
+		name           string
+		inputSQL       string
+		expectNoChange bool
+	}{
+		{
+			name:           "SHOW TABLES",
+			inputSQL:       "SHOW TABLES FROM default",
+			expectNoChange: true,
+		},
+		{
+			name:           "DESCRIBE table",
+			inputSQL:       "DESCRIBE TABLE default.test_table",
+			expectNoChange: true,
+		},
+		{
+			name:           "SHOW CREATE TABLE",
+			inputSQL:       "SHOW CREATE TABLE default.test_table",
+			expectNoChange: true,
+		},
+		{
+			name:           "EXPLAIN query",
+			inputSQL:       "EXPLAIN SELECT * FROM sentio_coinbase.transfer",
+			expectNoChange: false, // 内部的表名仍需重写
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			if err != nil {
+				t.Fatalf("rewrite failed: %v", err)
+			}
+			t.Logf("Input:  %q", tc.inputSQL)
+			t.Logf("Output: %q", result)
+			if tc.expectNoChange && result != tc.inputSQL {
+				t.Errorf("expected no change, got: %s", result)
+			}
+		})
+	}
+}
+
+// TestEndToEnd_LargeSQL 测试大 SQL 查询（超过 4KB）
+func TestEndToEnd_LargeSQL(t *testing.T) {
+	state := setupTestNetworkState()
+
+	config := RewriterConfig{
+		Enabled:        true,
+		LocalIndexerId: 1,
+		CHUser:         "default",
+		CHPassword:     "secret",
+	}
+	rewriter, err := NewSentioNetworkRewriter(config, state)
+	if err != nil {
+		t.Fatalf("failed to create rewriter: %v", err)
+	}
+	defer rewriter.Close()
+
+	ctx := context.Background()
+
+	// 构造一个超过 4KB 的 SQL (模拟 INSERT ... VALUES 或复杂的 IN 列表)
+	var sb strings.Builder
+	sb.WriteString("SELECT * FROM sentio_coinbase.transfer WHERE id IN (")
+	for i := 0; i < 500; i++ {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(fmt.Sprintf("%d", i))
+	}
+	sb.WriteString(")")
+
+	largeSQL := sb.String()
+	t.Logf("Large SQL size: %d bytes", len(largeSQL))
+
+	result, err := rewriter.Rewrite(ctx, largeSQL)
+	if err != nil {
+		t.Fatalf("large SQL rewrite failed: %v", err)
+	}
+
+	// 验证表名被替换
+	if strings.Contains(result, "sentio_coinbase.transfer") {
+		t.Error("original table name should be replaced in large SQL")
+	}
+
+	// 验证 IN 列表保持完整
+	if !strings.Contains(result, "499") {
+		t.Error("IN list should be preserved in large SQL")
 	}
 }
 

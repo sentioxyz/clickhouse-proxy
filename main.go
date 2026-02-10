@@ -74,6 +74,7 @@ func main() {
 			log.Warnf("failed to create rewriter: %v, rewriting disabled", err)
 		} else {
 			rewriter = rw
+			defer rw.Close() // 确保 proxy 停止时释放 gRPC 连接
 			log.Infof("SQL rewriter enabled, service_addr=%s local_indexer_id=%d", cfg.RewriterServiceAddr, cfg.RewriterLocalIndexerId)
 		}
 	}
