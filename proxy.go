@@ -71,6 +71,7 @@ const (
 	clientCodeIgnoredPartUUIDs          proto.ClientCode = 8
 	clientCodeReadTaskResponse          proto.ClientCode = 9
 	clientCodeMergeTreeReadTaskResponse proto.ClientCode = 10
+	clientCodeQueryPlan                 proto.ClientCode = 11
 )
 
 // 协议与缓冲区相关常量
@@ -570,6 +571,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	if tc, ok := clientConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true) // P2-12: 禁用 Nagle 算法，减少小包延迟
 	}
 
 	dialer := &net.Dialer{
@@ -596,6 +598,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	if tc, ok := upstreamConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true) // P2-12: 禁用 Nagle 算法，减少小包延迟
 	}
 
 	var closeOnce sync.Once
@@ -1408,6 +1411,11 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				return
 			}
 			p.putBuffer(cbuf)
+			// P1-4: Cancel 后重置查询状态
+			// 对齐 ClickHouse TCPHandler::processCancel 的行为：
+			// Cancel 表示客户端要求中止当前查询，不应继续用旧的压缩状态
+			inQuery = false
+			queryCompression = proto.CompressionDisabled
 
 		case clientCodeKeepAlive:
 			// KeepAlive 无 payload，只需转发类型码
@@ -1430,17 +1438,19 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				log.Infof("[conn %d] streaming: TablesStatusRequest decode error: %v", id, err)
 				return
 			}
-			tbuf := &proto.Buffer{}
+			tbuf := p.getBuffer() // P2-10: 统一使用 bufferPool
 			proto.ClientTablesStatusRequest.Encode(tbuf)
 			tbuf.PutUVarInt(numTables)
 			for i := uint64(0); i < numTables; i++ {
 				db, err := chReader.Str()
 				if err != nil {
+					p.putBuffer(tbuf)
 					log.Infof("[conn %d] streaming: TablesStatusRequest db read error: %v", id, err)
 					return
 				}
 				tbl, err := chReader.Str()
 				if err != nil {
+					p.putBuffer(tbuf)
 					log.Infof("[conn %d] streaming: TablesStatusRequest table read error: %v", id, err)
 					return
 				}
@@ -1448,8 +1458,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				tbuf.PutString(tbl)
 			}
 			if _, err := upstreamWriter.Write(tbuf.Buf); err != nil {
+				p.putBuffer(tbuf)
 				return
 			}
+			p.putBuffer(tbuf)
 
 		case clientCodeIgnoredPartUUIDs:
 			// IgnoredPartUUIDs: [count: UVarInt] + [UUID(16 bytes) × count]
@@ -1460,20 +1472,23 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				log.Infof("[conn %d] streaming: IgnoredPartUUIDs count error: %v", id, err)
 				return
 			}
-			ibuf := &proto.Buffer{}
+			ibuf := p.getBuffer() // P2-10: 统一使用 bufferPool
 			ibuf.PutByte(byte(clientCodeIgnoredPartUUIDs))
 			ibuf.PutUVarInt(count)
 			for i := uint64(0); i < count; i++ {
 				uuid, err := chReader.ReadRaw(uuidSize)
 				if err != nil {
+					p.putBuffer(ibuf)
 					log.Infof("[conn %d] streaming: IgnoredPartUUIDs uuid read error: %v", id, err)
 					return
 				}
 				ibuf.Buf = append(ibuf.Buf, uuid...)
 			}
 			if _, err := upstreamWriter.Write(ibuf.Buf); err != nil {
+				p.putBuffer(ibuf)
 				return
 			}
+			p.putBuffer(ibuf)
 
 		case clientCodeReadTaskResponse:
 			// ReadTaskResponse: [response: String]
@@ -1486,36 +1501,45 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				log.Infof("[conn %d] streaming: ReadTaskResponse response error: %v", id, err)
 				return
 			}
-			rbuf := &proto.Buffer{}
+			rbuf := p.getBuffer() // P2-10: 统一使用 bufferPool
 			rbuf.PutByte(byte(clientCodeReadTaskResponse))
 			rbuf.PutString(response)
 			if _, err := upstreamWriter.Write(rbuf.Buf); err != nil {
+				p.putBuffer(rbuf)
 				return
 			}
+			p.putBuffer(rbuf)
 
 		case clientCodeMergeTreeReadTaskResponse:
-			// P1-1: MergeTreeReadTaskResponse 精确解析
-			// 根据 ClickHouse TCPHandler::receiveMergeTreeReadTaskResponseAssumeLocked:
-			// 格式: [segment: VarInt][mark: VarInt]
+			// P0-2 Fix: MergeTreeReadTaskResponse 使用 raw passthrough 透传
+			// ClickHouse ParallelReadResponse 的序列化格式非常复杂:
+			//   [version: IntBinary(UInt64)][finish: BoolText][RangesInDataPartsDescription...]
+			// 而 RangesInDataPartsDescription 包含嵌套的 part 信息和 mark ranges。
+			// 之前使用 [segment: UVarInt][mark: UVarInt] 是完全错误的。
+			// 由于格式复杂且依赖 parallel_replicas_protocol_version，
+			// 最安全的做法是退出 streaming 解析，转为 raw passthrough。
 			p.observer.ClientPacket("MergeTreeReadTaskResponse")
 			p.stats.inc("MergeTreeReadTaskResponse")
-			segment, err := chReader.UVarInt()
-			if err != nil {
-				log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse segment error: %v", id, err)
+			log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse detected, switching to raw passthrough", id)
+			p.observer.Fallback("mergetree_read_task_response")
+			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			mark, err := chReader.UVarInt()
-			if err != nil {
-				log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse mark error: %v", id, err)
+			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
+			return
+
+		case clientCodeQueryPlan:
+			// P0-3: QueryPlan 包（ClickHouse 26.x+ serialize_query_plan=1 时发送）
+			// 格式复杂且依赖版本，安全策略是退出 streaming 解析转为 raw passthrough
+			p.observer.ClientPacket("QueryPlan")
+			p.stats.inc("QueryPlan")
+			log.Infof("[conn %d] streaming: QueryPlan packet detected, switching to raw passthrough", id)
+			p.observer.Fallback("query_plan")
+			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			mbuf := &proto.Buffer{}
-			mbuf.PutByte(byte(clientCodeMergeTreeReadTaskResponse))
-			mbuf.PutUVarInt(segment)
-			mbuf.PutUVarInt(mark)
-			if _, err := upstreamWriter.Write(mbuf.Buf); err != nil {
-				return
-			}
+			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
+			return
 
 		default:
 			log.Warnf("[conn %d] streaming: unknown packet type %d, forwarding + fallback", id, codeByte)

@@ -346,20 +346,54 @@ func (r *SentioNetworkRewriter) simpleRewrite(sql string, tableWithDatabase map[
 		replacement := fmt.Sprintf("remote('%s', '%s', '%s', '%s', '%s')",
 			target.Addr, target.Database, target.Table, target.User, target.Password)
 		result = replaceOutsideQuotes(result, original, replacement)
+		// P2-9: 日志中使用 masking 避免密码泄露
+		maskedReplacement := fmt.Sprintf("remote('%s', '%s', '%s', '%s', '%s')",
+			target.Addr, target.Database, target.Table, target.User, maskPassword(target.Password))
+		log.Infof("simpleRewrite: remote table %q -> %s", original, maskedReplacement)
 	}
 
 	return result
 }
 
-// replaceOutsideQuotes 在 SQL 中替换目标字符串，但跳过单引号和双引号内的内容。
+// replaceOutsideQuotes 在 SQL 中替换目标字符串，但跳过引号和注释内的内容。
 // 这避免了 strings.ReplaceAll 可能误替换字符串字面量/注释中的表名。
 // 支持三种引用风格：单引号(')、双引号(")、反引号(`)
-// 支持两种转义方式：反斜杠转义(\') 和 ClickHouse 连续引号转义(”)
+// 支持两种转义方式：反斜杠转义(\') 和 ClickHouse 连续引号转义(")
+// P2-8: 支持 SQL 注释：行注释(--) 和 块注释(/* */)
 func replaceOutsideQuotes(sql, old, replacement string) string {
 	var result strings.Builder
 	result.Grow(len(sql))
 	i := 0
 	for i < len(sql) {
+		// P2-8: 检查行注释 (-- 到行尾)
+		if i+1 < len(sql) && sql[i] == '-' && sql[i+1] == '-' {
+			// 跳过整个行注释
+			for i < len(sql) && sql[i] != '\n' {
+				result.WriteByte(sql[i])
+				i++
+			}
+			continue
+		}
+		// P2-8: 检查块注释 (/* ... */)
+		if i+1 < len(sql) && sql[i] == '/' && sql[i+1] == '*' {
+			result.WriteByte(sql[i])
+			i++
+			result.WriteByte(sql[i])
+			i++
+			// 跳过直到找到 */
+			for i < len(sql) {
+				if i+1 < len(sql) && sql[i] == '*' && sql[i+1] == '/' {
+					result.WriteByte(sql[i])
+					i++
+					result.WriteByte(sql[i])
+					i++
+					break
+				}
+				result.WriteByte(sql[i])
+				i++
+			}
+			continue
+		}
 		// 检查是否在引号内（含反引号，ClickHouse 兼容 MySQL 的标识符引用语法）
 		if sql[i] == '\'' || sql[i] == '"' || sql[i] == '`' {
 			quote := sql[i]
@@ -369,7 +403,7 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 			for i < len(sql) {
 				result.WriteByte(sql[i])
 				if sql[i] == quote {
-					// 风险-4: 处理 ClickHouse 的连续引号转义（'' 或 ""）
+					// 风险-4: 处理 ClickHouse 的连续引号转义（'' 或 "")
 					// 例如 SELECT 'it''s a test' 中 '' 是转义的单引号
 					if i+1 < len(sql) && sql[i+1] == quote {
 						i++
