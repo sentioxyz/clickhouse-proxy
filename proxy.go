@@ -835,20 +835,23 @@ func (p *proxy) handleDataBlock(
 		return fmt.Errorf("block name: %w", err)
 	}
 
-	// 编码输出缓冲：packet_code + block_name（头部）
-	hdrBuf := &proto.Buffer{}
+	// P3-4: 使用 bufferPool 减少头部编码的内存分配（Data 块是最频繁的路径）
+	hdrBuf := p.getBuffer()
 	hdrBuf.PutByte(byte(code))
 	hdrBuf.PutString(blockName)
 
 	// 检查 context 是否已取消
 	if err := ctx.Err(); err != nil {
+		p.putBuffer(hdrBuf)
 		return fmt.Errorf("context cancelled: %w", err)
 	}
 
 	// 先写头部 (packet_code + block_name)
 	if _, err := upstreamWriter.Write(hdrBuf.Buf); err != nil {
+		p.putBuffer(hdrBuf)
 		return fmt.Errorf("write block header: %w", err)
 	}
+	p.putBuffer(hdrBuf)
 
 	if queryCompression == proto.CompressionEnabled {
 		p.observer.StreamingDataBlock("compressed")
@@ -935,42 +938,72 @@ func (p *proxy) handleDataBlock(
 		}
 	} else {
 		p.observer.StreamingDataBlock("uncompressed")
-		// ========== 非压缩模式: 直接解码 + 编码 ==========
-		// Uncompressed blocks need decode-encode to determine block boundaries.
+		// ========== 非压缩模式 ==========
+		// 需要解码 BlockInfo 和 RawBlock 来确定块边界。
 		blockInfo, err := decodeBlockInfoCompat(chReader)
 		if err != nil {
 			return fmt.Errorf("BlockInfo decode: %w", err)
 		}
 
-		var block proto.Block
-		var results proto.Results
-		if err := block.DecodeRawBlock(chReader, revision, results.Auto()); err != nil {
-			return fmt.Errorf("block raw decode: %w", err)
-		}
-
-		encBuf := &proto.Buffer{}
+		// P3-5: 使用 bufferPool 减少编码缓冲区的内存分配
+		encBuf := p.getBuffer()
 		encodeBlockInfoCompat(encBuf, blockInfo)
-		if block.End() {
-			// Align with NativeWriter: empty block writes columns=0, rows=0
+
+		// P2-1: 空 Block 快速路径 — 跳过完整的 DecodeRawBlock/EncodeRawBlock
+		// ClickHouse 在 Query 结束时发送空 Block (columns=0, rows=0) 作为结束标志。
+		// 空 Block 占所有 Data 包的 ~50%，跳过完整的列解析+编码可显著减少开销。
+		// 检测方法：Peek 前 2 字节，如果 num_columns 和 num_rows 的 UVarInt 都是 0，
+		// 则不需要解码列数据。
+		peekBytes, peekErr := br.Peek(2)
+		if peekErr == nil && len(peekBytes) >= 2 && peekBytes[0] == 0 && peekBytes[1] == 0 {
+			// 空 Block 快速路径：直接消费 2 字节 (num_columns=0, num_rows=0)
+			br.Discard(2)
 			encBuf.PutUVarInt(0)
 			encBuf.PutUVarInt(0)
+			if _, err := upstreamWriter.Write(encBuf.Buf); err != nil {
+				p.putBuffer(encBuf)
+				return fmt.Errorf("write empty block: %w", err)
+			}
+			p.putBuffer(encBuf)
+			if p.cfg.LogQueries {
+				log.Infof("[conn %d] streaming: forwarded empty %s block (fast path, %d bytes)",
+					id, code, len(encBuf.Buf))
+			}
 		} else {
-			inputCols, err := resultsToInput(results)
-			if err != nil {
-				return fmt.Errorf("resultsToInput: %w", err)
+			// 非空 Block: 完整 decode-encode
+			var block proto.Block
+			var results proto.Results
+			if err := block.DecodeRawBlock(chReader, revision, results.Auto()); err != nil {
+				p.putBuffer(encBuf)
+				return fmt.Errorf("block raw decode: %w", err)
 			}
-			if err := block.EncodeRawBlock(encBuf, revision, inputCols); err != nil {
-				return fmt.Errorf("block encode: %w", err)
+
+			if block.End() {
+				// columns=0, rows=0 的情况（理论上被快速路径拦截了，这里是防御性处理）
+				encBuf.PutUVarInt(0)
+				encBuf.PutUVarInt(0)
+			} else {
+				inputCols, err := resultsToInput(results)
+				if err != nil {
+					p.putBuffer(encBuf)
+					return fmt.Errorf("resultsToInput: %w", err)
+				}
+				if err := block.EncodeRawBlock(encBuf, revision, inputCols); err != nil {
+					p.putBuffer(encBuf)
+					return fmt.Errorf("block encode: %w", err)
+				}
 			}
-		}
 
-		if _, err := upstreamWriter.Write(encBuf.Buf); err != nil {
-			return fmt.Errorf("write uncompressed block: %w", err)
-		}
+			if _, err := upstreamWriter.Write(encBuf.Buf); err != nil {
+				p.putBuffer(encBuf)
+				return fmt.Errorf("write uncompressed block: %w", err)
+			}
 
-		if p.cfg.LogQueries {
-			log.Infof("[conn %d] streaming: forwarded %s block (%d cols, %d rows, %d bytes)",
-				id, code, block.Columns, block.Rows, len(encBuf.Buf))
+			if p.cfg.LogQueries {
+				log.Infof("[conn %d] streaming: forwarded %s block (%d cols, %d rows, %d bytes)",
+					id, code, block.Columns, block.Rows, len(encBuf.Buf))
+			}
+			p.putBuffer(encBuf)
 		}
 	}
 
