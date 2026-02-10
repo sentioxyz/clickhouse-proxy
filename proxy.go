@@ -417,11 +417,11 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 					p.consumeBuf(n + consumed)
 					continue
 				}
-				// 最终解析也失败，尝试从原始字节中提取 SQL
-				log.Infof("Query decode failed, attempting raw SQL extraction")
+				// R5-5: 两种解码方式都失败，包含两个错误信息协助排查
+				log.Infof("Query decode failed: primary=%v, fallback=%v", err, derr)
 				p.resetBuf()
 				p.disabled = true
-				return out, err
+				return out, fmt.Errorf("query decode: primary: %v; fallback: %w", err, derr)
 			}
 			// Extract settings from proto.Query
 			settings := make(map[string]string)
@@ -1790,16 +1790,19 @@ func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net
 			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
 			// R3-1: drain 已读但未发送的数据
 			// 先等待一个短超时，给读取 goroutine 时间将最后一批数据发出
+			// R5-2: 不使用 defer Stop()，在每个 return 前显式 Stop
+			// 避免在长循环中 defer 累积（虽然此处实际只触发一次）
 			drainTimer := time.NewTimer(50 * time.Millisecond)
-			defer drainTimer.Stop()
 		drainLoop:
 			for {
 				select {
 				case res := <-readCh:
 					if res.err != nil {
+						drainTimer.Stop()
 						return false
 					}
 					if _, werr := upstreamWriter.Write(res.data); werr != nil {
+						drainTimer.Stop()
 						return false
 					}
 					// 收到数据后重置超时，可能还有更多数据
@@ -1809,6 +1812,7 @@ func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net
 					break drainLoop
 				}
 			}
+			drainTimer.Stop()
 			return true
 
 		case res := <-readCh:

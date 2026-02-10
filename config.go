@@ -81,6 +81,11 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 	var n int64
 	if err := json.Unmarshal(b, &n); err == nil {
 		d.Duration = time.Duration(n)
+		// R5-4: 数字被解析为纳秒。如果值非常小（< 1秒），可能是运维误用（以为是秒）
+		if d.Duration > 0 && d.Duration < time.Second {
+			log.Warnf("[config] duration value %d is interpreted as %s (nanoseconds); did you mean %q?",
+				n, d.Duration, time.Duration(n)*time.Second)
+		}
 		return nil
 	}
 	return fmt.Errorf("duration must be a string (e.g. \"5s\") or number of nanoseconds")

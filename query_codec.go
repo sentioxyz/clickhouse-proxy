@@ -41,6 +41,10 @@ type ExtQuery struct {
 	ScriptLineNumber  uint64 // FeatureQueryAndLineNumbers (>= 54475)
 	HasJWT            bool   // FeatureInterserverJWT (>= 54476)
 	JWT               string // FeatureInterserverJWT (>= 54476)
+
+	// R5-3: HasTrace 保存解码时的原始 hasTrace 标志，
+	// 确保编码时使用原始值而非 Span.IsValid()，避免丢弃有效但 IsValid()=false 的 trace 数据。
+	HasTrace bool
 }
 
 // decodeQueryCustom 按照 ClickHouse 原生协议字段顺序逐字段解码 Query 包。
@@ -324,6 +328,8 @@ func decodeClientInfoCustom(r *proto.Reader, info *proto.ClientInfo, revision in
 		if err != nil {
 			return wrapErr("open telemetry flag", err)
 		}
+		// R5-3: 保存原始 hasTrace 标志，编码时使用此值而非 IsValid()
+		eq.HasTrace = hasTrace
 		if hasTrace {
 			var cfg trace.SpanContextConfig
 			// TraceID (16 bytes, need bswap)
@@ -459,7 +465,9 @@ func encodeClientInfoCustom(b *proto.Buffer, info *proto.ClientInfo, revision in
 
 	// OpenTelemetry
 	if proto.FeatureOpenTelemetry.In(revision) {
-		if info.Span.IsValid() {
+		// R5-3: 使用解码时保存的 HasTrace 而非 Span.IsValid()，
+		// 确保即使 trace 数据对 OpenTelemetry 无效（如全零 TraceID），也能正确透传。
+		if eq.HasTrace {
 			b.PutByte(1)
 			{
 				v := info.Span.TraceID()
