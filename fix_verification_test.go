@@ -402,29 +402,31 @@ func TestSimpleRewrite_SafeFromInjection(t *testing.T) {
 // P2 #7: Buffer Pool 验证
 // ============================================================================
 
-// TestCompressedBufPool_ReuseAndGrow 验证 sync.Pool buffer 的获取和增长行为。
-func TestCompressedBufPool_ReuseAndGrow(t *testing.T) {
+// TestSyncPool_ReuseAndGrow 验证 sync.Pool buffer 的获取和增长行为。
+// 注：compressedBufPool 已从 proxy 中移除（ReadRaw 总是返回新分配的 slice），
+// 此测试改为验证通用的 sync.Pool 行为（如 bufferPool）。
+func TestSyncPool_ReuseAndGrow(t *testing.T) {
 	p := newProxy(defaultConfig(), nil, nil)
 
-	// 第一次获取：pool 为空, 应返回 nil
-	got := p.compressedBufPool.Get()
-	if got != nil {
-		t.Error("首次从空 pool 获取应返回 nil")
+	// 测试 bufferPool（proto.Buffer）的复用
+	b1 := p.getBuffer()
+	if b1 == nil {
+		t.Fatal("getBuffer should never return nil")
+	}
+	if len(b1.Buf) != 0 {
+		t.Errorf("new buffer should be empty, got len=%d", len(b1.Buf))
 	}
 
-	// 放入一个 buffer
-	buf := make([]byte, 1024)
-	p.compressedBufPool.Put(buf)
+	// 写入数据后归还
+	b1.PutString("test data")
+	p.putBuffer(b1)
 
-	// 再次获取应返回之前的 buffer（注意 sync.Pool 不保证）
-	got = p.compressedBufPool.Get()
-	// got 可能为 nil（GC 可能已清理），但如果非 nil 则应该是可用的
-	if got != nil {
-		gotBuf := got.([]byte)
-		if cap(gotBuf) < 1024 {
-			t.Errorf("池化 buffer 容量不足: expected >= 1024, got %d", cap(gotBuf))
-		}
+	// 再次获取，应已被重置
+	b2 := p.getBuffer()
+	if len(b2.Buf) != 0 {
+		t.Errorf("reused buffer should be reset, got len=%d", len(b2.Buf))
 	}
+	p.putBuffer(b2)
 
 	t.Log("验证通过：sync.Pool buffer 复用机制工作正常")
 }

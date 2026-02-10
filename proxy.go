@@ -33,6 +33,9 @@ var packetNames = map[uint64]string{
 	9: "Data (portable)",
 }
 
+// 预编译正则表达式，避免每次调用时重复编译
+var useRegexp = regexp.MustCompile(`(?i)\buse\b`)
+
 // Known server -> client packet types in ClickHouse native protocol.
 var serverPacketNames = map[uint64]string{
 	0:  "Hello",
@@ -96,13 +99,14 @@ func (s *packetStats) snapshot() map[string]int64 {
 }
 
 type proxy struct {
-	cfg               Config
-	stats             *packetStats
-	validator         Validator
-	rewriter          Rewriter
-	observer          *MetricsObserver
-	compressedBufPool sync.Pool // P2 #7: 复用压缩块 buffer，减少 GC 压力
-	bufferPool        sync.Pool // 复用 proto.Buffer，减少包循环中的分配
+	cfg       Config
+	stats     *packetStats
+	validator Validator
+	rewriter  Rewriter
+	observer  *MetricsObserver
+	// compressedBufPool 已移除：proto.Reader.ReadRaw 总是返回新分配的 slice，
+	// 无法将数据读入 pool 获取的 buffer 中，导致 pool 形同虚设。
+	bufferPool sync.Pool // 复用 proto.Buffer，减少包循环中的分配
 }
 
 func newProxy(cfg Config, v Validator, r Rewriter) *proxy {
@@ -680,6 +684,10 @@ func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamCon
 			p.observer.BytesTransferred("upstream_to_client", float64(n))
 
 			// Detect server packet types (e.g. Exception, EndOfStream, Data)
+			// 注意：在 chunked 模式下，检测是 best-effort 的。
+			// Read() 返回的数据可能从 packet 中间开始，导致误检。
+			// 但 EndOfStream(5) 和 Exception(2) 通常是短包且独占一个 chunk，
+			// 所以大多数情况下检测仍然有效。
 			pkt := detectServerPacketType(chunk)
 			if pkt != "unknown" {
 				p.observer.ServerPacket(pkt)
@@ -826,7 +834,7 @@ func (p *proxy) handleDataBlock(
 
 	if queryCompression == proto.CompressionEnabled {
 		p.observer.StreamingDataBlock("compressed")
-		// ========== 压缩模式: raw passthrough ==========
+		// ========== 压缩模式: raw passthrough (多帧支持) ==========
 		// ClickHouse compressed frame format:
 		//   [16 bytes: CityHash128 checksum]
 		//   [1 byte: compression method (0x82=LZ4, 0x90=ZSTD, 0x02=none)]
@@ -835,67 +843,65 @@ func (p *proxy) handleDataBlock(
 		//   [N bytes: compressed data, where N = compressed_size - 9]
 		// Total frame size = 16 (checksum) + compressed_size
 		//
-		// Since Data/Scalar blocks are never modified by the proxy,
-		// we read the frame header to determine size and forward raw bytes.
+		// 重要：一个逻辑 Data Block 可能由多个压缩帧组成。
+		// 当 Block 大小超过 DBMS_MAX_COMPRESSED_BLOCK_SIZE（默认 1MB）时，
+		// ClickHouse 客户端的 CompressedWriteBuffer 会将数据分割为多个连续的压缩帧。
+		// 我们从 stream 中循环读取所有连续的压缩帧，通过检测下一个帧的 method 字节判断边界。
 
 		const frameHeaderSize = 16 + 1 + 4 + 4 // = 25 bytes
-
-		// 使用 chReader.ReadRaw 而非 io.ReadFull(br, ...)
-		// 原因：proto.NewReader(br) 内部创建了自己的 bufio.Reader 缓冲层，
-		// 当 chReader.Str() 读取 block_name 时可能预读过多数据到内部缓冲区，
-		// 此后直接从 br 读帧头可能发现数据已被内部缓冲消费。
-		// 通过 chReader.ReadRaw 保证从同一缓冲层读取，避免 TCP 流行为依赖。
-		header, err := chReader.ReadRaw(frameHeaderSize)
-		if err != nil {
-			return fmt.Errorf("compressed frame header: %w", err)
-		}
-
-		// Extract compressed_size from header[17:21] (little-endian uint32)
-		compressedSize := binary.LittleEndian.Uint32(header[17:21])
-
-		// Sanity check: compressed_size must be >= 9 (sub-header size)
-		if compressedSize < 9 {
-			return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
-		}
-		// 防御性检查：compressed_size 不应超过合理限制（32MB）
 		const maxCompressedFrameSize = 32 * 1024 * 1024
-		if compressedSize > maxCompressedFrameSize {
-			return fmt.Errorf("compressed_size %d exceeds limit %d", compressedSize, maxCompressedFrameSize)
-		}
+		totalFrameBytes := 0
 
-		// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
-		remainingDataSize := int(compressedSize) - 9
-
-		// P2 #7: 从 pool 获取 buffer，避免每次分配
-		poolBuf := p.compressedBufPool.Get()
-		var compressedData []byte
-		if poolBuf != nil {
-			compressedData = poolBuf.([]byte)
-		}
-		if cap(compressedData) < remainingDataSize {
-			compressedData = make([]byte, remainingDataSize)
-		} else {
-			compressedData = compressedData[:remainingDataSize]
-		}
-		defer func() {
-			// 避免大 buffer 堆积在 pool 中：超过 1MB 的 buffer 不放回
-			const maxPoolBufSize = 1 * 1024 * 1024
-			if cap(compressedData) <= maxPoolBufSize {
-				p.compressedBufPool.Put(compressedData)
+		for {
+			// 使用 chReader.ReadRaw 保证从同一缓冲层读取
+			header, err := chReader.ReadRaw(frameHeaderSize)
+			if err != nil {
+				return fmt.Errorf("compressed frame header: %w", err)
 			}
-		}()
-		compressedData, err = chReader.ReadRaw(remainingDataSize)
-		if err != nil {
-			return fmt.Errorf("compressed frame data: %w", err)
-		}
 
-		// Forward: dbuf (code+blockName) + header + compressedData
-		dbuf.Buf = append(dbuf.Buf, header...)
-		dbuf.Buf = append(dbuf.Buf, compressedData...)
+			// Extract compressed_size from header[17:21] (little-endian uint32)
+			compressedSize := binary.LittleEndian.Uint32(header[17:21])
+
+			// Sanity check: compressed_size must be >= 9 (sub-header size)
+			if compressedSize < 9 {
+				return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
+			}
+			if compressedSize > maxCompressedFrameSize {
+				return fmt.Errorf("compressed_size %d exceeds limit %d", compressedSize, maxCompressedFrameSize)
+			}
+
+			// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
+			remainingDataSize := int(compressedSize) - 9
+
+			compressedData, err := chReader.ReadRaw(remainingDataSize)
+			if err != nil {
+				return fmt.Errorf("compressed frame data: %w", err)
+			}
+
+			// Forward: header + compressedData
+			dbuf.Buf = append(dbuf.Buf, header...)
+			dbuf.Buf = append(dbuf.Buf, compressedData...)
+			totalFrameBytes += frameHeaderSize + remainingDataSize
+
+			// 检测是否有后续压缩帧：peek 下一个字节序列
+			// 如果下一个 17 字节（跳过 16 字节 checksum）是有效的 compression method
+			// (0x82=LZ4, 0x90=ZSTD, 0x02=none)，则继续读取
+			nextBytes, peekErr := br.Peek(17)
+			if peekErr != nil || len(nextBytes) < 17 {
+				// 无法 peek 或数据不够，当前帧可能是最后一帧
+				break
+			}
+			methodByte := nextBytes[16]
+			if methodByte != 0x82 && methodByte != 0x90 && methodByte != 0x02 {
+				// 不是压缩方法字节，说明下一个不是压缩帧，结束循环
+				break
+			}
+			// 继续读取下一个压缩帧
+		}
 
 		if p.cfg.LogQueries {
-			log.Infof("[conn %d] streaming: forwarded compressed %s block (raw passthrough, frame=%d bytes, total=%d bytes)",
-				id, code, int(compressedSize)+16, len(dbuf.Buf))
+			log.Infof("[conn %d] streaming: forwarded compressed %s block (raw passthrough, %d frame bytes, total=%d bytes)",
+				id, code, totalFrameBytes, len(dbuf.Buf))
 		}
 	} else {
 		p.observer.StreamingDataBlock("uncompressed")
@@ -1025,6 +1031,22 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	pktType, err := upReader.UVarInt()
 	if err != nil {
 		log.Errorf("[conn %d] streaming: read ServerHello packet_type error: %v", id, err)
+		return
+	}
+	// P1 #4: 检查是否是 ServerHello (type 0)
+	// 如果 upstream 返回 Exception (type 2)，直接转发给客户端
+	if pktType != 0 {
+		log.Errorf("[conn %d] streaming: expected ServerHello (type 0), got type %d", id, pktType)
+		// 将 pktType 转发给客户端，让客户端处理错误
+		errBuf := &proto.Buffer{}
+		errBuf.PutUVarInt(pktType)
+		// 将 upstream 缓冲区中的剩余数据（错误消息等）也一并转发
+		remaining := make([]byte, upBr.Buffered())
+		n, _ := upBr.Read(remaining)
+		if n > 0 {
+			errBuf.Buf = append(errBuf.Buf, remaining[:n]...)
+		}
+		clientConn.Write(errBuf.Buf)
 		return
 	}
 	serverHelloBuf.PutUVarInt(pktType)
@@ -1162,7 +1184,10 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	// 使用 serverRevision 作为判断条件（因为客户端的 sendAddendum 基于 server_revision）
 	addendumRevision := serverRevision
 	var clientSendChunked, clientRecvChunked string
-	if proto.FeatureAddendum.In(addendumRevision) {
+	// P1 #5: 双重门控 — 客户端必须也支持 Addendum 才会发送
+	// 客户端的 sendAddendum 基于 server_revision，但客户端代码版本太旧
+	// 可能根本不知道 Addendum 协议，此时不应等待
+	if proto.FeatureAddendum.In(addendumRevision) && proto.FeatureAddendum.In(clientRevision) {
 		// 设置超时以等待客户端发送 Addendum
 		if p.cfg.IdleTimeout.Duration > 0 {
 			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -1596,7 +1621,7 @@ func extractQuerySummary(chunk []byte, maxLen int) string {
 	if idx < len(clean) {
 		clean = clean[idx:]
 	} else {
-		if loc := regexp.MustCompile(`(?i)\buse\b`).FindStringIndex(clean); len(loc) == 2 {
+		if loc := useRegexp.FindStringIndex(clean); len(loc) == 2 {
 			clean = clean[loc[0]:]
 		}
 	}

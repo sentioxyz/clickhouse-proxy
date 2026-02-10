@@ -4,7 +4,17 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
+	"sync"
 )
+
+// chunkedFramePool 缓存 ChunkedWriter 的帧缓冲区，减少高频写入的 GC 压力
+var chunkedFramePool = sync.Pool{
+	New: func() interface{} {
+		// 默认分配 64KB + 8 字节帧头/尾 的缓冲区
+		buf := make([]byte, 0, defaultChunkPayloadSize+chunkedHeaderSize*2)
+		return buf
+	},
+}
 
 // ClickHouse Chunked 协议帧格式（来自 ClickHouse C++ 源码 ReadBufferFromPocoSocketChunked.h）：
 //
@@ -140,6 +150,7 @@ func (cw *ChunkedWriter) Enabled() bool {
 // 当 enabled=true 时，将数据包裹在 chunk 帧中：[size: 4 bytes LE][data][end: 4 bytes 0x00]
 // 当 enabled=false 时，直接透传到底层 Writer。
 // 优化：将 header + data + endMarker 合并为单次 Write 调用，减少系统调用开销。
+// P2 #8: 使用 sync.Pool 缓存帧缓冲区，减少高频小包写入的内存分配。
 func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 	if !cw.enabled {
 		return cw.w.Write(p)
@@ -150,12 +161,26 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 
 	// 合并为一次写入: [header:4][data:N][endMarker:4]
 	frameSize := chunkedHeaderSize + len(p) + chunkedHeaderSize
-	frame := make([]byte, frameSize)
+	frame := chunkedFramePool.Get().([]byte)
+	if cap(frame) < frameSize {
+		frame = make([]byte, frameSize)
+	} else {
+		frame = frame[:frameSize]
+	}
 	binary.LittleEndian.PutUint32(frame[:chunkedHeaderSize], uint32(len(p)))
 	copy(frame[chunkedHeaderSize:], p)
-	// endMarker 位于 frame[chunkedHeaderSize+len(p):]，零值即 0x00000000，无需额外设置
+	// endMarker 位于 frame[chunkedHeaderSize+len(p):]
+	binary.LittleEndian.PutUint32(frame[chunkedHeaderSize+len(p):], 0)
 
-	if _, err := cw.w.Write(frame); err != nil {
+	_, err := cw.w.Write(frame)
+
+	// 归还到 pool（超大帧不放回，避免 pool 中堆积大 buffer）
+	const maxPoolFrameSize = 256 * 1024 // 256KB
+	if cap(frame) <= maxPoolFrameSize {
+		chunkedFramePool.Put(frame)
+	}
+
+	if err != nil {
 		return 0, fmt.Errorf("chunked: write frame: %w", err)
 	}
 

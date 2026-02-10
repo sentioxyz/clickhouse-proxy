@@ -102,8 +102,8 @@ func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState) (*Senti
 	// 添加 keepalive 以保持长连接健康性
 	if config.ServiceAddr != "" {
 		kaParams := keepalive.ClientParameters{
-			Time:                10 * time.Second, // 每 10 秒发送 ping
-			Timeout:             3 * time.Second,  // ping 超时
+			Time:                30 * time.Second, // 每 30 秒发送 ping（P2: 从 10s 调整为 30s，减少开销）
+			Timeout:             5 * time.Second,  // ping 超时（从 3s 调整为 5s）
 			PermitWithoutStream: true,             // 无活跃流时也保持 ping
 		}
 		conn, err := grpc.NewClient(
