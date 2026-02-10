@@ -573,6 +573,12 @@ func (p *proxy) runStatsPrinter(ctx context.Context) {
 }
 
 func (p *proxy) runHealthCheck(ctx context.Context) {
+	// R6-3: 防止 panic 导致整个进程崩溃
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("runHealthCheck panic recovered: %v", r)
+		}
+	}()
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	check := func() {
@@ -949,13 +955,15 @@ func (p *proxy) handleDataBlock(
 				return fmt.Errorf("compressed frame data: %w", err)
 			}
 
-			// R2-7: 合并 header + compressedData 为单次 Write，减少系统调用开销
-			frameBuf := make([]byte, frameHeaderSize+remainingDataSize)
-			copy(frameBuf, header)
-			copy(frameBuf[frameHeaderSize:], compressedData)
-			if _, err := upstreamWriter.Write(frameBuf); err != nil {
+			// R6-1: 使用 bufferPool 减少高频 INSERT 场景的压缩帧内存分配
+			fBuf := p.getBuffer()
+			fBuf.Buf = append(fBuf.Buf[:0], header...)
+			fBuf.Buf = append(fBuf.Buf, compressedData...)
+			if _, err := upstreamWriter.Write(fBuf.Buf); err != nil {
+				p.putBuffer(fBuf)
 				return fmt.Errorf("write compressed frame: %w", err)
 			}
+			p.putBuffer(fBuf)
 			totalFrameBytes += frameHeaderSize + remainingDataSize
 
 			// R1-4: 检测是否有后续压缩帧
