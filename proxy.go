@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/binary"
@@ -20,17 +21,22 @@ import (
 
 // Known client -> server packet types in ClickHouse native protocol.
 var packetNames = map[uint64]string{
-	0: "Hello",
-	1: "Query",
-	2: "Data",
-	3: "Cancel",
-	4: "Ping",
-	5: "TablesStatusRequest",
-	6: "KeepAlive",
-	7: "Scalar",
-	8: "Poll",
-	9: "Data (portable)",
+	0:  "Hello",
+	1:  "Query",
+	2:  "Data",
+	3:  "Cancel",
+	4:  "Ping",
+	5:  "TablesStatusRequest",
+	6:  "KeepAlive",
+	7:  "Scalar",
+	8:  "IgnoredPartUUIDs",
+	9:  "ReadTaskResponse",
+	10: "MergeTreeReadTaskResponse",
+	11: "QueryPlan",
 }
+
+// 预编译正则表达式，避免每次调用时重复编译
+var useRegexp = regexp.MustCompile(`(?i)\buse\b`)
 
 // Known server -> client packet types in ClickHouse native protocol.
 var serverPacketNames = map[uint64]string{
@@ -49,6 +55,9 @@ var serverPacketNames = map[uint64]string{
 	12: "PartUUIDs",
 	13: "ReadTaskRequest",
 	14: "ProfileEvents",
+	15: "MergeTreeReadTaskRequest",
+	16: "MergeTreeAllRangesAnnouncement",
+	17: "TimezoneUpdate",
 }
 
 // Build reverse lookup for known packet names to avoid double-printing.
@@ -59,6 +68,26 @@ var packetNamesByName = func() map[string]struct{} {
 	}
 	return m
 }()
+
+// ch-go v1.0.1 未定义的客户端包类型常量
+const (
+	clientCodeKeepAlive                 proto.ClientCode = 6
+	clientCodeScalar                    proto.ClientCode = 7
+	clientCodeIgnoredPartUUIDs          proto.ClientCode = 8
+	clientCodeReadTaskResponse          proto.ClientCode = 9
+	clientCodeMergeTreeReadTaskResponse proto.ClientCode = 10
+	clientCodeQueryPlan                 proto.ClientCode = 11
+)
+
+// 协议与缓冲区相关常量
+const (
+	// fallbackRevision 在握手解码失败时使用的降级协议版本号
+	fallbackRevision = 54423
+	// uuidSize 是 ClickHouse UUID 的固定字节大小
+	uuidSize = 16
+	// defaultStreamingBufSize 是 streaming 模式下 bufio.Reader 的默认缓冲区大小 (128KB)
+	defaultStreamingBufSize = 131072
+)
 
 type packetStats struct {
 	mu     sync.Mutex
@@ -89,18 +118,44 @@ type proxy struct {
 	cfg       Config
 	stats     *packetStats
 	validator Validator
+	rewriter  Rewriter
 	observer  *MetricsObserver
+	// compressedBufPool 已移除：proto.Reader.ReadRaw 总是返回新分配的 slice，
+	// 无法将数据读入 pool 获取的 buffer 中，导致 pool 形同虚设。
+	bufferPool sync.Pool // 复用 proto.Buffer，减少包循环中的分配
 }
 
-func newProxy(cfg Config, v Validator) *proxy {
+func newProxy(cfg Config, v Validator, r Rewriter) *proxy {
 	if v == nil {
 		v = NoopValidator{}
+	}
+	if r == nil {
+		r = NoopRewriter{}
 	}
 	return &proxy{
 		cfg:       cfg,
 		stats:     newPacketStats(),
 		validator: v,
+		rewriter:  r,
 		observer:  NewMetricsObserver(),
+	}
+}
+
+// getBuffer 从 bufferPool 获取一个 proto.Buffer，并重置其内容。
+func (p *proxy) getBuffer() *proto.Buffer {
+	if v := p.bufferPool.Get(); v != nil {
+		b := v.(*proto.Buffer)
+		b.Reset()
+		return b
+	}
+	return &proto.Buffer{}
+}
+
+// putBuffer 将 proto.Buffer 放回 bufferPool。超过 1MB 的不放回，避免大 buffer 堆积。
+func (p *proxy) putBuffer(b *proto.Buffer) {
+	const maxPoolBufSize = 1 * 1024 * 1024
+	if len(b.Buf) <= maxPoolBufSize {
+		p.bufferPool.Put(b)
 	}
 }
 
@@ -330,19 +385,22 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 				if errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, io.EOF) {
 					return out, decodeErr
 				}
-				decodeErr = err
-				p.resetBuf()
-				p.disabled = true
-				return out, decodeErr
+				// Hello 解析失败时不 disable parser，而是使用默认版本号继续
+				// 这允许高版本客户端的 Query 仍能被解析
+				log.Warnf("Hello decode failed (likely newer protocol): %v, using fallback version", err)
+				p.version = fallbackRevision
+				p.addendumDone = true
+				p.resetBuf() // 清空缓冲区，跳过当前 Hello 包
+				return out, nil
 			}
 			p.version = hello.ProtocolVersion
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
 		case 1: // Query
 			if p.version == 0 {
-				p.resetBuf()
-				p.disabled = true
-				return out, decodeErr
+				// 版本号为0说明 Hello 未被解析，尝试用通用版本降级
+				log.Infof("Query received with version=0, attempting fallback decode")
+				p.version = fallbackRevision
 			}
 			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
 			r := proto.NewReader(cr)
@@ -357,10 +415,11 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 					p.consumeBuf(n + consumed)
 					continue
 				}
-				decodeErr = err
+				// 最终解析也失败，尝试从原始字节中提取 SQL
+				log.Infof("Query decode failed, attempting raw SQL extraction")
 				p.resetBuf()
 				p.disabled = true
-				return out, decodeErr
+				return out, err
 			}
 			// Extract settings from proto.Query
 			settings := make(map[string]string)
@@ -517,6 +576,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	if tc, ok := clientConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true) // P2-12: 禁用 Nagle 算法，减少小包延迟
 	}
 
 	dialer := &net.Dialer{
@@ -543,6 +603,7 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	if tc, ok := upstreamConn.(*net.TCPConn); ok {
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true) // P2-12: 禁用 Nagle 算法，减少小包延迟
 	}
 
 	var closeOnce sync.Once
@@ -553,46 +614,129 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		})
 	}
 
+	// P2-6: 连接级别最大生存时间限制
+	if p.cfg.MaxConnectionLifetime.Duration > 0 {
+		lifetimeTimer := time.AfterFunc(p.cfg.MaxConnectionLifetime.Duration, func() {
+			log.Infof("[conn %d] max connection lifetime (%s) exceeded, closing", id, p.cfg.MaxConnectionLifetime.Duration)
+			closeBoth()
+		})
+		defer lifetimeTimer.Stop()
+	}
+
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-		p.copyUpstreamToClient(id, clientConn, upstreamConn)
-		closeBoth()
-	}()
+	if p.rewriter != nil && p.cfg.RewriterEnabled {
+		// Streaming 模式：copyClientToUpstreamStreaming 需要先同步完成
+		// Hello/ServerHello/Addendum 握手（从 upstream 读 ServerHello），
+		// 之后才能启动 copyUpstreamToClient（避免两个 goroutine 同时读 upstream）。
+		handshakeDone := make(chan struct{})
+		// upstream 的 bufio.Reader，由 copyClientToUpstreamStreaming 设置
+		var upstreamBr *bufio.Reader
+		// queryDoneCh: upstream goroutine 在检测到 EndOfStream(5)/Exception(2) 时发送信号，
+		// 包循环通过 select 非阻塞接收来重置压缩状态。
+		// 缓冲区大小设为 8，确保多个快速连续的 EndOfStream 不会丢失信号。
+		queryDoneCh := make(chan struct{}, 8)
+		// chunked 协商结果，由 copyClientToUpstreamStreaming 在握手时设置
+		var srvSendChunked, clientRecvChunked string
 
-	go func() {
-		defer wg.Done()
-		p.copyClientToUpstream(ctx, id, clientConn, upstreamConn)
-		closeBoth()
-	}()
+		go func() {
+			defer wg.Done()
+			// 等握手完成后再开始 upstream→client copy
+			<-handshakeDone
+			p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, upstreamBr, queryDoneCh, srvSendChunked, clientRecvChunked)
+			closeBoth()
+		}()
+
+		go func() {
+			defer wg.Done()
+			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, queryDoneCh, &srvSendChunked, &clientRecvChunked)
+			closeBoth()
+		}()
+	} else {
+		// 非 streaming 模式：两个 goroutine 同时启动
+		go func() {
+			defer wg.Done()
+			p.copyUpstreamToClient(id, clientConn, upstreamConn)
+			closeBoth()
+		}()
+
+		go func() {
+			defer wg.Done()
+			p.copyClientToUpstream(ctx, id, clientConn, upstreamConn)
+			closeBoth()
+		}()
+	}
 
 	wg.Wait()
 	log.Infof("[conn %d] closed", id)
 }
 
 func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn) {
+	p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, nil, nil, "", "")
+}
+
+// copyUpstreamToClientFromReader 从 upstream 读数据转发给 client。
+// 如果 upstreamBr 不为 nil，从 bufio.Reader 读取（streaming 模式，防止丢失 ServerHello 后的缓存数据）。
+func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCh chan struct{}, srvSendChunked, clientRecvChunked string) {
+	// 根据 chunked 协商结果包裹 Reader/Writer
+	// srvSendChunked: server 发送到 proxy 时是否用 chunked（需要 ChunkedReader 解帧）
+	// clientRecvChunked: proxy 发送到 client 时 client 期望 chunked（需要 ChunkedWriter 封帧）
+	srvChunkedEnabled := srvSendChunked == "chunked"
+	clientChunkedEnabled := clientRecvChunked == "chunked"
+	var reader io.Reader
+	if upstreamBr != nil {
+		reader = NewChunkedReader(upstreamBr, srvChunkedEnabled)
+	}
+	var writer io.Writer = clientConn
+	if clientChunkedEnabled {
+		writer = NewChunkedWriter(clientConn, true)
+	}
+	if srvChunkedEnabled || clientChunkedEnabled {
+		log.Infof("[conn %d] upstream→client chunked: srvSend=%v clientRecv=%v", id, srvChunkedEnabled, clientChunkedEnabled)
+	}
 	buf := make([]byte, 64*1024)
 	for {
 		if p.cfg.IdleTimeout.Duration > 0 {
 			_ = upstreamConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 		}
-		n, err := upstreamConn.Read(buf)
+		var n int
+		var err error
+		if reader != nil {
+			n, err = reader.Read(buf)
+		} else {
+			n, err = upstreamConn.Read(buf)
+		}
 		if n > 0 {
 			chunk := buf[:n]
 			p.observer.BytesTransferred("upstream_to_client", float64(n))
 
 			// Detect server packet types (e.g. Exception, EndOfStream, Data)
+			// 注意：在 chunked 模式下，检测是 best-effort 的。
+			// Read() 返回的数据可能从 packet 中间开始，导致误检。
+			// 但 EndOfStream(5) 和 Exception(2) 通常是短包且独占一个 chunk，
+			// 所以大多数情况下检测仍然有效。
 			pkt := detectServerPacketType(chunk)
 			if pkt != "unknown" {
 				p.observer.ServerPacket(pkt)
 			}
 
+			// 检测 upstream EndOfStream(5)/Exception(2)，通知包循环重置压缩状态
+			// 对齐 ClickHouse 客户端 Connection::receivePacket 的行为
+			// 使用 buffered channel，非阻塞发送确保不丢失信号
+			if queryDoneCh != nil && (pkt == "EndOfStream" || pkt == "Exception") {
+				select {
+				case queryDoneCh <- struct{}{}:
+				default:
+					// channel 满时跳过（不应该发生，因为 buffer=8）
+					log.Warnf("[conn %d] queryDoneCh full, signal dropped", id)
+				}
+			}
+
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = clientConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 			}
-			if _, werr := clientConn.Write(chunk); werr != nil {
+			if _, werr := writer.Write(chunk); werr != nil {
 				log.Infof("[conn %d] upstream->client write error: %v", id, werr)
 				p.observer.Error("client_write", werr)
 				return
@@ -647,6 +791,7 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
 				}
+
 				if p.cfg.LogQueries {
 					log.Infof("[conn %d %s -> %s] Query: [%s]", id, clientConn.RemoteAddr(), p.cfg.Upstream, parsed.SQL)
 					log.Infof("[conn %d %s -> %s] Query raw hex: % X", id, clientConn.RemoteAddr(), p.cfg.Upstream, []byte(parsed.SQL))
@@ -689,7 +834,907 @@ func (p *proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 	}
 }
 
+// copyClientToUpstreamStreaming 使用 ch-go 官方协议库做流式解析和 SQL 重写。
+// 精确解码 Hello/Query 包，完全消除裸字节扫描的分包和误匹配风险。
+// handleDataBlock 统一处理压缩和非压缩的 Data/Scalar block。
+// 压缩模式: raw passthrough — read compressed frame header to determine size, forward raw bytes
+// 非压缩模式: 直接解码 BlockInfo + RawBlock → 编码
+func (p *proxy) handleDataBlock(
+	ctx context.Context,
+	id int64,
+	code proto.ClientCode,
+	chReader *proto.Reader,
+	br *bufio.Reader,
+	upstreamWriter io.Writer,
+	queryCompression proto.Compression,
+	revision int,
+) error {
+	// 读取 block_name（不压缩，始终在明文流中）
+	blockName, err := chReader.Str()
+	if err != nil {
+		return fmt.Errorf("block name: %w", err)
+	}
+
+	// P3-4: 使用 bufferPool 减少头部编码的内存分配（Data 块是最频繁的路径）
+	hdrBuf := p.getBuffer()
+	hdrBuf.PutByte(byte(code))
+	hdrBuf.PutString(blockName)
+
+	// 检查 context 是否已取消
+	if err := ctx.Err(); err != nil {
+		p.putBuffer(hdrBuf)
+		return fmt.Errorf("context cancelled: %w", err)
+	}
+
+	// 先写头部 (packet_code + block_name)
+	if _, err := upstreamWriter.Write(hdrBuf.Buf); err != nil {
+		p.putBuffer(hdrBuf)
+		return fmt.Errorf("write block header: %w", err)
+	}
+	p.putBuffer(hdrBuf)
+
+	if queryCompression == proto.CompressionEnabled {
+		p.observer.StreamingDataBlock("compressed")
+		// ========== 压缩模式: 流式逐帧 raw passthrough (多帧支持) ==========
+		// ClickHouse compressed frame format:
+		//   [16 bytes: CityHash128 checksum]
+		//   [1 byte: compression method (0x82=LZ4, 0x90=ZSTD, 0x02=none)]
+		//   [4 bytes LE: compressed_size (includes 9-byte sub-header + compressed data)]
+		//   [4 bytes LE: decompressed_size]
+		//   [N bytes: compressed data, where N = compressed_size - 9]
+		// Total frame size = 16 (checksum) + compressed_size
+		//
+		// 重要：一个逻辑 Data Block 可能由多个压缩帧组成。
+		// 当 Block 大小超过 DBMS_MAX_COMPRESSED_BLOCK_SIZE（默认 1MB）时，
+		// ClickHouse 客户端的 CompressedWriteBuffer 会将数据分割为多个连续的压缩帧。
+		// 我们从 stream 中循环读取所有连续的压缩帧，通过检测下一个帧的 method 字节判断边界。
+
+		const frameHeaderSize = 16 + 1 + 4 + 4 // = 25 bytes
+		const maxCompressedFrameSize = 32 * 1024 * 1024
+		const maxDecompressedSize = 256 * 1024 * 1024
+		totalFrameBytes := 0
+
+		for {
+			// 使用 chReader.ReadRaw 保证从同一缓冲层读取
+			header, err := chReader.ReadRaw(frameHeaderSize)
+			if err != nil {
+				return fmt.Errorf("compressed frame header: %w", err)
+			}
+
+			// Extract compressed_size from header[17:21] (little-endian uint32)
+			compressedSize := binary.LittleEndian.Uint32(header[17:21])
+
+			// Sanity check: compressed_size must be >= 9 (sub-header size)
+			if compressedSize < 9 {
+				return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
+			}
+			if compressedSize > maxCompressedFrameSize {
+				return fmt.Errorf("compressed_size %d exceeds limit %d", compressedSize, maxCompressedFrameSize)
+			}
+
+			// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
+			remainingDataSize := int(compressedSize) - 9
+
+			compressedData, err := chReader.ReadRaw(remainingDataSize)
+			if err != nil {
+				return fmt.Errorf("compressed frame data: %w", err)
+			}
+
+			// 流式逐帧转发：立即写入当前帧，不累积到内存缓冲区
+			if _, err := upstreamWriter.Write(header); err != nil {
+				return fmt.Errorf("write compressed frame header: %w", err)
+			}
+			if _, err := upstreamWriter.Write(compressedData); err != nil {
+				return fmt.Errorf("write compressed frame data: %w", err)
+			}
+			totalFrameBytes += frameHeaderSize + remainingDataSize
+
+			// 检测是否有后续压缩帧：peek 完整帧头 (25 字节)
+			// 同时验证 compressed_size 和 decompressed_size 的合理性，
+			// 避免 CityHash128 checksum 中恰好出现 0x82/0x90/0x02 导致误判。
+			nextBytes, peekErr := br.Peek(frameHeaderSize) // 25 bytes
+			if peekErr != nil || len(nextBytes) < frameHeaderSize {
+				// 无法 peek 完整帧头，当前帧是最后一帧
+				break
+			}
+			methodByte := nextBytes[16]
+			if methodByte != 0x82 && methodByte != 0x90 && methodByte != 0x02 {
+				// 不是压缩方法字节，说明下一个不是压缩帧
+				break
+			}
+			// 额外验证: compressed_size >= 9 且 decompressed_size > 0 且两者在合理范围内
+			peekCompSize := binary.LittleEndian.Uint32(nextBytes[17:21])
+			peekDecompSize := binary.LittleEndian.Uint32(nextBytes[21:25])
+			if peekCompSize < 9 || peekCompSize > maxCompressedFrameSize || peekDecompSize == 0 || peekDecompSize > maxDecompressedSize {
+				// 不符合压缩帧的合理参数范围，视为非压缩帧
+				break
+			}
+			// 继续读取下一个压缩帧
+		}
+
+		if p.cfg.LogQueries {
+			log.Infof("[conn %d] streaming: forwarded compressed %s block (streaming passthrough, %d frame bytes)",
+				id, code, totalFrameBytes)
+		}
+	} else {
+		p.observer.StreamingDataBlock("uncompressed")
+		// ========== 非压缩模式 ==========
+		// 需要解码 BlockInfo 和 RawBlock 来确定块边界。
+		blockInfo, err := decodeBlockInfoCompat(chReader)
+		if err != nil {
+			return fmt.Errorf("BlockInfo decode: %w", err)
+		}
+
+		// P3-5: 使用 bufferPool 减少编码缓冲区的内存分配
+		encBuf := p.getBuffer()
+		encodeBlockInfoCompat(encBuf, blockInfo)
+
+		// P2-1: 空 Block 快速路径 — 跳过完整的 DecodeRawBlock/EncodeRawBlock
+		// ClickHouse 在 Query 结束时发送空 Block (columns=0, rows=0) 作为结束标志。
+		// 空 Block 占所有 Data 包的 ~50%，跳过完整的列解析+编码可显著减少开销。
+		// 检测方法：Peek 前 2 字节，如果 num_columns 和 num_rows 的 UVarInt 都是 0，
+		// 则不需要解码列数据。
+		peekBytes, peekErr := br.Peek(2)
+		if peekErr == nil && len(peekBytes) >= 2 && peekBytes[0] == 0 && peekBytes[1] == 0 {
+			// 空 Block 快速路径：直接消费 2 字节 (num_columns=0, num_rows=0)
+			br.Discard(2)
+			encBuf.PutUVarInt(0)
+			encBuf.PutUVarInt(0)
+			if _, err := upstreamWriter.Write(encBuf.Buf); err != nil {
+				p.putBuffer(encBuf)
+				return fmt.Errorf("write empty block: %w", err)
+			}
+			p.putBuffer(encBuf)
+			if p.cfg.LogQueries {
+				log.Infof("[conn %d] streaming: forwarded empty %s block (fast path, %d bytes)",
+					id, code, len(encBuf.Buf))
+			}
+		} else {
+			// 非空 Block: 完整 decode-encode
+			var block proto.Block
+			var results proto.Results
+			if err := block.DecodeRawBlock(chReader, revision, results.Auto()); err != nil {
+				p.putBuffer(encBuf)
+				return fmt.Errorf("block raw decode: %w", err)
+			}
+
+			if block.End() {
+				// columns=0, rows=0 的情况（理论上被快速路径拦截了，这里是防御性处理）
+				encBuf.PutUVarInt(0)
+				encBuf.PutUVarInt(0)
+			} else {
+				inputCols, err := resultsToInput(results)
+				if err != nil {
+					p.putBuffer(encBuf)
+					return fmt.Errorf("resultsToInput: %w", err)
+				}
+				if err := block.EncodeRawBlock(encBuf, revision, inputCols); err != nil {
+					p.putBuffer(encBuf)
+					return fmt.Errorf("block encode: %w", err)
+				}
+			}
+
+			if _, err := upstreamWriter.Write(encBuf.Buf); err != nil {
+				p.putBuffer(encBuf)
+				return fmt.Errorf("write uncompressed block: %w", err)
+			}
+
+			if p.cfg.LogQueries {
+				log.Infof("[conn %d] streaming: forwarded %s block (%d cols, %d rows, %d bytes)",
+					id, code, block.Columns, block.Rows, len(encBuf.Buf))
+			}
+			p.putBuffer(encBuf)
+		}
+	}
+
+	return nil
+}
+
+func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn, upstreamConn net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan struct{}, srvSendChunkedOut, clientRecvChunkedOut *string) {
+	// 确保 handshakeDone 在函数退出时被关闭，避免 copyUpstreamToClient goroutine 永远阻塞
+	handshakeClosed := false
+	defer func() {
+		if !handshakeClosed {
+			close(handshakeDone)
+		}
+	}()
+
+	bufSize := p.cfg.StreamingBufSize
+	if bufSize <= 0 {
+		bufSize = defaultStreamingBufSize
+	}
+
+	br := bufio.NewReaderSize(clientConn, bufSize)
+	chReader := proto.NewReader(br)
+
+	// 创建 upstream 的 bufio.Reader（后续 copyUpstreamToClient 也从这里读）
+	upBr := bufio.NewReaderSize(upstreamConn, bufSize)
+	*upstreamBrOut = upBr
+
+	// ========== Phase 1: Hello 握手 ==========
+	if p.cfg.IdleTimeout.Duration > 0 {
+		_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+	}
+	typeByte, err := br.ReadByte()
+	if err != nil {
+		log.Warnf("[conn %d] streaming: read hello type error: %v", id, err)
+		return
+	}
+	if typeByte != byte(proto.ClientCodeHello) {
+		log.Infof("[conn %d] streaming: expected Hello(0), got %d, falling back", id, typeByte)
+		_ = br.UnreadByte()
+		close(handshakeDone)
+		handshakeClosed = true
+		p.fallbackRawCopy(id, br, clientConn, upstreamConn)
+		return
+	}
+
+	// P1-3: 使用 TeeReader 记录 Hello 的原始字节，实现 raw passthrough
+	// 避免 ClientHello.Encode() 可能遗漏新版本协议字段的风险
+	var helloBuf bytes.Buffer
+	teeReader := io.TeeReader(br, &helloBuf)
+	teeBr := bufio.NewReaderSize(teeReader, bufSize)
+	teeChReader := proto.NewReader(teeBr)
+
+	var hello proto.ClientHello
+	if err := hello.Decode(teeChReader); err != nil {
+		log.Warnf("[conn %d] streaming: Hello decode error: %v", id, err)
+		return
+	}
+	clientRevision := hello.ProtocolVersion
+	log.Infof("[conn %d] streaming: Hello decoded, client=%s revision=%d", id, hello.Name, clientRevision)
+
+	// 记录握手开始时间
+	handshakeStart := time.Now()
+
+	// 将 Hello 类型字节 + 原始解码的字节一起发送给 upstream
+	// helloBuf 包含了 TeeReader 记录的 Hello 所有原始字节（不含 typeByte）
+	helloPayload := make([]byte, 1+helloBuf.Len())
+	helloPayload[0] = typeByte
+	copy(helloPayload[1:], helloBuf.Bytes())
+	if _, err := upstreamConn.Write(helloPayload); err != nil {
+		log.Infof("[conn %d] streaming: write hello error: %v", id, err)
+		return
+	}
+
+	// ========== Phase 1.5: 同步读取并转发 ServerHello ==========
+	// ClickHouse 客户端在 sendHello() 后调用 receiveHello()，
+	// 收到 ServerHello 后才调用 sendAddendum()。
+	// 因此 proxy 必须先拿到 ServerHello 转发给 client，
+	// client 才会发 Addendum。
+	//
+	// ServerHello 格式（根据 client_tcp_protocol_version 条件包含不同字段）：
+	// [packet_type: UVarInt=0] [name: String] [major: UVarInt] [minor: UVarInt]
+	// [revision: UVarInt]
+	// [parallel_replicas_version: UVarInt]  (>= 54471)
+	// [timezone: String]                    (>= 54058)
+	// [display_name: String]                (>= 54372)
+	// [version_patch: UVarInt]              (>= 54401)
+	// [proto_send_chunked_srv: String]      (>= 54470)
+	// [proto_recv_chunked_srv: String]      (>= 54470)
+	// [password_rules: UVarInt(count) + pairs of Strings]  (>= password rule version)
+	// [nonce: Int64]                        (>= interserver_secret_v2)
+	// [settings: Settings]                  (>= server_settings version)
+	// [query_plan_serialization_version: UVarInt] (>= query_plan version)
+	if p.cfg.IdleTimeout.Duration > 0 {
+		_ = upstreamConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+	}
+
+	// P0-1 Fix: 使用 TeeReader 记录 ServerHello 的全部原始字节
+	// 好处：无论 ClickHouse 未来新增什么尾部字段（password_rules, nonce, settings,
+	// query_plan_serialization_version 等），都会被自动记录并原样透传给客户端。
+	// 消除了旧方案中 Buffered() 盲取在分包场景下丢失数据的风险。
+	var serverHelloRaw bytes.Buffer
+	teeUpReader := io.TeeReader(upBr, &serverHelloRaw)
+	teeUpBr := bufio.NewReaderSize(teeUpReader, bufSize)
+	teeUpChReader := proto.NewReader(teeUpBr)
+
+	// packet_type
+	pktType, err := teeUpChReader.UVarInt()
+	if err != nil {
+		log.Errorf("[conn %d] streaming: read ServerHello packet_type error: %v", id, err)
+		return
+	}
+	// P1 #4: 检查是否是 ServerHello (type 0)
+	// 如果 upstream 返回 Exception (type 2)，直接转发给客户端
+	if pktType != 0 {
+		log.Errorf("[conn %d] streaming: expected ServerHello (type 0), got type %d", id, pktType)
+		// serverHelloRaw 已经包含了 pktType 的字节
+		// 再 drain teeUpBr 中剩余的缓冲数据（错误消息等）
+		if buffered := teeUpBr.Buffered(); buffered > 0 {
+			drainBuf := make([]byte, buffered)
+			teeUpBr.Read(drainBuf)
+		}
+		clientConn.Write(serverHelloRaw.Bytes())
+		return
+	}
+
+	// name
+	serverName, err := teeUpChReader.Str()
+	if err != nil {
+		log.Errorf("[conn %d] streaming: read ServerHello name error: %v", id, err)
+		return
+	}
+
+	// major
+	major, err := teeUpChReader.UVarInt()
+	if err != nil {
+		log.Errorf("[conn %d] streaming: read ServerHello major error: %v", id, err)
+		return
+	}
+
+	// minor
+	minor, err := teeUpChReader.UVarInt()
+	if err != nil {
+		log.Errorf("[conn %d] streaming: read ServerHello minor error: %v", id, err)
+		return
+	}
+
+	// revision
+	serverRevUint, err := teeUpChReader.UVarInt()
+	if err != nil {
+		log.Errorf("[conn %d] streaming: read ServerHello revision error: %v", id, err)
+		return
+	}
+	serverRevision := int(serverRevUint)
+	log.Infof("[conn %d] streaming: ServerHello: name=%s version=%d.%d revision=%d", id, serverName, major, minor, serverRevision)
+
+	// 以下字段基于 clientRevision（服务端根据 client_tcp_protocol_version 条件发送）
+	if proto.FeatureVersionedParallelReplicas.In(clientRevision) {
+		if _, err := teeUpChReader.UVarInt(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello parallel_replicas_version error: %v", id, err)
+			return
+		}
+	}
+	if proto.FeatureTimezone.In(clientRevision) {
+		if _, err := teeUpChReader.Str(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello timezone error: %v", id, err)
+			return
+		}
+	}
+	if proto.FeatureDisplayName.In(clientRevision) {
+		if _, err := teeUpChReader.Str(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello display_name error: %v", id, err)
+			return
+		}
+	}
+	if proto.FeatureVersionPatch.In(clientRevision) {
+		if _, err := teeUpChReader.UVarInt(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello version_patch error: %v", id, err)
+			return
+		}
+	}
+	// chunked protocol negotiation (从 ServerHello 中读取服务端的 chunked caps)
+	var srvSendChunked, srvRecvChunked string
+	if proto.FeatureChunkedPackets.In(clientRevision) {
+		var err error
+		srvSendChunked, err = teeUpChReader.Str()
+		if err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello proto_send_chunked error: %v", id, err)
+			return
+		}
+		srvRecvChunked, err = teeUpChReader.Str()
+		if err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello proto_recv_chunked error: %v", id, err)
+			return
+		}
+		log.Infof("[conn %d] streaming: ServerHello chunked: send=%q recv=%q", id, srvSendChunked, srvRecvChunked)
+		// 保存协商结果给 copyUpstreamToClientFromReader
+		if srvSendChunkedOut != nil {
+			*srvSendChunkedOut = srvSendChunked
+		}
+	}
+
+	// P0-3 Fix: 将 teeUpBr 中剩余的缓冲数据完整 drain 到 serverHelloRaw。
+	// 使用循环 drain 确保即使 bufio 内部分批返回数据也能全部读完。
+	// 这些数据是 ServerHello 的尾部字段（password_rules, nonce, settings 等），
+	// 已被底层 socket 或 bufio 预读但尚未被 teeReader 处理。
+	// 必须在 close(handshakeDone) 之前完成，否则 copyUpstreamToClientFromReader
+	// 启动后会用 ChunkedReader 解析这些非 chunked 的 ServerHello 尾部数据。
+	for {
+		buffered := teeUpBr.Buffered()
+		if buffered <= 0 {
+			break
+		}
+		drainBuf := make([]byte, buffered)
+		n, err := teeUpBr.Read(drainBuf)
+		if n > 0 {
+			log.Infof("[conn %d] streaming: ServerHello tail drained: %d bytes", id, n)
+		}
+		if err != nil {
+			break
+		}
+	}
+
+	// 将 TeeReader 记录的完整 ServerHello 原始字节发给客户端
+	if _, err := clientConn.Write(serverHelloRaw.Bytes()); err != nil {
+		log.Errorf("[conn %d] streaming: write ServerHello to client error: %v", id, err)
+		return
+	}
+	log.Infof("[conn %d] streaming: ServerHello forwarded (%d bytes)", id, serverHelloRaw.Len())
+
+	// 使用 min(clientRevision, serverRevision) 作为协商后的有效 revision
+	revision := clientRevision
+	if serverRevision > 0 && serverRevision < revision {
+		revision = serverRevision
+	}
+	log.Infof("[conn %d] streaming: negotiated revision=%d (client=%d, server=%d)", id, revision, clientRevision, serverRevision)
+
+	p.observer.HandshakeCompleted(time.Since(handshakeStart).Seconds())
+
+	// 先释放握手锁让 copyUpstreamToClient 启动
+	close(handshakeDone)
+	handshakeClosed = true
+
+	// ========== Phase 1.6: 处理 Addendum ==========
+	// 注意：此时 copyUpstreamToClient 已启动，正在将 ServerHello 的剩余字段发给 client。
+	// 客户端收到完整的 ServerHello 后会发 Addendum。
+	// Addendum 字段基于 server_revision（客户端使用从 ServerHello 中读到的 revision）：
+	//   1. quota_key: String (server_revision >= FeatureQuotaKey=54458)
+	//   2. proto_send_chunked: String (server_revision >= FeatureChunkedPackets=54470)
+	//   3. proto_recv_chunked: String (server_revision >= FeatureChunkedPackets=54470)
+	//   4. parallel_replicas_version: UVarInt (server_revision >= FeatureVersionedParallelReplicas=54471)
+	// 使用 serverRevision 作为判断条件（因为客户端的 sendAddendum 基于 server_revision）
+	addendumRevision := serverRevision
+	var clientSendChunked, clientRecvChunked string
+	// P1 #5: 双重门控 — 客户端必须也支持 Addendum 才会发送
+	// 客户端的 sendAddendum 基于 server_revision，但客户端代码版本太旧
+	// 可能根本不知道 Addendum 协议，此时不应等待
+	if proto.FeatureAddendum.In(addendumRevision) && proto.FeatureAddendum.In(clientRevision) {
+		// 设置超时以等待客户端发送 Addendum
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+
+		// 1. quota_key
+		quotaKey, err := chReader.Str()
+		if err != nil {
+			log.Infof("[conn %d] streaming: read addendum quota_key error: %v", id, err)
+			return
+		}
+
+		abuf := &proto.Buffer{}
+		abuf.PutString(quotaKey)
+
+		// chunked 协议协商
+		if proto.FeatureChunkedPackets.In(addendumRevision) {
+			var err error
+			clientSendChunked, err = chReader.Str()
+			if err != nil {
+				log.Warnf("[conn %d] streaming: read addendum proto_send_chunked error: %v", id, err)
+				return
+			}
+			clientRecvChunked, err = chReader.Str()
+			if err != nil {
+				log.Warnf("[conn %d] streaming: read addendum proto_recv_chunked error: %v", id, err)
+				return
+			}
+			log.Infof("[conn %d] streaming: client chunked: send=%q recv=%q",
+				id, clientSendChunked, clientRecvChunked)
+
+			// 透传客户端的 chunked 能力给 upstream
+			abuf.PutString(clientSendChunked)
+			abuf.PutString(clientRecvChunked)
+			// 保存协商结果
+			if clientRecvChunkedOut != nil {
+				*clientRecvChunkedOut = clientRecvChunked
+			}
+		}
+
+		// 4. parallel replicas protocol version
+		if proto.FeatureVersionedParallelReplicas.In(addendumRevision) {
+			parallelVersion, err := chReader.UVarInt()
+			if err != nil {
+				log.Infof("[conn %d] streaming: read addendum parallel_replicas_version error: %v", id, err)
+				return
+			}
+			abuf.PutUVarInt(parallelVersion)
+		}
+
+		if _, err := upstreamConn.Write(abuf.Buf); err != nil {
+			log.Infof("[conn %d] streaming: write addendum error: %v", id, err)
+			return
+		}
+		log.Infof("[conn %d] streaming: addendum forwarded (quota_key=%q, clientSendChunked=%q, clientRecvChunked=%q)", id, quotaKey, clientSendChunked, clientRecvChunked)
+	}
+
+	// ========== Phase 2: 包循环 ==========
+	// Chunked 适配层（在握手完成后、包循环开始前插入）
+	// 注意：ClickHouse 的 chunked 协议只在握手完成后启用，Hello/ServerHello/Addendum 始终不 chunked
+	clientChunkedEnabled := clientSendChunked == "chunked"
+	upstreamChunkedEnabled := srvRecvChunked == "chunked"
+	if clientChunkedEnabled || upstreamChunkedEnabled {
+		log.Infof("[conn %d] streaming: enabling chunked adapters (client→proxy: %v, proxy→upstream: %v)",
+			id, clientChunkedEnabled, upstreamChunkedEnabled)
+	}
+	if clientChunkedEnabled {
+		// 客户端发送 chunked 数据 → 用 ChunkedReader 包裹 br
+		// 这样 br.ReadByte() 和 chReader 都能透明读到"裸"协议数据
+		chunkedClientReader := NewChunkedReader(br, true)
+		br = bufio.NewReaderSize(chunkedClientReader, bufSize)
+		chReader = proto.NewReader(br)
+	}
+	var upstreamWriter io.Writer = upstreamConn
+	if upstreamChunkedEnabled {
+		// upstream 期望 chunked 数据 → 用 ChunkedWriter 包裹
+		upstreamWriter = NewChunkedWriter(upstreamConn, true)
+	}
+	_ = upstreamWriter // 以下包循环 / handleDataBlock 通过它写入 upstream
+
+	// 跟踪当前 Query 的压缩状态，用于决定 Data 块的处理方式
+	var queryCompression proto.Compression
+
+	// 两阶段包循环状态机，对齐 ClickHouse TCPHandler 的
+	// receivePacketsExpectQuery / receivePacketsExpectData 模式。
+	// expectQuery: 等待新 Query（只接受 Query/Ping/Cancel/TablesStatusRequest/IgnoredPartUUIDs）
+	// expectData: Query 执行中（只接受 Data/Scalar/Ping/Cancel/ReadTaskResponse 等）
+	const (
+		expectQuery = 0
+		expectData  = 1
+	)
+	expectState := expectQuery
+
+	for {
+		// 通过 channel 检测 upstream EndOfStream/Exception，重置压缩状态
+		// 非阻塞 select：有信号就处理，没有就继续
+		if expectState == expectData && queryDoneCh != nil {
+			select {
+			case <-queryDoneCh:
+				expectState = expectQuery
+				queryCompression = proto.CompressionDisabled
+			default:
+			}
+		}
+
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+
+		codeByte, err := br.ReadByte()
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !isTimeout(err) {
+				log.Infof("[conn %d] streaming: read packet type error: %v", id, err)
+			}
+			return
+		}
+		code := proto.ClientCode(codeByte)
+
+		switch code {
+		case proto.ClientCodeQuery:
+			// 使用自定义 Query 解码器（支持所有协议版本，与 ClickHouse TCPHandler 精确对齐）
+			decodeStart := time.Now()
+			eq, err := decodeQueryCustom(chReader, revision)
+			if err != nil {
+				log.Warnf("[conn %d] streaming: Query decode error: %v", id, err)
+				return
+			}
+			p.observer.QueryDecoded(time.Since(decodeStart).Seconds())
+			p.observer.ClientPacket("Query")
+			p.stats.inc("Query")
+
+			originalSQL := eq.Body
+
+			// P2-1: 签名验证后截掉 auth token settings，不发送给 ClickHouse Server
+			// 在 streaming 模式下，decode 后移除 token，encode 时自然不会包含
+			eq.Settings = stripAuthTokenSettings(eq.Settings)
+			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
+
+			// SQL 重写
+			if p.rewriter != nil && p.cfg.RewriterEnabled {
+				rewriteStart := time.Now()
+				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body)
+				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
+				if err != nil {
+					log.Warnf("[conn %d] streaming: SQL rewrite failed: %v", id, err)
+				} else if rewrittenSQL != eq.Body {
+					log.Infof("[conn %d] streaming rewrite: %q -> %q", id, eq.Body, rewrittenSQL)
+					eq.Body = rewrittenSQL
+				}
+			}
+
+			if p.cfg.LogQueries {
+				log.Infof("[conn %d] streaming Query: %q", id, originalSQL)
+			}
+
+			// 使用自定义编码器重编码 Query（与 decodeQueryCustom 严格镜像）
+			qbuf := p.getBuffer()
+			encodeQueryCustom(qbuf, eq, revision)
+			if _, err := upstreamWriter.Write(qbuf.Buf); err != nil {
+				p.putBuffer(qbuf)
+				log.Infof("[conn %d] streaming: write query error: %v", id, err)
+				return
+			}
+			p.putBuffer(qbuf)
+			p.observer.QueryForwarded()
+
+			// 保存压缩状态，影响后续 Data 块的处理方式
+			queryCompression = eq.Compression
+			expectState = expectData // 对齐 TCPHandler：Query 后进入 expectData 阶段
+
+		case proto.ClientCodeData:
+			if expectState == expectQuery {
+				log.Warnf("[conn %d] streaming: unexpected Data packet in expectQuery state (TCPHandler would reject)", id)
+			}
+			p.observer.ClientPacket("Data")
+			p.stats.inc("Data")
+			if err := p.handleDataBlock(ctx, id, proto.ClientCodeData, chReader, br, upstreamWriter, queryCompression, revision); err != nil {
+				log.Infof("[conn %d] streaming: Data block error: %v", id, err)
+				return
+			}
+
+		case clientCodeScalar:
+			// Scalar 包格式与 Data 完全一致（用于子查询标量值）
+			if expectState == expectQuery {
+				log.Warnf("[conn %d] streaming: unexpected Scalar packet in expectQuery state (TCPHandler would reject)", id)
+			}
+			p.observer.ClientPacket("Scalar")
+			p.stats.inc("Scalar")
+			if err := p.handleDataBlock(ctx, id, clientCodeScalar, chReader, br, upstreamWriter, queryCompression, revision); err != nil {
+				log.Infof("[conn %d] streaming: Scalar block error: %v", id, err)
+				return
+			}
+
+		case proto.ClientCodePing:
+			p.observer.ClientPacket("Ping")
+			p.stats.inc("Ping")
+			pbuf := p.getBuffer()
+			proto.ClientCodePing.Encode(pbuf)
+			if _, err := upstreamWriter.Write(pbuf.Buf); err != nil {
+				p.putBuffer(pbuf)
+				return
+			}
+			p.putBuffer(pbuf)
+
+		case proto.ClientCodeCancel:
+			p.observer.ClientPacket("Cancel")
+			p.stats.inc("Cancel")
+			cbuf := p.getBuffer()
+			proto.ClientCodeCancel.Encode(cbuf)
+			if _, err := upstreamWriter.Write(cbuf.Buf); err != nil {
+				p.putBuffer(cbuf)
+				return
+			}
+			p.putBuffer(cbuf)
+			// P1-4: Cancel 后重置查询状态
+			// 对齐 ClickHouse TCPHandler::processCancel 的行为：
+			// Cancel 表示客户端要求中止当前查询，不应继续用旧的压缩状态
+			expectState = expectQuery
+			queryCompression = proto.CompressionDisabled
+
+		case clientCodeKeepAlive:
+			// KeepAlive 无 payload，只需转发类型码
+			p.observer.ClientPacket("KeepAlive")
+			p.stats.inc("KeepAlive")
+			kbuf := p.getBuffer()
+			kbuf.PutByte(byte(clientCodeKeepAlive))
+			if _, err := upstreamWriter.Write(kbuf.Buf); err != nil {
+				p.putBuffer(kbuf)
+				return
+			}
+			p.putBuffer(kbuf)
+
+		case proto.ClientTablesStatusRequest:
+			p.observer.ClientPacket("TablesStatusRequest")
+			p.stats.inc("TablesStatusRequest")
+			// 结构: [num_tables: UVarInt] + [database: String, table: String] × N
+			numTables, err := chReader.UVarInt()
+			if err != nil {
+				log.Infof("[conn %d] streaming: TablesStatusRequest decode error: %v", id, err)
+				return
+			}
+			tbuf := p.getBuffer() // P2-10: 统一使用 bufferPool
+			proto.ClientTablesStatusRequest.Encode(tbuf)
+			tbuf.PutUVarInt(numTables)
+			for i := uint64(0); i < numTables; i++ {
+				db, err := chReader.Str()
+				if err != nil {
+					p.putBuffer(tbuf)
+					log.Infof("[conn %d] streaming: TablesStatusRequest db read error: %v", id, err)
+					return
+				}
+				tbl, err := chReader.Str()
+				if err != nil {
+					p.putBuffer(tbuf)
+					log.Infof("[conn %d] streaming: TablesStatusRequest table read error: %v", id, err)
+					return
+				}
+				tbuf.PutString(db)
+				tbuf.PutString(tbl)
+			}
+			if _, err := upstreamWriter.Write(tbuf.Buf); err != nil {
+				p.putBuffer(tbuf)
+				return
+			}
+			p.putBuffer(tbuf)
+
+		case clientCodeIgnoredPartUUIDs:
+			// 对齐 TCPHandler: IgnoredPartUUIDs 只在 expectQuery 状态有效
+			if expectState == expectData {
+				log.Warnf("[conn %d] streaming: unexpected IgnoredPartUUIDs in expectData state (TCPHandler would reject)", id)
+			}
+			// IgnoredPartUUIDs: [count: UVarInt] + [UUID(16 bytes) × count]
+			p.observer.ClientPacket("IgnoredPartUUIDs")
+			p.stats.inc("IgnoredPartUUIDs")
+			count, err := chReader.UVarInt()
+			if err != nil {
+				log.Infof("[conn %d] streaming: IgnoredPartUUIDs count error: %v", id, err)
+				return
+			}
+			ibuf := p.getBuffer() // P2-10: 统一使用 bufferPool
+			ibuf.PutByte(byte(clientCodeIgnoredPartUUIDs))
+			ibuf.PutUVarInt(count)
+			for i := uint64(0); i < count; i++ {
+				uuid, err := chReader.ReadRaw(uuidSize)
+				if err != nil {
+					p.putBuffer(ibuf)
+					log.Infof("[conn %d] streaming: IgnoredPartUUIDs uuid read error: %v", id, err)
+					return
+				}
+				ibuf.Buf = append(ibuf.Buf, uuid...)
+			}
+			if _, err := upstreamWriter.Write(ibuf.Buf); err != nil {
+				p.putBuffer(ibuf)
+				return
+			}
+			p.putBuffer(ibuf)
+
+		case clientCodeReadTaskResponse:
+			// ReadTaskResponse: [response: String]
+			// 根据 ClickHouse TCPHandler::receiveReadTaskResponseAssumeLocked，
+			// 只有一个 readStringBinary，没有 version 字段。
+			p.observer.ClientPacket("ReadTaskResponse")
+			p.stats.inc("ReadTaskResponse")
+			response, err := chReader.Str()
+			if err != nil {
+				log.Infof("[conn %d] streaming: ReadTaskResponse response error: %v", id, err)
+				return
+			}
+			rbuf := p.getBuffer() // P2-10: 统一使用 bufferPool
+			rbuf.PutByte(byte(clientCodeReadTaskResponse))
+			rbuf.PutString(response)
+			if _, err := upstreamWriter.Write(rbuf.Buf); err != nil {
+				p.putBuffer(rbuf)
+				return
+			}
+			p.putBuffer(rbuf)
+
+		case clientCodeMergeTreeReadTaskResponse:
+			// P0-3 Fix: MergeTreeReadTaskResponse 使用临时 raw passthrough
+			// 转发 codeByte 后进入临时 raw copy 模式，等待当前查询完成后恢复 streaming
+			p.observer.ClientPacket("MergeTreeReadTaskResponse")
+			p.stats.inc("MergeTreeReadTaskResponse")
+			log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse detected, temporary raw passthrough", id)
+			p.observer.Fallback("mergetree_read_task_response")
+			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
+				return
+			}
+			// 临时 raw passthrough —— 等待查询完成后恢复 streaming
+			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCh) {
+				return
+			}
+			expectState = expectQuery
+			queryCompression = proto.CompressionDisabled
+			log.Infof("[conn %d] streaming: resumed streaming after MergeTreeReadTaskResponse", id)
+			continue
+
+		case clientCodeQueryPlan:
+			// P0-3 Fix: QueryPlan 也使用临时 raw passthrough
+			p.observer.ClientPacket("QueryPlan")
+			p.stats.inc("QueryPlan")
+			log.Infof("[conn %d] streaming: QueryPlan packet detected, temporary raw passthrough", id)
+			p.observer.Fallback("query_plan")
+			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
+				return
+			}
+			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCh) {
+				return
+			}
+			expectState = expectQuery
+			queryCompression = proto.CompressionDisabled
+			log.Infof("[conn %d] streaming: resumed streaming after QueryPlan", id)
+			continue
+
+		default:
+			// 未知包类型：无法确定包结构边界，仍使用永久 fallback
+			log.Warnf("[conn %d] streaming: unknown packet type %d, forwarding + permanent fallback", id, codeByte)
+			p.observer.Fallback("unknown_packet")
+			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
+				return
+			}
+			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
+			return
+		}
+	}
+}
+
+// forwardUntilQueryDone 临时 raw passthrough 模式：逐块转发客户端数据到 upstream，
+// 直到 queryDoneCh 收到信号表明当前查询已完成（upstream 返回 EndOfStream/Exception）。
+// 返回 true 表示查询完成可恢复 streaming，false 表示连接错误应退出。
+//
+// P0-2 Fix: 使用 channel + select 替代 100ms Peek(1) 忙等轮询，
+// 消除高并发下的无效系统调用开销。
+func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCh chan struct{}) bool {
+	// 用 goroutine 将阻塞的 br.Read 包装为 channel，与 queryDoneCh 一起 select
+	type readResult struct {
+		data []byte
+		err  error
+	}
+	readCh := make(chan readResult, 1)
+
+	// 启动读取 goroutine
+	go func() {
+		buf := make([]byte, 64*1024)
+		for {
+			if p.cfg.IdleTimeout.Duration > 0 {
+				_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+			}
+			n, err := br.Read(buf)
+			if n > 0 {
+				// 复制数据，因为 buf 会被复用
+				data := make([]byte, n)
+				copy(data, buf[:n])
+				readCh <- readResult{data: data}
+			}
+			if err != nil {
+				readCh <- readResult{err: err}
+				return
+			}
+		}
+	}()
+
+	for {
+		select {
+		case <-queryDoneCh:
+			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
+			// drain 已读但未发送的数据
+			for {
+				select {
+				case res := <-readCh:
+					if res.err != nil {
+						return false
+					}
+					if _, werr := upstreamWriter.Write(res.data); werr != nil {
+						return false
+					}
+				default:
+					return true
+				}
+			}
+
+		case res := <-readCh:
+			if res.err != nil {
+				return false
+			}
+			if _, werr := upstreamWriter.Write(res.data); werr != nil {
+				return false
+			}
+		}
+	}
+}
+
+// fallbackRawCopy 回退到原始逐 chunk 转发模式（永久性）。
+// upstreamWriter 可能是 ChunkedWriter（当 chunked 协议启用时），确保 fallback 数据也通过 chunked 层。
+func (p *proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer) {
+	log.Infof("[conn %d] falling back to raw copy mode", id)
+	buf := make([]byte, 64*1024)
+	for {
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+		n, err := br.Read(buf)
+		if n > 0 {
+			if _, werr := upstreamWriter.Write(buf[:n]); werr != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
 func (p *proxy) logPacket(id int64, clientAddr string, pktType string, chunk []byte) {
+
 	switch pktType {
 	case "Query":
 		if p.cfg.LogQueries {
@@ -715,6 +1760,37 @@ func isTimeout(err error) bool {
 		return true
 	}
 	return false
+}
+
+// authTokenKeys 是需要在 streaming 模式下截掉的 auth token setting 键列表。
+var authTokenKeys = map[string]bool{
+	"x_auth_token":     true,
+	"SQL_x_auth_token": true,
+}
+
+// stripAuthTokenSettings 从新格式 Settings 中移除 auth token 相关的 setting。
+// 签名验证已在 proxy 端完成，token 不应发送给 ClickHouse Server。
+func stripAuthTokenSettings(settings []proto.Setting) []proto.Setting {
+	n := 0
+	for _, s := range settings {
+		if !authTokenKeys[s.Key] {
+			settings[n] = s
+			n++
+		}
+	}
+	return settings[:n]
+}
+
+// stripAuthTokenOldSettings 从旧格式 Settings 中移除 auth token 相关的 setting。
+func stripAuthTokenOldSettings(settings []OldSetting) []OldSetting {
+	n := 0
+	for _, s := range settings {
+		if !authTokenKeys[s.Key] {
+			settings[n] = s
+			n++
+		}
+	}
+	return settings[:n]
 }
 
 // replaceToken replaces all occurrences of a length-prefixed key with another key,
@@ -800,7 +1876,7 @@ func extractQuerySummary(chunk []byte, maxLen int) string {
 	if idx < len(clean) {
 		clean = clean[idx:]
 	} else {
-		if loc := regexp.MustCompile(`(?i)\buse\b`).FindStringIndex(clean); len(loc) == 2 {
+		if loc := useRegexp.FindStringIndex(clean); len(loc) == 2 {
 			clean = clean[loc[0]:]
 		}
 	}

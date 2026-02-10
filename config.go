@@ -28,6 +28,32 @@ type Config struct {
 	AuthAllowedAddresses []string `json:"auth_allowed_addresses"`
 	AuthMaxTokenAge      Duration `json:"auth_max_token_age"`
 	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"` // If true, requests without auth token are allowed
+
+	// SQL Rewriter configuration
+	RewriterEnabled        bool     `json:"rewriter_enabled"`          // 是否启用 SQL 重写
+	RewriterServiceAddr    string   `json:"rewriter_service_addr"`     // sql-rewriter gRPC 服务地址
+	RewriterLocalIndexerId uint64   `json:"rewriter_local_indexer_id"` // 本地 Indexer ID
+	RewriterTimeout        Duration `json:"rewriter_timeout"`          // 重写超时时间
+
+	// Network State configuration
+	NetworkStateSource   string `json:"network_state_source"`   // 状态源: "file" 或 "postgres"
+	NetworkStateFile     string `json:"network_state_file"`     // 状态文件路径
+	NetworkStatePostgres string `json:"network_state_postgres"` // PostgreSQL 连接串
+
+	// ClickHouse credentials for remote table access
+	CHUser     string `json:"ch_user"`     // ClickHouse 用户名
+	CHPassword string `json:"ch_password"` // ClickHouse 密码
+
+	// Streaming bufio size (bytes). Default: 131072 (128KB).
+	StreamingBufSize int `json:"streaming_buf_size"`
+
+	// ValidateChecksum 是否启用压缩数据的 checksum 校验（CityHash128）
+	ValidateChecksum bool `json:"validate_checksum"`
+
+	// MaxConnectionLifetime 单个连接的最大存活时间。
+	// 超过此时间后连接将被关闭，防止慢速客户端无限占用资源。
+	// 参考 ClickHouse Server 的 TCP 连接管理行为，默认 24h。
+	MaxConnectionLifetime Duration `json:"max_connection_lifetime"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -78,6 +104,22 @@ func defaultConfig() Config {
 		AuthAllowedAddresses: nil,
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
 		AuthAllowNoAuth:      false,
+		// Rewriter defaults: disabled by default
+		RewriterEnabled:        false,
+		RewriterServiceAddr:    envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
+		RewriterLocalIndexerId: 0,
+		RewriterTimeout:        Duration{5 * time.Second},
+		// Network state defaults
+		NetworkStateSource:   envOrDefault("CK_NETWORK_STATE_SOURCE", "file"),
+		NetworkStateFile:     envOrDefault("CK_NETWORK_STATE_FILE", ""),
+		NetworkStatePostgres: envOrDefault("CK_NETWORK_STATE_POSTGRES", ""),
+		// ClickHouse credentials
+		CHUser:     envOrDefault("CK_CH_USER", "default"),
+		CHPassword: envOrDefault("CK_CH_PASSWORD", ""),
+		// Streaming buffer size
+		StreamingBufSize:      131072, // 128KB
+		ValidateChecksum:      false,
+		MaxConnectionLifetime: Duration{24 * time.Hour},
 	}
 }
 

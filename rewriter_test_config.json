@@ -1,0 +1,15 @@
+{
+    "listen": ":9001",
+    "upstream": "127.0.0.1:9000",
+    "auth_enabled": false,
+    "rewriter_enabled": true,
+    "rewriter_service_addr": "localhost:50051",
+    "rewriter_local_indexer_id": 1,
+    "rewriter_timeout": "5s",
+    "network_state_source": "file",
+    "network_state_file": "./rewriter_test_state.yaml",
+    "ch_user": "default",
+    "ch_password": "password",
+    "log_queries": true,
+    "log_data": false
+}

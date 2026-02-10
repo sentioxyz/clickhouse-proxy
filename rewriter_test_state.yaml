@@ -1,0 +1,24 @@
+# 本地测试网络状态
+indexer_infos:
+  1:
+    indexer_id: 1
+    indexer_url: "127.0.0.1"
+    clickhouse_proxy_port: 9001
+  2:
+    indexer_id: 2
+    indexer_url: "127.0.0.1"
+    clickhouse_proxy_port: 9001  # 指向同一个 proxy 模拟远程
+
+processor_allocations:
+  coinbase:
+    - processor_id: "coinbase"
+      indexer_id: 1
+  pancakeswap123:
+    - processor_id: "pancakeswap123"
+      indexer_id: 2
+
+processor_infos:
+  coinbase:
+    processor_id: "coinbase"
+  pancakeswap123:
+    processor_id: "pancakeswap123"

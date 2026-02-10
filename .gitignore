@@ -36,9 +36,11 @@ coverage.txt
 *.a
 
 # Local configuration
-config.json
+config*.json
+!config.example.json
 .ck_runtime/
 tests/data/
 tests/bin/
 tests/*.log
-external/
+external/ck_remote_proxy_linux
+CONTEXT_SUMMARY.md
