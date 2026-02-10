@@ -13,7 +13,6 @@ package main
 
 import (
 	"fmt"
-	log "sentioxyz/sentio-core/common/log"
 
 	"github.com/ClickHouse/ch-go/proto"
 	"github.com/segmentio/asm/bswap"
@@ -97,11 +96,13 @@ func decodeQueryCustom(r *proto.Reader, revision int) (*ExtQuery, error) {
 			if key == "" {
 				break
 			}
-			val, err := r.Int64()
+			// R3-2: 旧格式 value 是 UInt64（8 字节 LE），使用 UInt64 而非 Int64。
+			// ClickHouse TCPHandler 中的 readBinary(UInt64, in) 对应 8 字节 LE 无符号整数。
+			val, err := r.UInt64()
 			if err != nil {
 				return nil, wrapErr("OldSetting.Value", err)
 			}
-			eq.OldSettings = append(eq.OldSettings, OldSetting{Key: key, Value: uint64(val)})
+			eq.OldSettings = append(eq.OldSettings, OldSetting{Key: key, Value: val})
 		}
 	}
 
@@ -183,10 +184,10 @@ func encodeQueryCustom(b *proto.Buffer, eq *ExtQuery, revision int) {
 		}
 		b.PutString("") // end of settings
 	} else {
-		// 旧格式
+		// 旧格式: R3-2 修复——使用 PutUInt64 与解码对称
 		for _, s := range eq.OldSettings {
 			b.PutString(s.Key)
-			b.PutInt64(int64(s.Value))
+			b.PutUInt64(s.Value)
 		}
 		b.PutString("") // end of settings
 	}
@@ -540,9 +541,10 @@ func resultsToInput(results proto.Results) ([]proto.InputColumn, error) {
 
 // BlockInfoCompat 扩展 ch-go 的 BlockInfo，支持 field 3。
 type BlockInfoCompat struct {
-	Overflows         bool
-	BucketNum         int
-	OutOfOrderBuckets []int32 // field 3: ClickHouse 26.x 新增
+	Overflows            bool
+	BucketNum            int
+	OutOfOrderBuckets    []int32 // field 3: ClickHouse 26.x 新增
+	HasOutOfOrderBuckets bool    // R3-5: 区分「没有 field 3」和「field 3 为空」
 }
 
 func decodeBlockInfoCompat(r *proto.Reader) (*BlockInfoCompat, error) {
@@ -569,6 +571,7 @@ func decodeBlockInfoCompat(r *proto.Reader) (*BlockInfoCompat, error) {
 			info.BucketNum = int(v)
 		case 3: // out_of_order_buckets (vector<Int32>)
 			// readBinary(vector<Int32>) = [count: UInt64][Int32 × count]
+			info.HasOutOfOrderBuckets = true // R3-5: 标记 field 3 存在
 			count, err := r.UVarInt()
 			if err != nil {
 				return nil, fmt.Errorf("out_of_order_buckets count: %w", err)
@@ -583,12 +586,11 @@ func decodeBlockInfoCompat(r *proto.Reader) (*BlockInfoCompat, error) {
 			}
 			info.OutOfOrderBuckets = buckets
 		default:
-			// 容错处理：未知 field ID 尝试跳过一个 UVarInt 值
-			// 当 ClickHouse 新版本添加新 field 时不会导致连接断开
-			log.Warnf("decodeBlockInfoCompat: unknown field %d, attempting to skip", f)
-			if _, err := r.UVarInt(); err != nil {
-				return nil, fmt.Errorf("unknown BlockInfo field %d: skip failed: %w", f, err)
-			}
+			// R3-4: 对未知 field ID 的安全处理
+			// BlockInfo 的 field 类型无法自描述（可能是 Bool、Int32、vector 等），
+			// 盲目跳过一个 UVarInt 会导致数据流偏移错误。
+			// 返回错误让调用方决定是否 fallback。
+			return nil, fmt.Errorf("decodeBlockInfoCompat: unknown field %d, cannot safely skip (field type unknown)", f)
 		}
 	}
 }
@@ -600,8 +602,9 @@ func encodeBlockInfoCompat(b *proto.Buffer, info *BlockInfoCompat) {
 	// field 2: bucket_num
 	b.PutUVarInt(2)
 	b.PutInt32(int32(info.BucketNum))
-	// field 3: out_of_order_buckets (only if non-empty)
-	if len(info.OutOfOrderBuckets) > 0 {
+	// field 3: out_of_order_buckets
+	// R3-5: 仅在输入中存在 field 3 时才写回（即使为空），确保严格透传
+	if info.HasOutOfOrderBuckets {
 		b.PutUVarInt(3)
 		b.PutUVarInt(uint64(len(info.OutOfOrderBuckets)))
 		for _, v := range info.OutOfOrderBuckets {

@@ -343,7 +343,7 @@ func TestMaxConnectionLifetime(t *testing.T) {
 // ============================================================================
 
 func TestBlockInfoUnknownField(t *testing.T) {
-	t.Run("未知 field 被跳过而非报错", func(t *testing.T) {
+	t.Run("未知 field 应报错（R3-4 安全修复）", func(t *testing.T) {
 		// 构造 BlockInfo 数据，包含未知 field 4
 		buf := &proto.Buffer{}
 		// field 1: is_overflows
@@ -359,16 +359,13 @@ func TestBlockInfoUnknownField(t *testing.T) {
 		buf.PutUVarInt(0)
 
 		reader := proto.NewReader(bufio.NewReader(bytes.NewReader(buf.Buf)))
-		info, err := decodeBlockInfoCompat(reader)
+		_, err := decodeBlockInfoCompat(reader)
 
-		if err != nil {
-			t.Fatalf("decodeBlockInfoCompat should not error on unknown field, got: %v", err)
-		}
-		if info.Overflows != false {
-			t.Errorf("Overflows = %v, want false", info.Overflows)
-		}
-		if info.BucketNum != -1 {
-			t.Errorf("BucketNum = %d, want -1", info.BucketNum)
+		// R3-4: 未知 field 现在返回错误而非尝试跳过（因为无法安全确定 field 类型）
+		if err == nil {
+			t.Error("R3-4: decodeBlockInfoCompat should error on unknown field 4")
+		} else {
+			t.Logf("OK: got expected error: %v", err)
 		}
 	})
 
@@ -408,7 +405,7 @@ func TestBlockInfoUnknownField(t *testing.T) {
 		}
 	})
 
-	t.Run("多个未知 fields 连续跳过", func(t *testing.T) {
+	t.Run("多个未知 fields 应报错（R3-4）", func(t *testing.T) {
 		buf := &proto.Buffer{}
 		// field 5: unknown
 		buf.PutUVarInt(5)
@@ -423,13 +420,13 @@ func TestBlockInfoUnknownField(t *testing.T) {
 		buf.PutUVarInt(0)
 
 		reader := proto.NewReader(bufio.NewReader(bytes.NewReader(buf.Buf)))
-		info, err := decodeBlockInfoCompat(reader)
+		_, err := decodeBlockInfoCompat(reader)
 
-		if err != nil {
-			t.Fatalf("decode error: %v", err)
-		}
-		if !info.Overflows {
-			t.Error("Overflows should be true after skipping unknown fields")
+		// R3-4: 第一个未知 field 就应该报错
+		if err == nil {
+			t.Error("R3-4: decodeBlockInfoCompat should error on unknown field 5")
+		} else {
+			t.Logf("OK: got expected error on first unknown field: %v", err)
 		}
 	})
 }
@@ -601,9 +598,10 @@ func TestAuthTokenKeysMap(t *testing.T) {
 func TestBlockInfoCompat_RoundTrip_V6(t *testing.T) {
 	t.Run("标准 BlockInfo round-trip", func(t *testing.T) {
 		original := &BlockInfoCompat{
-			Overflows:         true,
-			BucketNum:         42,
-			OutOfOrderBuckets: []int32{1, 2, 3},
+			Overflows:            true,
+			BucketNum:            42,
+			OutOfOrderBuckets:    []int32{1, 2, 3},
+			HasOutOfOrderBuckets: true,
 		}
 
 		buf := &proto.Buffer{}

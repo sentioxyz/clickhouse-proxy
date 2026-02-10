@@ -432,7 +432,8 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 			consumed := n + cr.n
 			p.consumeBuf(consumed)
 		case 3, 4: // Cancel or Ping
-			// These packets have no body, just consume the type byte.
+			// R3-6: Cancel(3) 和 Ping(4) 均为无 payload 包（与 TCPHandler 一致）。
+			// n 是 UVarInt 类型码本身的编码字节数（通常为 1 字节）。
 			p.consumeBuf(n)
 		default:
 			// Unknown packet type (e.g., Data); reset to release memory.
@@ -1638,23 +1639,24 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.putBuffer(rbuf)
 
 		case clientCodeMergeTreeReadTaskResponse:
-			// P0-3 Fix: MergeTreeReadTaskResponse 使用临时 raw passthrough
-			// 转发 codeByte 后进入临时 raw copy 模式，等待当前查询完成后恢复 streaming
+			// R3-3: MergeTreeReadTaskResponse 结构化处理（替代 raw passthrough）
+			// 格式与 ReadTaskResponse/ClusterFunctionReadTaskResponse 完全相同: [response: String]
+			// 对齐 TCPHandler::receiveMergeTreeReadTaskResponse: readStringBinary(response)
 			p.observer.ClientPacket("MergeTreeReadTaskResponse")
 			p.stats.inc("MergeTreeReadTaskResponse")
-			log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse detected, temporary raw passthrough", id)
-			p.observer.Fallback("mergetree_read_task_response")
-			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
+			response, err := chReader.Str()
+			if err != nil {
+				log.Infof("[conn %d] streaming: MergeTreeReadTaskResponse decode error: %v", id, err)
 				return
 			}
-			// 临时 raw passthrough —— 等待查询完成后恢复 streaming
-			if !p.forwardUntilQueryDone(id, br, clientConn, upstreamWriter, queryDoneCh) {
+			mbuf := p.getBuffer()
+			mbuf.PutByte(byte(clientCodeMergeTreeReadTaskResponse))
+			mbuf.PutString(response)
+			if _, err := upstreamWriter.Write(mbuf.Buf); err != nil {
+				p.putBuffer(mbuf)
 				return
 			}
-			expectState = expectQuery
-			queryCompression = proto.CompressionDisabled
-			log.Infof("[conn %d] streaming: resumed streaming after MergeTreeReadTaskResponse", id)
-			continue
+			p.putBuffer(mbuf)
 
 		case clientCodeClusterFunctionReadTaskResponse:
 			// R1-5: ClusterFunctionReadTaskResponse (type 13)
@@ -1762,7 +1764,11 @@ func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net
 		select {
 		case <-queryDoneCh:
 			log.Infof("[conn %d] forwardUntilQueryDone: query done signal received, resuming streaming", id)
-			// drain 已读但未发送的数据
+			// R3-1: drain 已读但未发送的数据
+			// 先等待一个短超时，给读取 goroutine 时间将最后一批数据发出
+			drainTimer := time.NewTimer(50 * time.Millisecond)
+			defer drainTimer.Stop()
+		drainLoop:
 			for {
 				select {
 				case res := <-readCh:
@@ -1772,10 +1778,14 @@ func (p *proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net
 					if _, werr := upstreamWriter.Write(res.data); werr != nil {
 						return false
 					}
-				default:
-					return true
+					// 收到数据后重置超时，可能还有更多数据
+					drainTimer.Reset(50 * time.Millisecond)
+				case <-drainTimer.C:
+					// R3-1: 超时，不再有 in-flight 数据
+					break drainLoop
 				}
 			}
+			return true
 
 		case res := <-readCh:
 			if res.err != nil {

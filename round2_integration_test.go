@@ -1,4 +1,4 @@
-// go:build integration
+//go:build integration
 
 // 集成测试 - 需要本地 ClickHouse 实例在 localhost:9000 运行
 // 运行方式: go test -v -count=1 -tags integration -run TestIntegration ./...
@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/go-faster/ch/proto"
+	"github.com/ClickHouse/ch-go/proto"
 )
 
 const (

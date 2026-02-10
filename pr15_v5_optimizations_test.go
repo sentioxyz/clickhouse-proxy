@@ -190,8 +190,9 @@ func TestBlockInfoCompat_RoundTrip(t *testing.T) {
 		{
 			name: "with out-of-order buckets",
 			info: BlockInfoCompat{
-				BucketNum:         3,
-				OutOfOrderBuckets: []int32{1, 2, 5, 7},
+				BucketNum:            3,
+				OutOfOrderBuckets:    []int32{1, 2, 5, 7},
+				HasOutOfOrderBuckets: true,
 			},
 		},
 		{
