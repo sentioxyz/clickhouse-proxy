@@ -202,13 +202,3 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 
 	return totalWritten, nil
 }
-
-// chunkedNegotiate 根据双方的 chunked 能力协商实际使用模式。
-// 返回值：是否启用 chunked 传输。
-//
-// 规则：
-//   - 如果任一方声明 "notchunked" 或空字符串，则不启用
-//   - 如果双方都声明 "chunked"，则启用
-func chunkedNegotiate(senderCap, receiverCap string) bool {
-	return senderCap == "chunked" && receiverCap == "chunked"
-}

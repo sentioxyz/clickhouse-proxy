@@ -45,7 +45,12 @@ type NoopValidator struct{}
 
 func (NoopValidator) ValidateQuery(_ context.Context, meta QueryMeta) error {
 	if meta.SQL != "" {
-		log.Infof("[validator] allow query from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.SQL)
+		// R8-2: 截断长 SQL 防止日志爆炸
+		sqlPreview := meta.SQL
+		if len(sqlPreview) > 200 {
+			sqlPreview = sqlPreview[:200] + "..."
+		}
+		log.Infof("[validator] allow query from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, sqlPreview)
 	} else if meta.QueryPreview != "" {
 		log.Infof("[validator] allow query (preview) from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.QueryPreview)
 	}

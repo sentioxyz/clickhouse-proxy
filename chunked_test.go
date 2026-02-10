@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/binary"
-	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -536,37 +535,6 @@ func TestChunkedRoundTrip_Disabled(t *testing.T) {
 // 调用方必须保证单 goroutine 访问，这与实际使用场景一致。
 // 原 TestChunkedWriter_Concurrent 测试已移除。
 // ============================================================================
-
-// ============================================================================
-// chunkedNegotiate 测试
-// ============================================================================
-
-// TestChunkedNegotiate 测试协商逻辑
-func TestChunkedNegotiate(t *testing.T) {
-	testCases := []struct {
-		sender   string
-		receiver string
-		expected bool
-	}{
-		{"chunked", "chunked", true},
-		{"chunked", "notchunked", false},
-		{"notchunked", "chunked", false},
-		{"notchunked", "notchunked", false},
-		{"", "", false},
-		{"chunked", "", false},
-		{"", "chunked", false},
-	}
-
-	for _, tc := range testCases {
-		t.Run(fmt.Sprintf("send=%q_recv=%q", tc.sender, tc.receiver), func(t *testing.T) {
-			result := chunkedNegotiate(tc.sender, tc.receiver)
-			if result != tc.expected {
-				t.Errorf("chunkedNegotiate(%q, %q) = %v, expected %v",
-					tc.sender, tc.receiver, result, tc.expected)
-			}
-		})
-	}
-}
 
 // ============================================================================
 // 模拟真实场景测试
