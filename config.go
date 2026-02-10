@@ -43,6 +43,12 @@ type Config struct {
 	// ClickHouse credentials for remote table access
 	CHUser     string `json:"ch_user"`     // ClickHouse 用户名
 	CHPassword string `json:"ch_password"` // ClickHouse 密码
+
+	// Streaming bufio size (bytes). Default: 131072 (128KB).
+	StreamingBufSize int `json:"streaming_buf_size"`
+
+	// ValidateChecksum 是否启用压缩数据的 checksum 校验（CityHash128）
+	ValidateChecksum bool `json:"validate_checksum"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -105,6 +111,9 @@ func defaultConfig() Config {
 		// ClickHouse credentials
 		CHUser:     envOrDefault("CK_CH_USER", "default"),
 		CHPassword: envOrDefault("CK_CH_PASSWORD", ""),
+		// Streaming buffer size
+		StreamingBufSize: 131072, // 128KB
+		ValidateChecksum: false,
 	}
 }
 

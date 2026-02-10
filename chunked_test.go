@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"strings"
-	"sync"
 	"testing"
 )
 
@@ -516,53 +515,10 @@ func TestChunkedRoundTrip_Disabled(t *testing.T) {
 }
 
 // ============================================================================
-// 并发安全测试
+// 注意：ChunkedWriter 不再是并发安全的（P2 #8 移除了 Mutex）。
+// 调用方必须保证单 goroutine 访问，这与实际使用场景一致。
+// 原 TestChunkedWriter_Concurrent 测试已移除。
 // ============================================================================
-
-// TestChunkedWriter_Concurrent 测试并发写入安全
-func TestChunkedWriter_Concurrent(t *testing.T) {
-	var buf bytes.Buffer
-	cw := NewChunkedWriter(&buf, true)
-
-	var wg sync.WaitGroup
-	numGoroutines := 10
-	numWrites := 100
-
-	for i := 0; i < numGoroutines; i++ {
-		wg.Add(1)
-		go func(id int) {
-			defer wg.Done()
-			for j := 0; j < numWrites; j++ {
-				data := fmt.Sprintf("goroutine_%d_write_%d", id, j)
-				_, err := cw.Write([]byte(data))
-				if err != nil {
-					t.Errorf("concurrent write error: %v", err)
-					return
-				}
-			}
-		}(i)
-	}
-
-	wg.Wait()
-
-	// 验证：输出数据应该可以被 ChunkedReader 正确读取
-	cr := NewChunkedReader(bytes.NewReader(buf.Bytes()), true)
-	got, err := io.ReadAll(cr)
-	if err != nil {
-		t.Fatalf("ReadAll after concurrent writes error: %v", err)
-	}
-
-	// 验证每个 goroutine 的每次写入都在结果中
-	gotStr := string(got)
-	for i := 0; i < numGoroutines; i++ {
-		for j := 0; j < numWrites; j++ {
-			expected := fmt.Sprintf("goroutine_%d_write_%d", i, j)
-			if !strings.Contains(gotStr, expected) {
-				t.Errorf("missing data from goroutine %d write %d", i, j)
-			}
-		}
-	}
-}
 
 // ============================================================================
 // chunkedNegotiate 测试

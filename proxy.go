@@ -96,11 +96,12 @@ func (s *packetStats) snapshot() map[string]int64 {
 }
 
 type proxy struct {
-	cfg       Config
-	stats     *packetStats
-	validator Validator
-	rewriter  Rewriter
-	observer  *MetricsObserver
+	cfg               Config
+	stats             *packetStats
+	validator         Validator
+	rewriter          Rewriter
+	observer          *MetricsObserver
+	compressedBufPool sync.Pool // P2 #7: 复用压缩块 buffer，减少 GC 压力
 }
 
 func newProxy(cfg Config, v Validator, r Rewriter) *proxy {
@@ -582,10 +583,9 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		handshakeDone := make(chan struct{})
 		// upstream 的 bufio.Reader，由 copyClientToUpstreamStreaming 设置
 		var upstreamBr *bufio.Reader
-		// queryDoneCh: upstream goroutine 在检测到 EndOfStream(5)/Exception(2) 时发送信号，
-		// 包循环通过 select 非阻塞读取实现零延迟通知。
-		// buffer=1 防止发送方在接收方未准备好时阻塞。
-		queryDoneCh := make(chan struct{}, 1)
+		// queryDoneCounter: upstream goroutine 在检测到 EndOfStream(5)/Exception(2) 时 Add(1)，
+		// 包循环检测到 counter>0 时重置压缩状态。使用 atomic 避免 channel buffer=1 信号丢失。
+		var queryDoneCounter atomic.Int64
 		// chunked 协商结果，由 copyClientToUpstreamStreaming 在握手时设置
 		var srvSendChunked, clientRecvChunked string
 
@@ -593,13 +593,13 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 			defer wg.Done()
 			// 等握手完成后再开始 upstream→client copy
 			<-handshakeDone
-			p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, upstreamBr, queryDoneCh, srvSendChunked, clientRecvChunked)
+			p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, upstreamBr, &queryDoneCounter, srvSendChunked, clientRecvChunked)
 			closeBoth()
 		}()
 
 		go func() {
 			defer wg.Done()
-			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, queryDoneCh, &srvSendChunked, &clientRecvChunked)
+			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, &queryDoneCounter, &srvSendChunked, &clientRecvChunked)
 			closeBoth()
 		}()
 	} else {
@@ -627,7 +627,7 @@ func (p *proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 
 // copyUpstreamToClientFromReader 从 upstream 读数据转发给 client。
 // 如果 upstreamBr 不为 nil，从 bufio.Reader 读取（streaming 模式，防止丢失 ServerHello 后的缓存数据）。
-func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCh chan struct{}, srvSendChunked, clientRecvChunked string) {
+func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCounter *atomic.Int64, srvSendChunked, clientRecvChunked string) {
 	// 根据 chunked 协商结果包裹 Reader/Writer
 	// srvSendChunked: server 发送到 proxy 时是否用 chunked（需要 ChunkedReader 解帧）
 	// clientRecvChunked: proxy 发送到 client 时 client 期望 chunked（需要 ChunkedWriter 封帧）
@@ -668,12 +668,9 @@ func (p *proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamCon
 
 			// 检测 upstream EndOfStream(5)/Exception(2)，通知包循环重置压缩状态
 			// 对齐 ClickHouse 客户端 Connection::receivePacket 的行为
-			if queryDoneCh != nil && (pkt == "EndOfStream" || pkt == "Exception") {
-				select {
-				case queryDoneCh <- struct{}{}:
-				default:
-					// channel 已满（上一次信号未被消费），跳过
-				}
+			// 使用 atomic 计数器，永远不会丢失信号
+			if queryDoneCounter != nil && (pkt == "EndOfStream" || pkt == "Exception") {
+				queryDoneCounter.Add(1)
 			}
 
 			if p.cfg.IdleTimeout.Duration > 0 {
@@ -840,8 +837,20 @@ func (p *proxy) handleDataBlock(
 		// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
 		remainingDataSize := int(compressedSize) - 9
 
-		// Read the remaining compressed data
-		compressedData := make([]byte, remainingDataSize)
+		// P2 #7: 从 pool 获取 buffer，避免每次分配
+		poolBuf := p.compressedBufPool.Get()
+		var compressedData []byte
+		if poolBuf != nil {
+			compressedData = poolBuf.([]byte)
+		}
+		if cap(compressedData) < remainingDataSize {
+			compressedData = make([]byte, remainingDataSize)
+		} else {
+			compressedData = compressedData[:remainingDataSize]
+		}
+		defer func() {
+			p.compressedBufPool.Put(compressedData)
+		}()
 		if _, err := io.ReadFull(br, compressedData); err != nil {
 			return fmt.Errorf("compressed frame data: %w", err)
 		}
@@ -893,7 +902,7 @@ func (p *proxy) handleDataBlock(
 	return nil
 }
 
-func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn, upstreamConn net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan struct{}, srvSendChunkedOut, clientRecvChunkedOut *string) {
+func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn, upstreamConn net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCounter *atomic.Int64, srvSendChunkedOut, clientRecvChunkedOut *string) {
 	// 确保 handshakeDone 在函数退出时被关闭，避免 copyUpstreamToClient goroutine 永远阻塞
 	handshakeClosed := false
 	defer func() {
@@ -902,11 +911,16 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		}
 	}()
 
-	br := bufio.NewReaderSize(clientConn, 128*1024)
+	bufSize := p.cfg.StreamingBufSize
+	if bufSize <= 0 {
+		bufSize = 131072 // 默认 128KB
+	}
+
+	br := bufio.NewReaderSize(clientConn, bufSize)
 	chReader := proto.NewReader(br)
 
 	// 创建 upstream 的 bufio.Reader（后续 copyUpstreamToClient 也从这里读）
-	upBr := bufio.NewReaderSize(upstreamConn, 128*1024)
+	upBr := bufio.NewReaderSize(upstreamConn, bufSize)
 	upReader := proto.NewReader(upBr)
 	*upstreamBrOut = upBr
 
@@ -1074,21 +1088,13 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		}
 	}
 
-	// 剩余的 ServerHello 字段（password_rules, nonce, settings, query_plan_serialization 等）
-	// 这些字段在 ch-go 中尚无 Feature 常量定义，无法精确逐字段解析。
-	// 但它们可能已被 upBr 的 128KB bufio 预读到缓冲区中。
-	// 为确保 ServerHello 完整转发，在释放握手锁之前，
-	// 将 upBr 缓冲区中已有的数据（即 ServerHello 尾部）一起发给客户端。
-	if buffered := upBr.Buffered(); buffered > 0 {
-		tailData := make([]byte, buffered)
-		n, err := upBr.Read(tailData)
-		if err != nil && n == 0 {
-			log.Errorf("[conn %d] streaming: read ServerHello tail from buffer error: %v", id, err)
-			return
-		}
-		serverHelloBuf.Buf = append(serverHelloBuf.Buf, tailData[:n]...)
-		log.Infof("[conn %d] streaming: ServerHello tail drained from buffer (%d bytes)", id, n)
-	}
+	// 注意：不再盲目 drain upBr 缓冲区。
+	// 之前的实现会将 upBr.Buffered() 中的所有数据附加到 ServerHello，
+	// 但这可能包含后续的响应数据包（如 Data block、EndOfStream），
+	// 导致 copyUpstreamToClientFromReader 丢失数据或客户端协议解析错误。
+	// ServerHello 的字段已通过 proto.Reader 精确逐字段解析完成。
+	// 如有未解析的新字段（如 password_rules 等），应在此处添加精确解析，
+	// 而不是盲目 drain。upBr 中剩余的数据将由 copyUpstreamToClientFromReader 正确处理。
 
 	// 将解析重组后的完整 ServerHello 发给客户端
 	if _, err := clientConn.Write(serverHelloBuf.Buf); err != nil {
@@ -1193,7 +1199,7 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		// 客户端发送 chunked 数据 → 用 ChunkedReader 包裹 br
 		// 这样 br.ReadByte() 和 chReader 都能透明读到"裸"协议数据
 		chunkedClientReader := NewChunkedReader(br, true)
-		br = bufio.NewReaderSize(chunkedClientReader, 128*1024)
+		br = bufio.NewReaderSize(chunkedClientReader, bufSize)
 		chReader = proto.NewReader(br)
 	}
 	var upstreamWriter io.Writer = upstreamConn
@@ -1207,13 +1213,12 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	var queryCompression proto.Compression
 	var inQuery bool // track whether we are inside a Query execution (aligned with TCPHandler serial model)
 	for {
-		// 通过 channel 零延迟检测 upstream EndOfStream/Exception，重置压缩状态
-		if inQuery && queryDoneCh != nil {
-			select {
-			case <-queryDoneCh:
+		// 通过 atomic 计数器检测 upstream EndOfStream/Exception，重置压缩状态
+		// 使用 Swap 原子性读取并清零，确保不丢失任何信号
+		if inQuery && queryDoneCounter != nil {
+			if queryDoneCounter.Swap(0) > 0 {
 				inQuery = false
 				queryCompression = proto.CompressionDisabled
-			default:
 			}
 		}
 
@@ -1375,14 +1380,11 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 
 		case clientCodeReadTaskResponse:
-			// ReadTaskResponse: [version: UVarInt][response: String]
+			// ReadTaskResponse: [response: String]
+			// 根据 ClickHouse TCPHandler::receiveReadTaskResponseAssumeLocked，
+			// 只有一个 readStringBinary，没有 version 字段。
 			p.observer.ClientPacket("ReadTaskResponse")
 			p.stats.inc("ReadTaskResponse")
-			version, err := chReader.UVarInt()
-			if err != nil {
-				log.Infof("[conn %d] streaming: ReadTaskResponse version error: %v", id, err)
-				return
-			}
 			response, err := chReader.Str()
 			if err != nil {
 				log.Infof("[conn %d] streaming: ReadTaskResponse response error: %v", id, err)
@@ -1390,7 +1392,6 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 			rbuf := &proto.Buffer{}
 			rbuf.PutByte(byte(clientCodeReadTaskResponse))
-			rbuf.PutUVarInt(version)
 			rbuf.PutString(response)
 			if _, err := upstreamWriter.Write(rbuf.Buf); err != nil {
 				return
@@ -1405,7 +1406,7 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			p.fallbackRawCopy(id, br, clientConn, upstreamConn)
+			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
 			return
 
 		default:
@@ -1414,14 +1415,15 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			if _, err := upstreamWriter.Write([]byte{codeByte}); err != nil {
 				return
 			}
-			p.fallbackRawCopy(id, br, clientConn, upstreamConn)
+			p.fallbackRawCopy(id, br, clientConn, upstreamWriter)
 			return
 		}
 	}
 }
 
-// fallbackRawCopy 回退到原始逐 chunk 转发模式
-func (p *proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn, upstreamConn net.Conn) {
+// fallbackRawCopy 回退到原始逐 chunk 转发模式。
+// upstreamWriter 可能是 ChunkedWriter（当 chunked 协议启用时），确保 fallback 数据也通过 chunked 层。
+func (p *proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer) {
 	log.Infof("[conn %d] falling back to raw copy mode", id)
 	buf := make([]byte, 64*1024)
 	for {
@@ -1430,7 +1432,7 @@ func (p *proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn,
 		}
 		n, err := br.Read(buf)
 		if n > 0 {
-			if _, werr := upstreamConn.Write(buf[:n]); werr != nil {
+			if _, werr := upstreamWriter.Write(buf[:n]); werr != nil {
 				return
 			}
 		}
