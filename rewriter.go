@@ -16,6 +16,7 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 
 	"go.yaml.in/yaml/v3"
 )
@@ -98,10 +99,17 @@ func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState) (*Senti
 	}
 
 	// 建立 gRPC 连接 (lazy connect, 不阻塞启动)
+	// 添加 keepalive 以保持长连接健康性
 	if config.ServiceAddr != "" {
+		kaParams := keepalive.ClientParameters{
+			Time:                10 * time.Second, // 每 10 秒发送 ping
+			Timeout:             3 * time.Second,  // ping 超时
+			PermitWithoutStream: true,             // 无活跃流时也保持 ping
+		}
 		conn, err := grpc.NewClient(
 			config.ServiceAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
+			grpc.WithKeepaliveParams(kaParams),
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create rewriter client for %s: %w", config.ServiceAddr, err)
@@ -303,7 +311,15 @@ func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql str
 		},
 	}
 
-	resp, err := client.Rewrite(ctx, req)
+	// 设置 gRPC 调用超时
+	timeout := r.config.Timeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	resp, err := client.Rewrite(ctxWithTimeout, req)
 	if err != nil {
 		return "", err
 	}
@@ -315,23 +331,64 @@ func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql str
 }
 
 // simpleRewrite 简单字符串替换重写（降级方案）
+// 使用 word-boundary 感知的替换，避免误替换字符串字面量中的匹配
 func (r *SentioNetworkRewriter) simpleRewrite(sql string, tableWithDatabase map[string]TableWithDatabase, remoteTable map[string]RemoteTable) string {
 	result := sql
 
-	// 替换本地表
+	// 替换本地表（使用 word-boundary 正则）
 	for original, target := range tableWithDatabase {
 		replacement := fmt.Sprintf("%s.%s", target.Database, target.Table)
-		result = strings.ReplaceAll(result, original, replacement)
+		result = replaceOutsideQuotes(result, original, replacement)
 	}
 
-	// 替换远程表
+	// 替换远程表（使用 word-boundary 正则）
 	for original, target := range remoteTable {
 		replacement := fmt.Sprintf("remote('%s', '%s', '%s', '%s', '%s')",
 			target.Addr, target.Database, target.Table, target.User, target.Password)
-		result = strings.ReplaceAll(result, original, replacement)
+		result = replaceOutsideQuotes(result, original, replacement)
 	}
 
 	return result
+}
+
+// replaceOutsideQuotes 在 SQL 中替换目标字符串，但跳过单引号和双引号内的内容。
+// 这避免了 strings.ReplaceAll 可能误替换字符串字面量/注释中的表名。
+func replaceOutsideQuotes(sql, old, replacement string) string {
+	var result strings.Builder
+	result.Grow(len(sql))
+	i := 0
+	for i < len(sql) {
+		// 检查是否在引号内
+		if sql[i] == '\'' || sql[i] == '"' {
+			quote := sql[i]
+			result.WriteByte(quote)
+			i++
+			// 跳到匹配的关闭引号
+			for i < len(sql) {
+				result.WriteByte(sql[i])
+				if sql[i] == quote {
+					i++
+					break
+				}
+				// 处理转义引号（\'）
+				if sql[i] == '\\' && i+1 < len(sql) {
+					i++
+					result.WriteByte(sql[i])
+				}
+				i++
+			}
+			continue
+		}
+		// 引号外：尝试匹配
+		if i+len(old) <= len(sql) && sql[i:i+len(old)] == old {
+			result.WriteString(replacement)
+			i += len(old)
+		} else {
+			result.WriteByte(sql[i])
+			i++
+		}
+	}
+	return result.String()
 }
 
 // Close 关闭 gRPC 连接

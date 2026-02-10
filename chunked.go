@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"sync"
 )
 
 // ClickHouse Chunked 协议帧格式（来自 ClickHouse C++ 源码 ReadBufferFromPocoSocketChunked.h）：
@@ -34,11 +33,11 @@ const (
 // 对上层暴露"裸"的协议数据流，使现有包解析逻辑无需任何修改。
 //
 // 实现 io.Reader 接口。当 enabled=false 时直接透传底层 Reader。
+// 注意：ChunkedReader 不是并发安全的。调用方必须保证单 goroutine 访问。
 type ChunkedReader struct {
 	r         io.Reader
 	enabled   bool
 	remaining int // 当前帧剩余未读字节数
-	mu        sync.Mutex
 }
 
 // NewChunkedReader 创建 ChunkedReader。enabled 控制是否启用 chunked 解帧。
@@ -61,9 +60,6 @@ func (cr *ChunkedReader) Read(p []byte) (int, error) {
 	if !cr.enabled {
 		return cr.r.Read(p)
 	}
-
-	cr.mu.Lock()
-	defer cr.mu.Unlock()
 
 	for {
 		if cr.remaining > 0 {
@@ -121,10 +117,10 @@ func (cr *ChunkedReader) readChunkHeader() (uint32, error) {
 //
 // 每次 Write 调用产生一个 chunk：[4 bytes LE: size][data][4 bytes: 0x00000000]
 // 当 enabled=false 时直接透传到底层 Writer。
+// 注意：ChunkedWriter 不是并发安全的。调用方必须保证单 goroutine 访问。
 type ChunkedWriter struct {
 	w       io.Writer
 	enabled bool
-	mu      sync.Mutex
 }
 
 // NewChunkedWriter 创建 ChunkedWriter。enabled 控制是否启用 chunked 封帧。
@@ -150,9 +146,6 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 	if len(p) == 0 {
 		return 0, nil
 	}
-
-	cw.mu.Lock()
-	defer cw.mu.Unlock()
 
 	// 写入 chunk header: [4 bytes LE: size]
 	var header [chunkedHeaderSize]byte
