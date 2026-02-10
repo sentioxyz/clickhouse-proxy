@@ -353,6 +353,8 @@ func (r *SentioNetworkRewriter) simpleRewrite(sql string, tableWithDatabase map[
 
 // replaceOutsideQuotes 在 SQL 中替换目标字符串，但跳过单引号和双引号内的内容。
 // 这避免了 strings.ReplaceAll 可能误替换字符串字面量/注释中的表名。
+// 支持三种引用风格：单引号(')、双引号(")、反引号(`)
+// 支持两种转义方式：反斜杠转义(\') 和 ClickHouse 连续引号转义(”)
 func replaceOutsideQuotes(sql, old, replacement string) string {
 	var result strings.Builder
 	result.Grow(len(sql))
@@ -367,10 +369,18 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 			for i < len(sql) {
 				result.WriteByte(sql[i])
 				if sql[i] == quote {
+					// 风险-4: 处理 ClickHouse 的连续引号转义（'' 或 ""）
+					// 例如 SELECT 'it''s a test' 中 '' 是转义的单引号
+					if i+1 < len(sql) && sql[i+1] == quote {
+						i++
+						result.WriteByte(sql[i])
+						i++
+						continue
+					}
 					i++
 					break
 				}
-				// 处理转义引号（\'）
+				// 处理反斜杠转义引号（\'）
 				if sql[i] == '\\' && i+1 < len(sql) {
 					i++
 					result.WriteByte(sql[i])

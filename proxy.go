@@ -73,6 +73,16 @@ const (
 	clientCodeMergeTreeReadTaskResponse proto.ClientCode = 10
 )
 
+// 协议与缓冲区相关常量
+const (
+	// fallbackRevision 在握手解码失败时使用的降级协议版本号
+	fallbackRevision = 54423
+	// uuidSize 是 ClickHouse UUID 的固定字节大小
+	uuidSize = 16
+	// defaultStreamingBufSize 是 streaming 模式下 bufio.Reader 的默认缓冲区大小 (128KB)
+	defaultStreamingBufSize = 131072
+)
+
 type packetStats struct {
 	mu     sync.Mutex
 	counts map[string]int64
@@ -372,7 +382,7 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 				// Hello 解析失败时不 disable parser，而是使用默认版本号继续
 				// 这允许高版本客户端的 Query 仍能被解析
 				log.Warnf("Hello decode failed (likely newer protocol): %v, using fallback version", err)
-				p.version = 54423 // 使用一个常见的协议版本号作为降级
+				p.version = fallbackRevision
 				p.addendumDone = true
 				p.resetBuf() // 清空缓冲区，跳过当前 Hello 包
 				return out, nil
@@ -384,7 +394,7 @@ func (p *queryParser) feed(chunk []byte) ([]ParsedQuery, error) {
 			if p.version == 0 {
 				// 版本号为0说明 Hello 未被解析，尝试用通用版本降级
 				log.Infof("Query received with version=0, attempting fallback decode")
-				p.version = 54423
+				p.version = fallbackRevision
 			}
 			cr := &countingReader{r: bytes.NewReader(p.buf[n:])}
 			r := proto.NewReader(cr)
@@ -942,7 +952,10 @@ func (p *proxy) handleDataBlock(
 			encBuf.PutUVarInt(0)
 			encBuf.PutUVarInt(0)
 		} else {
-			inputCols := resultsToInput(results)
+			inputCols, err := resultsToInput(results)
+			if err != nil {
+				return fmt.Errorf("resultsToInput: %w", err)
+			}
 			if err := block.EncodeRawBlock(encBuf, revision, inputCols); err != nil {
 				return fmt.Errorf("block encode: %w", err)
 			}
@@ -972,7 +985,7 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 	bufSize := p.cfg.StreamingBufSize
 	if bufSize <= 0 {
-		bufSize = 131072 // 默认 128KB
+		bufSize = defaultStreamingBufSize
 	}
 
 	br := bufio.NewReaderSize(clientConn, bufSize)
@@ -980,7 +993,6 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 	// 创建 upstream 的 bufio.Reader（后续 copyUpstreamToClient 也从这里读）
 	upBr := bufio.NewReaderSize(upstreamConn, bufSize)
-	upReader := proto.NewReader(upBr)
 	*upstreamBrOut = upBr
 
 	// ========== Phase 1: Hello 握手 ==========
@@ -1052,11 +1064,17 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		_ = upstreamConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
 	}
 
-	// 使用 proto.Reader 精确解析 ServerHello 的每个字段
-	serverHelloBuf := &proto.Buffer{}
+	// P0-1 Fix: 使用 TeeReader 记录 ServerHello 的全部原始字节
+	// 好处：无论 ClickHouse 未来新增什么尾部字段（password_rules, nonce, settings,
+	// query_plan_serialization_version 等），都会被自动记录并原样透传给客户端。
+	// 消除了旧方案中 Buffered() 盲取在分包场景下丢失数据的风险。
+	var serverHelloRaw bytes.Buffer
+	teeUpReader := io.TeeReader(upBr, &serverHelloRaw)
+	teeUpBr := bufio.NewReaderSize(teeUpReader, bufSize)
+	teeUpChReader := proto.NewReader(teeUpBr)
 
 	// packet_type
-	pktType, err := upReader.UVarInt()
+	pktType, err := teeUpChReader.UVarInt()
 	if err != nil {
 		log.Errorf("[conn %d] streaming: read ServerHello packet_type error: %v", id, err)
 		return
@@ -1065,134 +1083,111 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	// 如果 upstream 返回 Exception (type 2)，直接转发给客户端
 	if pktType != 0 {
 		log.Errorf("[conn %d] streaming: expected ServerHello (type 0), got type %d", id, pktType)
-		// 将 pktType 转发给客户端，让客户端处理错误
-		errBuf := &proto.Buffer{}
-		errBuf.PutUVarInt(pktType)
-		// 将 upstream 缓冲区中的剩余数据（错误消息等）也一并转发
-		remaining := make([]byte, upBr.Buffered())
-		n, _ := upBr.Read(remaining)
-		if n > 0 {
-			errBuf.Buf = append(errBuf.Buf, remaining[:n]...)
+		// serverHelloRaw 已经包含了 pktType 的字节
+		// 再 drain teeUpBr 中剩余的缓冲数据（错误消息等）
+		if buffered := teeUpBr.Buffered(); buffered > 0 {
+			drainBuf := make([]byte, buffered)
+			teeUpBr.Read(drainBuf)
 		}
-		clientConn.Write(errBuf.Buf)
+		clientConn.Write(serverHelloRaw.Bytes())
 		return
 	}
-	serverHelloBuf.PutUVarInt(pktType)
 
 	// name
-	serverName, err := upReader.Str()
+	serverName, err := teeUpChReader.Str()
 	if err != nil {
 		log.Errorf("[conn %d] streaming: read ServerHello name error: %v", id, err)
 		return
 	}
-	serverHelloBuf.PutString(serverName)
 
 	// major
-	major, err := upReader.UVarInt()
+	major, err := teeUpChReader.UVarInt()
 	if err != nil {
 		log.Errorf("[conn %d] streaming: read ServerHello major error: %v", id, err)
 		return
 	}
-	serverHelloBuf.PutUVarInt(major)
 
 	// minor
-	minor, err := upReader.UVarInt()
+	minor, err := teeUpChReader.UVarInt()
 	if err != nil {
 		log.Errorf("[conn %d] streaming: read ServerHello minor error: %v", id, err)
 		return
 	}
-	serverHelloBuf.PutUVarInt(minor)
 
 	// revision
-	serverRevUint, err := upReader.UVarInt()
+	serverRevUint, err := teeUpChReader.UVarInt()
 	if err != nil {
 		log.Errorf("[conn %d] streaming: read ServerHello revision error: %v", id, err)
 		return
 	}
 	serverRevision := int(serverRevUint)
-	serverHelloBuf.PutUVarInt(serverRevUint)
 	log.Infof("[conn %d] streaming: ServerHello: name=%s version=%d.%d revision=%d", id, serverName, major, minor, serverRevision)
 
 	// 以下字段基于 clientRevision（服务端根据 client_tcp_protocol_version 条件发送）
 	if proto.FeatureVersionedParallelReplicas.In(clientRevision) {
-		v, err := upReader.UVarInt()
-		if err != nil {
-			log.Infof("[conn %d] streaming: read ServerHello parallel_replicas_version error: %v", id, err)
+		if _, err := teeUpChReader.UVarInt(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello parallel_replicas_version error: %v", id, err)
 			return
 		}
-		serverHelloBuf.PutUVarInt(v)
 	}
 	if proto.FeatureTimezone.In(clientRevision) {
-		v, err := upReader.Str()
-		if err != nil {
-			log.Infof("[conn %d] streaming: read ServerHello timezone error: %v", id, err)
+		if _, err := teeUpChReader.Str(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello timezone error: %v", id, err)
 			return
 		}
-		serverHelloBuf.PutString(v)
 	}
 	if proto.FeatureDisplayName.In(clientRevision) {
-		v, err := upReader.Str()
-		if err != nil {
-			log.Infof("[conn %d] streaming: read ServerHello display_name error: %v", id, err)
+		if _, err := teeUpChReader.Str(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello display_name error: %v", id, err)
 			return
 		}
-		serverHelloBuf.PutString(v)
 	}
 	if proto.FeatureVersionPatch.In(clientRevision) {
-		v, err := upReader.UVarInt()
-		if err != nil {
-			log.Infof("[conn %d] streaming: read ServerHello version_patch error: %v", id, err)
+		if _, err := teeUpChReader.UVarInt(); err != nil {
+			log.Warnf("[conn %d] streaming: read ServerHello version_patch error: %v", id, err)
 			return
 		}
-		serverHelloBuf.PutUVarInt(v)
 	}
 	// chunked protocol negotiation (从 ServerHello 中读取服务端的 chunked caps)
-	// chunked 协议协商状态
 	var srvSendChunked, srvRecvChunked string
 	if proto.FeatureChunkedPackets.In(clientRevision) {
 		var err error
-		srvSendChunked, err = upReader.Str()
+		srvSendChunked, err = teeUpChReader.Str()
 		if err != nil {
 			log.Warnf("[conn %d] streaming: read ServerHello proto_send_chunked error: %v", id, err)
 			return
 		}
-		srvRecvChunked, err = upReader.Str()
+		srvRecvChunked, err = teeUpChReader.Str()
 		if err != nil {
 			log.Warnf("[conn %d] streaming: read ServerHello proto_recv_chunked error: %v", id, err)
 			return
 		}
 		log.Infof("[conn %d] streaming: ServerHello chunked: send=%q recv=%q", id, srvSendChunked, srvRecvChunked)
-		// 透传服务器的 chunked 能力给客户端（不再强制 notchunked）
-		// Proxy 通过 ChunkedReader/ChunkedWriter 透明处理 chunked 帧
-		serverHelloBuf.PutString(srvSendChunked)
-		serverHelloBuf.PutString(srvRecvChunked)
 		// 保存协商结果给 copyUpstreamToClientFromReader
 		if srvSendChunkedOut != nil {
 			*srvSendChunkedOut = srvSendChunked
 		}
 	}
 
-	// P0-1: ServerHello 尾部字段透传
-	// FeatureChunkedPackets 之后可能还有 password_rules, nonce, settings,
-	// query_plan_serialization_version 等字段。这些字段对 proxy 透明，
-	// 直接从 upBr 缓冲区中取出原样透传给客户端。
-	// 关键：必须在 close(handshakeDone) 之前完成，否则 copyUpstreamToClientFromReader
-	// 启动后会用 ChunkedReader 解析这些非 chunked 的 ServerHello 尾部数据，导致协议错误。
-	if tailN := upBr.Buffered(); tailN > 0 {
-		tail := make([]byte, tailN)
-		n, _ := upBr.Read(tail)
+	// P0-1: 将 teeUpBr 中剩余的缓冲数据 drain 到 serverHelloRaw
+	// 这些数据是 ServerHello 的尾部字段（password_rules, nonce, settings 等），
+	// 已被 bufio 预读到缓冲区中但尚未被 teeReader 处理。
+	// 必须在 close(handshakeDone) 之前完成，否则 copyUpstreamToClientFromReader
+	// 启动后会用 ChunkedReader 解析这些非 chunked 的 ServerHello 尾部数据。
+	if buffered := teeUpBr.Buffered(); buffered > 0 {
+		drainBuf := make([]byte, buffered)
+		n, _ := teeUpBr.Read(drainBuf)
 		if n > 0 {
-			serverHelloBuf.Buf = append(serverHelloBuf.Buf, tail[:n]...)
-			log.Infof("[conn %d] streaming: ServerHello tail passthrough: %d bytes", id, n)
+			log.Infof("[conn %d] streaming: ServerHello tail drained: %d bytes", id, n)
 		}
 	}
 
-	// 将解析重组后的完整 ServerHello（含尾部字段）发给客户端
-	if _, err := clientConn.Write(serverHelloBuf.Buf); err != nil {
+	// 将 TeeReader 记录的完整 ServerHello 原始字节发给客户端
+	if _, err := clientConn.Write(serverHelloRaw.Bytes()); err != nil {
 		log.Errorf("[conn %d] streaming: write ServerHello to client error: %v", id, err)
 		return
 	}
-	log.Infof("[conn %d] streaming: ServerHello forwarded (%d bytes)", id, len(serverHelloBuf.Buf))
+	log.Infof("[conn %d] streaming: ServerHello forwarded (%d bytes)", id, serverHelloRaw.Len())
 
 	// 使用 min(clientRevision, serverRevision) 作为协商后的有效 revision
 	revision := clientRevision
@@ -1469,7 +1464,7 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			ibuf.PutByte(byte(clientCodeIgnoredPartUUIDs))
 			ibuf.PutUVarInt(count)
 			for i := uint64(0); i < count; i++ {
-				uuid, err := chReader.ReadRaw(16) // UUID = 16 bytes
+				uuid, err := chReader.ReadRaw(uuidSize)
 				if err != nil {
 					log.Infof("[conn %d] streaming: IgnoredPartUUIDs uuid read error: %v", id, err)
 					return

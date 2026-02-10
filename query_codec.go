@@ -517,15 +517,19 @@ func wrapErr(field string, err error) error {
 // resultsToInput 将 Results（DecodeBlock 的产出）转换为 []InputColumn（EncodeBlock 的输入）。
 // 这是 Data 块透传的关键桥梁：解码得到 Results，编码需要 InputColumn。
 // ColAuto.Data 实现了 Column 接口（同时包含 ColResult 和 ColInput），所以可以直接用于编码。
-func resultsToInput(results proto.Results) []proto.InputColumn {
+func resultsToInput(results proto.Results) ([]proto.InputColumn, error) {
 	cols := make([]proto.InputColumn, len(results))
 	for i, rc := range results {
+		colInput, ok := rc.Data.(proto.ColInput)
+		if !ok {
+			return nil, fmt.Errorf("column %q (type %T) does not implement ColInput", rc.Name, rc.Data)
+		}
 		cols[i] = proto.InputColumn{
 			Name: rc.Name,
-			Data: rc.Data.(proto.ColInput),
+			Data: colInput,
 		}
 	}
-	return cols
+	return cols, nil
 }
 
 // ========== 兼容 BlockInfo 解码/编码 ==========
