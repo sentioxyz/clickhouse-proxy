@@ -25,6 +25,12 @@ func main() {
 	defer stop()
 
 	go func() {
+		// R7-3: 防止 metrics HTTP 服务 panic 导致整个进程崩溃
+		defer func() {
+			if r := recover(); r != nil {
+				log.Errorf("metrics server panic recovered: %v", r)
+			}
+		}()
 		log.Infof("metrics listening on %s", cfg.MetricsListen)
 		if err := http.ListenAndServe(cfg.MetricsListen, promhttp.Handler()); err != nil {
 			log.Infof("metrics server error: %v", err)

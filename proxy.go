@@ -33,6 +33,8 @@ var packetNames = map[uint64]string{
 	9:  "ReadTaskResponse",
 	10: "MergeTreeReadTaskResponse",
 	11: "QueryPlan",
+	// R7-1: type 12 未被 ClickHouse TCPHandler 使用（保留），type 13 是 ClusterFunctionReadTaskResponse
+	13: "ClusterFunctionReadTaskResponse",
 }
 
 // 预编译正则表达式，避免每次调用时重复编译
@@ -559,6 +561,12 @@ func (p *proxy) serve(ctx context.Context) error {
 }
 
 func (p *proxy) runStatsPrinter(ctx context.Context) {
+	// R7-2: 防止 panic 导致整个进程崩溃（与 R6-3 一致）
+	defer func() {
+		if r := recover(); r != nil {
+			log.Errorf("runStatsPrinter panic recovered: %v", r)
+		}
+	}()
 	ticker := time.NewTicker(p.cfg.StatsInterval.Duration)
 	defer ticker.Stop()
 	for {
