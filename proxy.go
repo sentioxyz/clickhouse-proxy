@@ -1990,7 +1990,7 @@ func eraseTokenValue(data []byte, tokenKey string) []byte {
 
 func printStats(stats *packetStats) {
 	snap := stats.snapshot()
-	log.Infof("==== ck_remote_proxy stats ====")
+	log.Infof("==== clickhouse-proxy stats ====")
 	for _, key := range []string{"Hello", "Query", "Data", "Ping", "Cancel", "TablesStatusRequest", "KeepAlive", "Scalar", "Poll", "Data (portable)", "unknown"} {
 		log.Infof("%-18s: %d", key, snap[key])
 	}

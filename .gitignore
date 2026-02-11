@@ -5,7 +5,7 @@
 # MODULE.bazel.lock
 
 # Go build artifacts
-/ck_remote_proxy
+/clickhouse-proxy
 
 # IDE and editor files
 .idea/
