@@ -16,7 +16,7 @@ import (
 
 func main() {
 	target := flag.String("target", "127.0.0.1:9000", "proxy address")
-	queryFile := flag.String("file", "tests/data/exported_queries.json", "path to queries file")
+	queryFile := flag.String("file", "tools/data/exported_queries.json", "path to queries file")
 	concurrency := flag.Int("c", 10, "concurrency")
     // Use a large limit for tests
 	limit := flag.Int("n", 5000, "max queries to run")

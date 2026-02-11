@@ -44,7 +44,7 @@ apply-auth:
 
 test-forwarding:
 	@echo "Running local forwarding integration tests..."
-	@./tests/run_tests.sh $(N)
+	@./tools/run_tests.sh $(N)
 
 # Stream replay from remote ClickHouse query_log to local proxy
 # Starts mock server + proxy + port-forward, runs replay, cleans up on exit/Ctrl-C
@@ -59,7 +59,7 @@ ifndef POD
 	@echo "Usage: make test-stream-replay POD=clickhouse-user-part-a-0-0-0 [NS=clickhouse] [SINCE='1 hour'] [N=0]"
 	@exit 1
 endif
-	@./tests/run_stream_replay.sh "$(POD)" "$(NS)" "$(SINCE)" "$(N)"
+	@./tools/run_stream_replay.sh "$(POD)" "$(NS)" "$(SINCE)" "$(N)"
 
 # Build and push auth proxy with auth-{commit_id} tag
 # Usage: make auth_proxy
