@@ -1,117 +1,117 @@
 # ClickHouse Proxy
 
-一个轻量级的 ClickHouse 原生 TCP 协议代理。它在客户端与 ClickHouse 服务器之间透明转发流量，同时提供 **查询审计**、**JWS 认证**、**SQL 重写** 和 **Prometheus 监控** 等能力。
+A lightweight ClickHouse native TCP protocol proxy. It sits transparently between clients and ClickHouse servers, providing **query auditing**, **JWS authentication**, **SQL rewriting**, and **Prometheus monitoring** capabilities.
 
 ---
 
-## 目录
+## Table of Contents
 
-- [环境准备](#环境准备)
-- [快速开始](#快速开始)
-- [编译指南](#编译指南)
-  - [Go 原生编译](#go-原生编译)
-  - [Bazel 编译](#bazel-编译)
-- [配置详解](#配置详解)
-  - [配置文件](#配置文件)
-  - [环境变量](#环境变量)
-  - [完整参数表](#完整参数表)
-- [运行](#运行)
-- [部署](#部署)
-  - [Docker 部署](#docker-部署)
-  - [裸机部署](#裸机部署)
-  - [Kubernetes 部署](#kubernetes-部署)
-- [认证配置](#认证配置)
-- [SQL 重写配置](#sql-重写配置)
-- [测试](#测试)
-- [监控指标](#监控指标)
+- [Prerequisites](#prerequisites)
+- [Quick Start](#quick-start)
+- [Build](#build)
+  - [Go Native Build](#go-native-build)
+  - [Bazel Build](#bazel-build)
+- [Configuration](#configuration)
+  - [Config File](#config-file)
+  - [Environment Variables](#environment-variables)
+  - [Full Parameter Reference](#full-parameter-reference)
+- [Running](#running)
+- [Deployment](#deployment)
+  - [Docker Deployment](#docker-deployment)
+  - [Bare-metal Deployment](#bare-metal-deployment)
+  - [Kubernetes Deployment](#kubernetes-deployment)
+- [Authentication](#authentication)
+- [SQL Rewriter](#sql-rewriter)
+- [Testing](#testing)
+- [Metrics](#metrics)
 
 ---
 
-## 环境准备
+## Prerequisites
 
-| 依赖 | 版本要求 | 说明 |
-|------|---------|------|
-| Go   | 1.25+   | 必需，用于编译 |
-| Bazel | 8.0+   | 可选，项目也支持 Bazel 编译 |
-| Docker | 20.10+ | 可选，用于容器化部署 |
+| Dependency | Version | Notes |
+|-----------|---------|-------|
+| Go | 1.25+ | Required for building |
+| Bazel | 8.0+ | Optional, the project also supports Bazel builds |
+| Docker | 20.10+ | Optional, for containerized deployment |
 
-## 快速开始
+## Quick Start
 
-最少步骤跑起一个 proxy（假设 ClickHouse 运行在 `localhost:9000`）：
+Minimal steps to get a proxy running (assuming ClickHouse is at `localhost:9000`):
 
 ```bash
-# 1. 克隆仓库
+# 1. Clone the repository
 git clone git@github.com:sentioxyz/clickhouse-proxy.git
 cd clickhouse-proxy
 
-# 2. 编译
+# 2. Build
 go build -o clickhouse-proxy .
 
-# 3. 运行（使用环境变量指定上游地址）
+# 3. Run (using environment variables to specify upstream)
 CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" ./clickhouse-proxy
 
-# 4. 用 clickhouse-client 连接 proxy 测试
+# 4. Connect via clickhouse-client through the proxy
 clickhouse-client --host localhost --port 9001
 ```
 
 ---
 
-## 编译指南
+## Build
 
-### Go 原生编译
+### Go Native Build
 
 ```bash
-# 标准编译
+# Standard build
 go build -o clickhouse-proxy .
 
-# 静态编译（推荐用于生产，无 CGO 依赖）
+# Static build (recommended for production, no CGO dependency)
 CGO_ENABLED=0 go build -o clickhouse-proxy .
 
-# 也可以使用 Makefile
+# Or use the Makefile
 make build
 ```
 
-编译完成后会在当前目录生成 `clickhouse-proxy` 二进制文件。
+This produces a `clickhouse-proxy` binary in the current directory.
 
-### Bazel 编译
+### Bazel Build
 
-项目使用 Bazel 8.0 + bzlmod 管理构建，Go SDK 版本为 1.25.3。
+The project uses Bazel 8.0 with bzlmod for build management. Go SDK version is 1.25.3.
 
 ```bash
-# 安装 Bazel（如未安装）
+# Install Bazel (if not already installed)
 # macOS:
 brew install bazel
-# 或参考 https://bazel.build/install
+# See https://bazel.build/install for other platforms
 
-# 确认 Bazel 版本（项目要求 8.0，见 .bazelversion 文件）
+# Verify Bazel version (project requires 8.0, see .bazelversion)
 bazel --version
 
-# 编译
+# Build
 bazel build //:clickhouse-proxy
 
-# 编译产物路径
+# The output binary is located at:
 ls bazel-bin/clickhouse-proxy_/clickhouse-proxy
 
-# 运行测试
+# Run tests
 bazel test //:clickhouse-proxy_test
 ```
 
-> **注意**：Bazel 首次编译会下载依赖，时间较长。后续的增量编译会非常快。
+> **Note**: The first Bazel build downloads all dependencies and may take a while. Subsequent incremental builds will be much faster.
 
 ---
 
-## 配置详解
+## Configuration
 
-### 配置文件
+### Config File
 
-proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
+The proxy uses JSON configuration files. The loading order is:
 
-1. 命令行参数 `-config /path/to/config.json`
-2. 环境变量 `CK_CONFIG` 指定的路径
-3. 当前目录下的 `config.json`（自动检测）
-4. 以上都没有时，使用内置默认值
+1. CLI flag `-config /path/to/config.json`
+2. Path specified by the `CK_CONFIG` environment variable
+3. `config.json` in the current directory (auto-detected)
+4. Built-in defaults if none of the above are found
 
-示例配置文件 (`config.example.json`)：
+Example configuration (`config.example.json`):
 
 ```json
 {
@@ -130,147 +130,147 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 }
 ```
 
-### 环境变量
+### Environment Variables
 
-以下配置项支持通过环境变量覆盖（优先级低于配置文件）：
+The following config options can be overridden via environment variables (lower priority than config file):
 
-| 环境变量 | 对应配置项 | 默认值 |
-|---------|-----------|-------|
+| Variable | Config Field | Default |
+|----------|-------------|---------|
 | `CK_LISTEN` | `listen` | `:9001` |
 | `CK_UPSTREAM` | `upstream` | `clickhouse:9000` |
 | `CK_METRICS_LISTEN` | `metrics_listen` | `:9091` |
-| `CK_CONFIG` | 配置文件路径 | （无） |
+| `CK_CONFIG` | Config file path | (none) |
 | `CK_REWRITER_ADDR` | `rewriter_service_addr` | `localhost:50051` |
 | `CK_NETWORK_STATE_SOURCE` | `network_state_source` | `file` |
-| `CK_NETWORK_STATE_FILE` | `network_state_file` | （无） |
-| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | （无） |
+| `CK_NETWORK_STATE_FILE` | `network_state_file` | (none) |
+| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | (none) |
 | `CK_CH_USER` | `ch_user` | `default` |
-| `CK_CH_PASSWORD` | `ch_password` | （无） |
+| `CK_CH_PASSWORD` | `ch_password` | (none) |
 
-### 完整参数表
+### Full Parameter Reference
 
-#### 基础配置
+#### Core Settings
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `listen` | string | `:9001` | proxy 监听地址和端口 |
-| `upstream` | string | `clickhouse:9000` | 上游 ClickHouse 服务器地址 |
-| `dial_timeout` | duration | `5s` | 连接上游的超时时间 |
-| `idle_timeout` | duration | `5m` | 空闲连接超时时间，超时后断开 |
-| `max_connection_lifetime` | duration | `24h` | 单个连接的最大存活时间，防止慢客户端无限占用资源 |
-| `shutdown_timeout` | duration | `30s` | 优雅关闭时等待在途连接排水的最大时间 |
-| `stats_interval` | duration | `10s` | 统计信息打印间隔 |
-| `metrics_listen` | string | `:9091` | Prometheus metrics HTTP 端点监听地址 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `listen` | string | `:9001` | Proxy listen address and port |
+| `upstream` | string | `clickhouse:9000` | Upstream ClickHouse server address |
+| `dial_timeout` | duration | `5s` | Timeout for connecting to the upstream |
+| `idle_timeout` | duration | `5m` | Idle connection timeout; connections are closed after this period |
+| `max_connection_lifetime` | duration | `24h` | Maximum lifetime of a single connection, prevents slow clients from holding resources indefinitely |
+| `shutdown_timeout` | duration | `30s` | Maximum time to wait for in-flight connections to drain during graceful shutdown |
+| `stats_interval` | duration | `10s` | Interval for printing packet statistics to the log |
+| `metrics_listen` | string | `:9091` | Prometheus metrics HTTP endpoint listen address |
 
-#### 日志配置
+#### Logging
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `log_queries` | bool | `true` | 是否在日志中记录 SQL 查询内容 |
-| `log_data` | bool | `false` | 是否在日志中记录 Data 包内容（通常关闭，仅调试用） |
-| `max_query_log_bytes` | int | `300` | 查询日志最大截断长度（字节） |
-| `max_data_log_bytes` | int | `200` | Data 包日志最大截断长度（字节） |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `log_queries` | bool | `true` | Log SQL query content |
+| `log_data` | bool | `false` | Log Data packet content (usually off, for debugging only) |
+| `max_query_log_bytes` | int | `300` | Maximum query log truncation length (bytes) |
+| `max_data_log_bytes` | int | `200` | Maximum Data packet log truncation length (bytes) |
 
-#### 认证配置
+#### Authentication
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `auth_enabled` | bool | `false` | 是否启用 JWS/以太坊签名认证 |
-| `auth_allowed_addresses` | []string | `[]` | 允许执行查询的以太坊地址列表 |
-| `auth_max_token_age` | duration | `1m` | JWS token 最大有效期 |
-| `auth_allow_no_auth` | bool | `false` | 是否允许不携带 token 的请求通过 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `auth_enabled` | bool | `false` | Enable JWS / Ethereum signature authentication |
+| `auth_allowed_addresses` | []string | `[]` | List of Ethereum addresses allowed to execute queries |
+| `auth_max_token_age` | duration | `1m` | Maximum age of JWS tokens |
+| `auth_allow_no_auth` | bool | `false` | Allow requests without an auth token to pass through |
 
-#### SQL 重写配置
+#### SQL Rewriter
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `rewriter_enabled` | bool | `false` | 是否启用 SQL 重写功能 |
-| `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC 服务地址 |
-| `rewriter_local_indexer_id` | uint64 | `0` | 本地 Indexer 节点 ID |
-| `rewriter_timeout` | duration | `5s` | SQL 重写请求超时时间 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `rewriter_enabled` | bool | `false` | Enable SQL rewriting |
+| `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC service address |
+| `rewriter_local_indexer_id` | uint64 | `0` | Local Indexer node ID |
+| `rewriter_timeout` | duration | `5s` | SQL rewrite request timeout |
 
-#### 网络状态配置
+#### Network State
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `network_state_source` | string | `file` | 网络状态数据来源，支持 `file` |
-| `network_state_file` | string | （空） | 网络状态 YAML 文件路径 |
-| `network_state_postgres` | string | （空） | PostgreSQL 连接串（预留） |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `network_state_source` | string | `file` | Network state data source; supports `file` |
+| `network_state_file` | string | (empty) | Path to the network state YAML file |
+| `network_state_postgres` | string | (empty) | PostgreSQL connection string (reserved) |
 
-#### ClickHouse 凭证
+#### ClickHouse Credentials
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `ch_user` | string | `default` | 连接上游 ClickHouse 的用户名 |
-| `ch_password` | string | （空） | 连接上游 ClickHouse 的密码 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `ch_user` | string | `default` | Username for connecting to the upstream ClickHouse |
+| `ch_password` | string | (empty) | Password for connecting to the upstream ClickHouse |
 
-#### 高级配置
+#### Advanced
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `streaming_buf_size` | int | `131072` | 流式协议解析的 bufio 缓冲区大小（字节），默认 128KB |
-| `validate_checksum` | bool | `false` | 是否启用压缩数据块的 CityHash128 校验 |
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `streaming_buf_size` | int | `131072` | Bufio buffer size for streaming protocol parsing (bytes), default 128 KB |
+| `validate_checksum` | bool | `false` | Enable CityHash128 checksum validation for compressed data blocks |
 
-> **提示**：所有 `duration` 类型参数支持人类可读格式，如 `"5s"`、`"1m"`、`"24h"`。也支持纳秒数字。
+> **Tip**: All `duration` parameters accept human-readable formats such as `"5s"`, `"1m"`, `"24h"`. Raw nanosecond numbers are also accepted.
 
 ---
 
-## 运行
+## Running
 
-### 使用配置文件
+### With a Config File
 
 ```bash
 ./clickhouse-proxy -config config.json
 ```
 
-### 使用环境变量
+### With Environment Variables
 
 ```bash
 CK_LISTEN=":9001" CK_UPSTREAM="10.0.0.5:9000" ./clickhouse-proxy
 ```
 
-### 使用 go run（开发模式）
+### With go run (Development)
 
 ```bash
 go run . -config config.json
 ```
 
-proxy 启动后，日志会显示监听地址和所有关键配置：
+On startup the proxy logs its listen address and key configuration:
 
 ```
 clickhouse-proxy starting. listen=:9001 upstream=127.0.0.1:9000 ...
 metrics listening on :9091
 ```
 
-按 `Ctrl+C` 优雅关闭，关闭前会打印最终统计信息。
+Press `Ctrl+C` for a graceful shutdown; final statistics are printed before exit.
 
 ---
 
-## 部署
+## Deployment
 
-### Docker 部署
+### Docker Deployment
 
-#### 构建镜像
+#### Build the Image
 
 ```bash
-# 本地构建
+# Local build
 docker build -t clickhouse-proxy:latest .
 
-# 构建并推送到私有仓库
+# Build and push to the private registry
 make docker push
 ```
 
-#### 运行容器
+#### Run a Container
 
 ```bash
-# 最简运行（使用容器内默认配置路径 /app/config.json）
+# Basic run (uses the default config path /app/config.json inside the container)
 docker run -d \
   --name clickhouse-proxy \
   -p 9001:9001 \
   -p 9091:9091 \
   clickhouse-proxy:latest
 
-# 挂载配置文件运行
+# Mount an external config file
 docker run -d \
   --name clickhouse-proxy \
   -p 9001:9001 \
@@ -278,7 +278,7 @@ docker run -d \
   -v /path/to/config.json:/app/config.json \
   clickhouse-proxy:latest
 
-# 使用环境变量运行（不需要配置文件）
+# Use environment variables (no config file needed)
 docker run -d \
   --name clickhouse-proxy \
   -p 9001:9001 \
@@ -287,39 +287,38 @@ docker run -d \
   clickhouse-proxy:latest
 ```
 
-> **说明**：Docker 镜像使用多阶段构建，基于 `alpine:latest`，体积很小。运行时进程为 `/app/clickhouse-proxy`。
+> **Note**: The Docker image uses a multi-stage build based on `alpine:latest`, resulting in a very small image. The runtime binary is `/app/clickhouse-proxy`.
 
-#### 镜像信息
+#### Image Details
 
-| 项目 | 说明 |
-|------|------|
-| 构建阶段基础镜像 | `golang:1.25-alpine` |
-| 运行时基础镜像 | `alpine:latest` |
-| 工作目录 | `/app` |
-| 默认配置路径 | `/app/config.json` |
-| 运行时依赖 | `ca-certificates`、`tzdata` |
+| Item | Value |
+|------|-------|
+| Build stage base image | `golang:1.25-alpine` |
+| Runtime base image | `alpine:latest` |
+| Working directory | `/app` |
+| Default config path | `/app/config.json` |
+| Runtime dependencies | `ca-certificates`, `tzdata` |
 
-### 裸机部署
+### Bare-metal Deployment
 
-在没有 Docker 的环境下，直接编译并运行二进制文件：
+For environments without Docker, build and run the binary directly:
 
 ```bash
-# 1. 静态编译（推荐，适用于目标机器没有 Go 环境的情况）
+# 1. Static cross-compile (recommended when deploying to a machine without Go)
 CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy .
 
-# 2. 将二进制文件和配置拷贝到目标机器
+# 2. Copy the binary and config to the target host
 scp clickhouse-proxy config.json user@target-host:/opt/clickhouse-proxy/
 
-# 3. 在目标机器上运行
+# 3. Run on the target host
 ssh user@target-host
 cd /opt/clickhouse-proxy
 ./clickhouse-proxy -config config.json
 
-# 4. (可选) 使用 systemd 管理服务
-# 创建 /etc/systemd/system/clickhouse-proxy.service
+# 4. (Optional) Manage as a systemd service
 ```
 
-systemd 服务文件示例：
+Example systemd unit file:
 
 ```ini
 [Unit]
@@ -338,23 +337,23 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### Kubernetes 部署
+### Kubernetes Deployment
 
-项目中的 `auth_ck.yaml` 提供了完整的 Kubernetes 部署示例，包含 ConfigMap + Sidecar 模式：
+The repository includes `auth_ck.yaml` with a complete Kubernetes deployment example using ConfigMap + Sidecar pattern:
 
 ```bash
 kubectl apply -f auth_ck.yaml
 ```
 
-生产环境推荐使用 **ConfigMap** 管理配置文件。
+For production, **ConfigMap** is the recommended way to manage the configuration file.
 
 ---
 
-## 认证配置
+## Authentication
 
-proxy 支持基于 **以太坊 secp256k1 签名的 JWS 认证**。启用后，客户端必须通过 ClickHouse 自定义设置 `SQL_x_auth_token` 传递 JWS token。
+The proxy supports **JWS authentication with Ethereum secp256k1 signatures**. When enabled, clients must pass a JWS token via the ClickHouse custom setting `SQL_x_auth_token`.
 
-### 启用认证
+### Enable Authentication
 
 ```json
 {
@@ -367,31 +366,31 @@ proxy 支持基于 **以太坊 secp256k1 签名的 JWS 认证**。启用后，�
 }
 ```
 
-### 客户端使用示例
+### Client Example
 
 ```go
-// 使用 clickhouse-go SDK
+// Using clickhouse-go SDK
 ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
     "SQL_x_auth_token": clickhouse.CustomSetting{Value: jwsToken},
 }))
 rows, err := conn.Query(ctx, "SELECT 1")
 ```
 
-### JWS Token 格式
+### JWS Token Format
 
-**Payload** 包含两个字段：
-- `iat`：Unix 时间戳（签发时间）
-- `qhash`：SQL 查询的 Keccak256 哈希（带 `0x` 前缀）
+The **payload** contains two fields:
+- `iat` — Unix timestamp (issued at)
+- `qhash` — Keccak256 hash of the SQL query (hex with `0x` prefix)
 
-支持 JWS Compact 序列化（单签名）和 JWS JSON 序列化（多签名）两种格式。
+Both JWS Compact Serialization (single signature) and JWS JSON Serialization (multi-signature) formats are supported.
 
 ---
 
-## SQL 重写配置
+## SQL Rewriter
 
-proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_name>` 格式的虚拟表名重写为实际的 ClickHouse `remote()` 表达式。该功能需要外部 gRPC 重写服务支持。
+The proxy supports **Sentio Network SQL rewriting**, transforming virtual table names in the format `sentio_<processor_id>.<table_name>` into actual ClickHouse `remote()` expressions. This feature requires an external gRPC rewriter service.
 
-### 启用 SQL 重写
+### Enable SQL Rewriting
 
 ```json
 {
@@ -408,72 +407,72 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 
 ---
 
-## 测试
+## Testing
 
-### 单元测试
+### Unit Tests
 
 ```bash
-# Go 原生
+# Go native
 go test ./...
 
 # Bazel
 bazel test //:clickhouse-proxy_test
 ```
 
-### 本地集成测试
+### Local Integration Tests
 
-验证 proxy 能正确转发查询和数据：
+Verify that the proxy correctly forwards queries and data:
 
 ```bash
 make test-forwarding
 ```
 
-### 流式回放测试（生产级验证）
+### Stream Replay Tests (Production-grade Verification)
 
-从运行中的 ClickHouse Pod 流式回放真实查询日志，验证 proxy 的正确性：
+Stream real query logs from a running ClickHouse pod and replay them against the local proxy:
 
 ```bash
-# 前提：需要配置好 kubectl 和 ClickHouse 集群访问权限
+# Prerequisites: kubectl configured with ClickHouse cluster access
 
-# 回放最近 1 小时的查询
+# Replay the last hour of queries
 make test-stream-replay POD=<pod-name>
 
-# 只回放最近 100 条查询
+# Replay only the last 100 queries
 make test-stream-replay POD=<pod-name> N=100
 
-# 回放最近 30 天全部查询（压力测试）
+# Replay all queries from the last 30 days (stress test)
 make test-stream-replay POD=<pod-name> SINCE="30 day" N=0
 ```
 
-成功标志：
-- 测试结束时显示 `✅ All queries forwarded!`
-- Failures 计数为 0
-- proxy 日志中无 panic
+Success criteria:
+- Test ends with `✅ All queries forwarded!`
+- Failures count is 0
+- No panics in the proxy log summary
 
 ---
 
-## 监控指标
+## Metrics
 
-proxy 通过 `metrics_listen` 端口（默认 `:9091`）暴露 Prometheus 指标。
+The proxy exposes Prometheus metrics on the `metrics_listen` port (default `:9091`).
 
-### 关键指标
+### Key Metrics
 
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `clickhouse_proxy_active_connections` | Gauge | 当前活跃连接数 |
-| `clickhouse_proxy_packets_total` | Counter | 客户端→服务器方向的包总数（按类型分） |
-| `clickhouse_proxy_server_packets_total` | Counter | 服务器→客户端方向的包总数（按类型分） |
-| `clickhouse_proxy_bytes_transferred_total` | Counter | 传输字节总数（按方向分） |
-| `clickhouse_proxy_queries_forwarded_total` | Counter | 成功转发的查询总数 |
-| `clickhouse_proxy_errors_total` | Counter | 错误总数（按阶段和错误类型分） |
-| `clickhouse_proxy_upstream_health` | Gauge | 上游 ClickHouse 健康状态（1=健康, 0=不可达） |
-| `clickhouse_proxy_query_decode_duration_seconds` | Histogram | Query 包解码耗时 |
-| `clickhouse_proxy_rewrite_duration_seconds` | Histogram | SQL 重写耗时 |
-| `clickhouse_proxy_handshake_duration_seconds` | Histogram | TCP 握手耗时 |
-| `clickhouse_proxy_fallback_total` | Counter | 降级到原始拷贝模式的次数 |
-| `clickhouse_proxy_streaming_data_blocks_total` | Counter | 流式模式处理的数据块数 |
+| Metric | Type | Description |
+|--------|------|-------------|
+| `clickhouse_proxy_active_connections` | Gauge | Current number of active connections |
+| `clickhouse_proxy_packets_total` | Counter | Total client→server packets (by type) |
+| `clickhouse_proxy_server_packets_total` | Counter | Total server→client packets (by type) |
+| `clickhouse_proxy_bytes_transferred_total` | Counter | Total bytes transferred (by direction) |
+| `clickhouse_proxy_queries_forwarded_total` | Counter | Total queries successfully forwarded |
+| `clickhouse_proxy_errors_total` | Counter | Total errors (by phase and error type) |
+| `clickhouse_proxy_upstream_health` | Gauge | Upstream ClickHouse health (1=healthy, 0=unreachable) |
+| `clickhouse_proxy_query_decode_duration_seconds` | Histogram | Query packet decode latency |
+| `clickhouse_proxy_rewrite_duration_seconds` | Histogram | SQL rewrite latency |
+| `clickhouse_proxy_handshake_duration_seconds` | Histogram | TCP handshake latency |
+| `clickhouse_proxy_fallback_total` | Counter | Fallbacks to raw copy mode |
+| `clickhouse_proxy_streaming_data_blocks_total` | Counter | Data blocks processed in streaming mode |
 
-### 接入 Prometheus
+### Prometheus Scrape Config
 
 ```yaml
 scrape_configs:
@@ -482,6 +481,6 @@ scrape_configs:
       - targets: ['localhost:9091']
 ```
 
-### 接入 Grafana
+### Grafana Dashboard
 
-项目中的 `dashboard.json` 提供了预配置的 Grafana 仪表板，可直接导入使用。
+Import the pre-configured `dashboard.json` included in this repository into Grafana for out-of-the-box monitoring.
