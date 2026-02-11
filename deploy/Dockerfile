@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o clickhouse-proxy .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o clickhouse-proxy ./cmd/proxy/
 
 # Stage 2: Runtime stage
 FROM alpine:latest

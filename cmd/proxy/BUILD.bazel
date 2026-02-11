@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+
+go_library(
+    name = "proxy_lib",
+    srcs = [
+        "chunked.go",
+        "config.go",
+        "main.go",
+        "observer.go",
+        "proxy.go",
+        "query_codec.go",
+        "rewriter.go",
+        "validator.go",
+    ],
+    importpath = "ck_remote_proxy/cmd/proxy",
+    visibility = ["//visibility:private"],
+    deps = [
+        "//protos",
+        "@com_github_clickhouse_ch_go//proto",
+        "@com_github_ethereum_go_ethereum//crypto",
+        "@com_github_prometheus_client_golang//prometheus",
+        "@com_github_prometheus_client_golang//prometheus/promhttp",
+        "@com_github_segmentio_asm//bswap",
+        "@io_opentelemetry_go_otel_trace//:trace",
+        "@in_yaml_go_yaml_v3//:yaml_v3",
+        "@org_golang_google_grpc//:grpc",
+        "@org_golang_google_grpc//credentials/insecure",
+        "@org_golang_google_grpc//keepalive",
+        "@org_golang_x_crypto//sha3",
+        "@sentioxyz_sentio_core//common/log",
+    ],
+)
+
+go_binary(
+    name = "clickhouse-proxy",
+    embed = [":proxy_lib"],
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "proxy_test",
+    srcs = [
+        "chunked_test.go",
+        "config_test.go",
+        "proxy_test.go",
+        "query_codec_test.go",
+        "rewriter_test.go",
+        "validator_test.go",
+    ],
+    embed = [":proxy_lib"],
+    deps = [
+        "@com_github_clickhouse_ch_go//proto",
+        "@com_github_clickhouse_clickhouse_go_v2//lib/proto",
+    ],
+)

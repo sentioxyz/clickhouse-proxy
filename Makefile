@@ -11,17 +11,17 @@ AUTH_IMAGE := $(IMAGE_REPO):$(AUTH_TAG)
 all: build docker push update-yaml
 
 build:
-	CGO_ENABLED=0 go build -o clickhouse-proxy .
+	CGO_ENABLED=0 go build -o clickhouse-proxy ./cmd/proxy/
 
 docker:
-	docker build -t $(IMAGE) .
+	docker build -f deploy/Dockerfile -t $(IMAGE) .
 
 push:
 	docker push $(IMAGE)
 
 # Build and push auth-enabled version
 docker-auth:
-	docker build -t $(AUTH_IMAGE) .
+	docker build -f deploy/Dockerfile -t $(AUTH_IMAGE) .
 
 push-auth:
 	docker push $(AUTH_IMAGE)
