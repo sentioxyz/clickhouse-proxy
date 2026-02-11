@@ -14,7 +14,7 @@ RUN go mod download
 COPY . .
 
 # Build application
-RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o ck-proxy .
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o clickhouse-proxy .
 
 # Stage 2: Runtime stage
 FROM alpine:latest
@@ -26,11 +26,11 @@ RUN apk --no-cache add ca-certificates tzdata
 WORKDIR /app
 
 # Copy binary from build stage
-COPY --from=builder /build/ck-proxy .
+COPY --from=builder /build/clickhouse-proxy .
 
 # Use ENTRYPOINT to set executable, CMD provides default arguments
 # Configuration file can be provided in the following ways (in priority order):
 # 1. Kubernetes ConfigMap mount (recommended for production)
-# 2. Volume mount: docker run -v /host/config.json:/app/config.json ck-proxy:latest -config /app/config.json
-ENTRYPOINT ["./ck-proxy"]
+# 2. Volume mount: docker run -v /host/config.json:/app/config.json clickhouse-proxy:latest -config /app/config.json
+ENTRYPOINT ["./clickhouse-proxy"]
 CMD ["-config", "/app/config.json"]

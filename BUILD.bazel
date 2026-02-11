@@ -1,7 +1,7 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
 
 go_library(
-    name = "ck_remote_proxy_lib",
+    name = "clickhouse-proxy_lib",
     srcs = [
         "config.go",
         "main.go",
@@ -17,18 +17,18 @@ go_library(
 )
 
 go_binary(
-    name = "ck_remote_proxy",
-    embed = [":ck_remote_proxy_lib"],
+    name = "clickhouse-proxy",
+    embed = [":clickhouse-proxy_lib"],
     visibility = ["//visibility:public"],
 )
 
 go_test(
-    name = "ck_remote_proxy_test",
+    name = "clickhouse-proxy_test",
     srcs = [
         "config_test.go",
         "proxy_test.go",
     ],
-    embed = [":ck_remote_proxy_lib"],
+    embed = [":clickhouse-proxy_lib"],
     deps = [
         "@com_github_clickhouse_ch_go//proto",
         "@com_github_clickhouse_clickhouse_go_v2//lib/proto",
