@@ -668,7 +668,9 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 	var wg sync.WaitGroup
 	wg.Add(2)
 
-	if p.rewriter != nil && p.cfg.RewriterEnabled {
+	// 默认使用 streaming 模式：精确解析协议、strip auth token settings、支持 SQL 重写。
+	// 非 streaming 的 raw copy 模式仅保留作为未来 fallback。
+	{
 		// Streaming 模式：copyClientToUpstreamStreaming 需要先同步完成
 		// Hello/ServerHello/Addendum 握手（从 upstream 读 ServerHello），
 		// 之后才能启动 copyUpstreamToClient（避免两个 goroutine 同时读 upstream）。
@@ -693,19 +695,6 @@ func (p *proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		go func() {
 			defer wg.Done()
 			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, queryDoneCh, &srvSendChunked, &clientRecvChunked)
-			closeBoth()
-		}()
-	} else {
-		// 非 streaming 模式：两个 goroutine 同时启动
-		go func() {
-			defer wg.Done()
-			p.copyUpstreamToClient(id, clientConn, upstreamConn)
-			closeBoth()
-		}()
-
-		go func() {
-			defer wg.Done()
-			p.copyClientToUpstream(ctx, id, clientConn, upstreamConn)
 			closeBoth()
 		}()
 	}
@@ -1343,8 +1332,8 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		abuf := &proto.Buffer{}
 		abuf.PutString(quotaKey)
 
-		// chunked 协议协商
-		if proto.FeatureChunkedPackets.In(addendumRevision) {
+		// chunked 协议协商 — 同时检查客户端 revision，确保客户端实际会发送这些字段
+		if proto.FeatureChunkedPackets.In(addendumRevision) && proto.FeatureChunkedPackets.In(clientRevision) {
 			var err error
 			clientSendChunked, err = chReader.Str()
 			if err != nil {
@@ -1368,8 +1357,8 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			}
 		}
 
-		// 4. parallel replicas protocol version
-		if proto.FeatureVersionedParallelReplicas.In(addendumRevision) {
+		// 4. parallel replicas protocol version — 同时检查客户端 revision
+		if proto.FeatureVersionedParallelReplicas.In(addendumRevision) && proto.FeatureVersionedParallelReplicas.In(clientRevision) {
 			parallelVersion, err := chReader.UVarInt()
 			if err != nil {
 				log.Infof("[conn %d] streaming: read addendum parallel_replicas_version error: %v", id, err)
@@ -1523,10 +1512,12 @@ func (p *proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			expectState = expectData // 对齐 TCPHandler：Query 后进入 expectData 阶段
 
 		case proto.ClientCodeData:
-			// R2-1: TCPHandler::receivePacketsExpectQuery 中 Data 会抛 UNEXPECTED_PACKET 异常
+			// Data 包在 expectQuery 状态下可能是竞态条件：
+			// DDL 等快速查询的 EndOfStream 信号可能在客户端发送空 Data 块之前就到达，
+			// 导致 queryDoneCh 将状态过早回退到 expectQuery。
+			// 容忍此情况，将 Data 块正常透传给 upstream（ClickHouse 会自行判断是否合法）。
 			if expectState == expectQuery {
-				log.Errorf("[conn %d] streaming: unexpected Data packet in expectQuery state, closing (TCPHandler rejects)", id)
-				return
+				log.Warnf("[conn %d] streaming: Data packet in expectQuery state (possible race), forwarding anyway", id)
 			}
 			p.observer.ClientPacket("Data")
 			p.stats.inc("Data")
