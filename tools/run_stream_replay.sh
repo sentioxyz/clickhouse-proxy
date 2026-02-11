@@ -42,18 +42,18 @@ echo "=========================================="
 
 # Build everything
 echo "📦 Building binaries..."
-go build -o tests/bin/mock_server tests/mock_server/main.go
-go build -o tests/bin/stream_client tests/stream_client/main.go
-go build -o tests/bin/proxy .
+go build -o tools/bin/mock_server tools/mock_server/main.go
+go build -o tools/bin/stream_client tools/stream_client/main.go
+go build -o tools/bin/proxy ./cmd/proxy/
 
 # Start mock server
 echo "🚀 Starting mock server on :$MOCK_PORT..."
-./tests/bin/mock_server -addr :$MOCK_PORT > tests/mock.log 2>&1 &
+./tools/bin/mock_server -addr :$MOCK_PORT > tools/mock.log 2>&1 &
 MOCK_PID=$!
 sleep 1
 
 # Create temp config for proxy
-cat > tests/stream_config.json << EOF
+cat > tools/stream_config.json << EOF
 {
     "listen": ":$PROXY_PORT",
     "upstream": "127.0.0.1:$MOCK_PORT",
@@ -69,7 +69,7 @@ EOF
 
 # Start proxy
 echo "🚀 Starting proxy on :$PROXY_PORT (upstream -> :$MOCK_PORT)..."
-CK_CONFIG=tests/stream_config.json ./tests/bin/proxy > tests/proxy.log 2>&1 &
+CK_CONFIG=tools/stream_config.json ./tools/bin/proxy > tools/proxy.log 2>&1 &
 PROXY_PID=$!
 sleep 1
 
@@ -89,7 +89,7 @@ echo "▶️  Starting stream replay..."
 echo ""
 
 # Run stream client
-./tests/bin/stream_client \
+./tools/bin/stream_client \
     -source "127.0.0.1:$LOCAL_PORT" \
     -target "127.0.0.1:$PROXY_PORT" \
     -n $N \
@@ -97,10 +97,10 @@ echo ""
 
 echo ""
 echo "📋 Proxy log summary:"
-echo "   Connections: $(grep -c 'closed' tests/proxy.log 2>/dev/null || echo 0)"
-if grep -q "panic:" tests/proxy.log; then
+echo "   Connections: $(grep -c 'closed' tools/proxy.log 2>/dev/null || echo 0)"
+if grep -q "panic:" tools/proxy.log; then
     echo "   ❌ PANIC detected in proxy!"
-    grep "panic:" tests/proxy.log
+    grep "panic:" tools/proxy.log
 else
     echo "   ✅ No panics"
 fi
