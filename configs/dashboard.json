@@ -111,7 +111,7 @@
           "refId": "A"
         }
       ],
-      "title": "发送字节数",
+      "title": "Bytes Sent",
       "type": "timeseries"
     },
     {
@@ -204,7 +204,7 @@
           "refId": "A"
         }
       ],
-      "title": "接收字节数",
+      "title": "Bytes Received",
       "type": "timeseries"
     },
     {
@@ -297,7 +297,7 @@
           "refId": "A"
         }
       ],
-      "title": "每秒字节数",
+      "title": "Bytes Per Second",
       "type": "timeseries"
     },
     {
@@ -390,7 +390,7 @@
           "refId": "A"
         }
       ],
-      "title": "按包类型分列",
+      "title": "By Packet Type",
       "type": "timeseries"
     },
     {
@@ -483,7 +483,7 @@
           "refId": "A"
         }
       ],
-      "title": "每秒包总数",
+      "title": "Total Packets Per Second",
       "type": "timeseries"
     },
     {
@@ -584,7 +584,7 @@
           "useBackend": false
         }
       ],
-      "title": "活跃连接数",
+      "title": "Active Connections",
       "type": "timeseries"
     }
   ],
