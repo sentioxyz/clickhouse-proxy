@@ -21,7 +21,7 @@ go_library(
         "@com_github_prometheus_client_golang//prometheus/promhttp",
         "@com_github_segmentio_asm//bswap",
         "@io_opentelemetry_go_otel_trace//:trace",
-        "@in_yaml_go_yaml_v3//:yaml_v3",
+        "@in_yaml_go_yaml_v3//:yaml",
         "@org_golang_google_grpc//:grpc",
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//keepalive",
