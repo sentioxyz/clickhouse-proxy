@@ -45,7 +45,7 @@ git clone git@github.com:sentioxyz/clickhouse-proxy.git
 cd clickhouse-proxy
 
 # 2. Build
-go build -o clickhouse-proxy .
+go build -o clickhouse-proxy ./cmd/proxy/
 
 # 3. Run (using environment variables to specify upstream)
 CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" ./clickhouse-proxy
@@ -62,10 +62,10 @@ clickhouse-client --host localhost --port 9001
 
 ```bash
 # Standard build
-go build -o clickhouse-proxy .
+go build -o clickhouse-proxy ./cmd/proxy/
 
 # Static build (recommended for production, no CGO dependency)
-CGO_ENABLED=0 go build -o clickhouse-proxy .
+CGO_ENABLED=0 go build -o clickhouse-proxy ./cmd/proxy/
 
 # Or use the Makefile
 make build
@@ -87,13 +87,13 @@ brew install bazel
 bazel --version
 
 # Build
-bazel build //:clickhouse-proxy
+bazel build //cmd/proxy:proxy
 
 # The output binary is located at:
-ls bazel-bin/clickhouse-proxy_/clickhouse-proxy
+ls bazel-bin/cmd/proxy/proxy_/proxy
 
 # Run tests
-bazel test //:clickhouse-proxy_test
+bazel test //pkg/proxy:proxy_test
 ```
 
 > **Note**: The first Bazel build downloads all dependencies and may take a while. Subsequent incremental builds will be much faster.
@@ -232,7 +232,7 @@ CK_LISTEN=":9001" CK_UPSTREAM="10.0.0.5:9000" ./clickhouse-proxy
 ### With go run (Development)
 
 ```bash
-go run . -config config.json
+go run ./cmd/proxy/ -config config.json
 ```
 
 On startup the proxy logs its listen address and key configuration:
@@ -305,7 +305,7 @@ For environments without Docker, build and run the binary directly:
 
 ```bash
 # 1. Static cross-compile (recommended when deploying to a machine without Go)
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy ./cmd/proxy/
 
 # 2. Copy the binary and config to the target host
 scp clickhouse-proxy config.json user@target-host:/opt/clickhouse-proxy/
@@ -416,7 +416,7 @@ The proxy supports **Sentio Network SQL rewriting**, transforming virtual table 
 go test ./...
 
 # Bazel
-bazel test //:clickhouse-proxy_test
+bazel test //pkg/proxy:proxy_test
 ```
 
 ### Local Integration Tests

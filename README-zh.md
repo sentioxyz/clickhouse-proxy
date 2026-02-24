@@ -45,7 +45,7 @@ git clone git@github.com:sentioxyz/clickhouse-proxy.git
 cd clickhouse-proxy
 
 # 2. 编译
-go build -o clickhouse-proxy .
+go build -o clickhouse-proxy ./cmd/proxy/
 
 # 3. 运行（使用环境变量指定上游地址）
 CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" ./clickhouse-proxy
@@ -62,10 +62,10 @@ clickhouse-client --host localhost --port 9001
 
 ```bash
 # 标准编译
-go build -o clickhouse-proxy .
+go build -o clickhouse-proxy ./cmd/proxy/
 
 # 静态编译（推荐用于生产，无 CGO 依赖）
-CGO_ENABLED=0 go build -o clickhouse-proxy .
+CGO_ENABLED=0 go build -o clickhouse-proxy ./cmd/proxy/
 
 # 也可以使用 Makefile
 make build
@@ -87,13 +87,13 @@ brew install bazel
 bazel --version
 
 # 编译
-bazel build //:clickhouse-proxy
+bazel build //cmd/proxy:proxy
 
-# 编译产物路径
-ls bazel-bin/clickhouse-proxy_/clickhouse-proxy
+# 输出的二进制位于：
+ls bazel-bin/cmd/proxy/proxy_/proxy
 
 # 运行测试
-bazel test //:clickhouse-proxy_test
+bazel test //pkg/proxy:proxy_test
 ```
 
 > **注意**：Bazel 首次编译会下载依赖，时间较长。后续的增量编译会非常快。
@@ -232,7 +232,7 @@ CK_LISTEN=":9001" CK_UPSTREAM="10.0.0.5:9000" ./clickhouse-proxy
 ### 使用 go run（开发模式）
 
 ```bash
-go run . -config config.json
+go run ./cmd/proxy/ -config config.json
 ```
 
 proxy 启动后，日志会显示监听地址和所有关键配置：
@@ -305,7 +305,7 @@ docker run -d \
 
 ```bash
 # 1. 静态编译（推荐，适用于目标机器没有 Go 环境的情况）
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy .
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy ./cmd/proxy/
 
 # 2. 将二进制文件和配置拷贝到目标机器
 scp clickhouse-proxy config.json user@target-host:/opt/clickhouse-proxy/
@@ -417,7 +417,7 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 go test ./...
 
 # Bazel
-bazel test //:clickhouse-proxy_test
+bazel test //pkg/proxy:proxy_test
 ```
 
 ### 本地集成测试
