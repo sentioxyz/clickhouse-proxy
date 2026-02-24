@@ -26,7 +26,7 @@ go_library(
         "@org_golang_google_grpc//credentials/insecure",
         "@org_golang_google_grpc//keepalive",
         "@org_golang_x_crypto//sha3",
-        "@sentioxyz_sentio_core//common/log",
+        "@sentio-core//common/log",
     ],
 )
 

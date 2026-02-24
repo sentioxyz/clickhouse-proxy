@@ -5,14 +5,22 @@ module(
 
 bazel_dep(name = "rules_go", version = "0.59.0")
 bazel_dep(name = "gazelle", version = "0.47.0")
+bazel_dep(name = "sentio-core", version = "0.0.0")
+
+# When clickhouse-proxy is used as root module (standalone build),
+# this git_override provides sentio-core.
+# When used as a dependency, the parent module's override takes precedence.
+git_override(
+    module_name = "sentio-core",
+    commit = "01bb2362ff143c1ba883dd576c1a67718e1daf22",
+    remote = "https://github.com/sentioxyz/sentio-core",
+)
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
 go_sdk.download(version = "1.25.3")
 
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
-
-
 
 use_repo(
     go_deps,
@@ -26,5 +34,4 @@ use_repo(
     "org_golang_google_grpc",
     "org_golang_google_protobuf",
     "org_golang_x_crypto",
-    "sentioxyz_sentio_core",
 )
