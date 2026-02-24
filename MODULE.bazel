@@ -12,17 +12,7 @@ go_sdk.download(version = "1.25.3")
 go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
 go_deps.from_file(go_mod = "//:go.mod")
 
-# Override sentio-core to regenerate BUILD files using gazelle
-# This is needed because the existing BUILD.bazel files in sentio-core
-# reference @rules_go which isn't visible from external repository context
-go_deps.gazelle_override(
-    path = "sentioxyz/sentio-core",
-    build_file_generation = "clean",
-    directives = [
-        "gazelle:prefix sentioxyz/sentio-core",
-        "gazelle:build_file_name BUILD.bazel",
-    ],
-)
+
 
 use_repo(
     go_deps,
