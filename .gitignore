@@ -44,3 +44,7 @@ tests/bin/
 tests/*.log
 external/ck_remote_proxy_linux
 CONTEXT_SUMMARY.md
+
+clickhouse-proxy-linux
+integration_test_client-linux
+proxy

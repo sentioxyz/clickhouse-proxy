@@ -11,13 +11,15 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
 	log "sentioxyz/sentio-core/common/log"
+
+	proxy "ck_remote_proxy/pkg/proxy"
 )
 
 func main() {
 	configPath := flag.String("config", envOrDefault("CK_CONFIG", ""), "path to JSON config file (optional)")
 	flag.Parse()
 
-	cfg := loadConfig(*configPath)
+	cfg := proxy.LoadConfig(*configPath)
 	log.Infof("clickhouse-proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t rewriter_enabled=%t",
 		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled, cfg.RewriterEnabled)
 
@@ -25,7 +27,7 @@ func main() {
 	defer stop()
 
 	go func() {
-		// R7-3: 防止 metrics HTTP 服务 panic 导致整个进程崩溃
+		// R7-3: Prevent metrics HTTP server panic from crashing the whole process
 		defer func() {
 			if r := recover(); r != nil {
 				log.Errorf("metrics server panic recovered: %v", r)
@@ -38,36 +40,36 @@ func main() {
 	}()
 
 	// Create validator based on configuration
-	var validator Validator
+	var validator proxy.Validator
 	if cfg.AuthEnabled {
-		validator = NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true, cfg.AuthAllowNoAuth)
+		validator = proxy.NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true, cfg.AuthAllowNoAuth)
 		log.Infof("Ethereum signature auth enabled with %d allowed addresses, allow_no_auth=%t", len(cfg.AuthAllowedAddresses), cfg.AuthAllowNoAuth)
 	}
 
 	// Create rewriter based on configuration
-	var rewriter Rewriter
+	var rewriter proxy.Rewriter
 	if cfg.RewriterEnabled {
 		// Load network state
-		var networkState NetworkState
+		var networkState proxy.NetworkState
 		switch cfg.NetworkStateSource {
 		case "file":
 			if cfg.NetworkStateFile != "" {
-				state, err := LoadNetworkStateFromYAML(cfg.NetworkStateFile)
+				state, err := proxy.LoadNetworkStateFromYAML(cfg.NetworkStateFile)
 				if err != nil {
 					log.Fatalf("failed to load network state from file: %v", err)
 				}
 				networkState = state
 			} else {
 				log.Warnf("rewriter enabled but no network state file configured, using empty state")
-				networkState = NewInMemoryNetworkState()
+				networkState = proxy.NewInMemoryNetworkState()
 			}
 		default:
 			log.Warnf("unknown network state source %q, using empty state", cfg.NetworkStateSource)
-			networkState = NewInMemoryNetworkState()
+			networkState = proxy.NewInMemoryNetworkState()
 		}
 
 		// Create rewriter
-		rwConfig := RewriterConfig{
+		rwConfig := proxy.RewriterConfig{
 			Enabled:        true,
 			ServiceAddr:    cfg.RewriterServiceAddr,
 			LocalIndexerId: cfg.RewriterLocalIndexerId,
@@ -75,18 +77,25 @@ func main() {
 			CHPassword:     cfg.CHPassword,
 			Timeout:        cfg.RewriterTimeout.Duration,
 		}
-		rw, err := NewSentioNetworkRewriter(rwConfig, networkState)
+		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState)
 		if err != nil {
 			log.Warnf("failed to create rewriter: %v, rewriting disabled", err)
 		} else {
 			rewriter = rw
-			defer rw.Close() // 确保 proxy 停止时释放 gRPC 连接
+			defer rw.Close()
 			log.Infof("SQL rewriter enabled, service_addr=%s local_indexer_id=%d", cfg.RewriterServiceAddr, cfg.RewriterLocalIndexerId)
 		}
 	}
 
-	proxy := newProxy(cfg, validator, rewriter)
-	if err := proxy.serve(ctx); err != nil {
+	p := proxy.NewProxy(cfg, validator, rewriter)
+	if err := p.Serve(ctx); err != nil {
 		log.Fatalf("proxy stopped: %v", err)
 	}
+}
+
+func envOrDefault(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
