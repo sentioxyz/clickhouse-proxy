@@ -21,26 +21,26 @@ import (
 	"go.yaml.in/yaml/v3"
 )
 
-// Rewriter 负责将 Sentio-Network 模式 SQL 重写为真实 SQL
+// Rewriter is responsible for rewriting Sentio-Network mode SQL into real SQL
 type Rewriter interface {
-	// Rewrite 接收原始 SQL，返回重写后的 SQL
-	// 如果 SQL 不包含 Sentio-Network 模式表名，返回原 SQL
+	// Rewrite takes the original SQL and returns the rewritten SQL
+	// If the SQL does not contain Sentio-Network mode table names, return the original SQL
 	Rewrite(ctx context.Context, sql string) (string, error)
-	// Close 关闭 gRPC 连接
+	// Close closes the gRPC connection
 	Close() error
 }
 
-// NetworkState 表示网络状态信息
+// NetworkState represents network state information
 type NetworkState interface {
-	// GetProcessorAllocation 获取 Processor 的分配信息
+	// GetProcessorAllocation retrieves the Processor allocation information
 	GetProcessorAllocation(processorId string) ([]ProcessorAllocation, bool)
-	// GetIndexerInfo 获取 Indexer 信息
+	// GetIndexerInfo retrieves Indexer information
 	GetIndexerInfo(indexerId uint64) (IndexerInfo, bool)
-	// GetProcessorInfo 获取 Processor 信息
+	// GetProcessorInfo retrieves Processor information
 	GetProcessorInfo(processorId string) (ProcessorInfo, bool)
 }
 
-// IndexerInfo 表示 Indexer 节点信息
+// IndexerInfo represents Indexer node information
 type IndexerInfo struct {
 	IndexerId           uint64 `json:"indexerId" yaml:"indexer_id"`
 	IndexerUrl          string `json:"indexerUrl" yaml:"indexer_url"`
@@ -49,30 +49,30 @@ type IndexerInfo struct {
 	ClickhouseProxyPort uint16 `json:"clickhouseProxyPort" yaml:"clickhouse_proxy_port"`
 }
 
-// ProcessorAllocation 表示 Processor 分配信息
+// ProcessorAllocation represents Processor allocation information
 type ProcessorAllocation struct {
 	ProcessorId string `json:"processorId" yaml:"processor_id"`
 	IndexerId   uint64 `json:"indexerId" yaml:"indexer_id"`
 }
 
-// ProcessorInfo 表示 Processor 信息
+// ProcessorInfo represents Processor information
 type ProcessorInfo struct {
 	ProcessorId         string `json:"processorId" yaml:"processor_id"`
 	EntitySchema        string `json:"entitySchema" yaml:"entity_schema"`
 	EntitySchemaVersion int32  `json:"entitySchemaVersion" yaml:"entity_schema_version"`
 }
 
-// RewriterConfig 重写器配置
+// RewriterConfig is the rewriter configuration
 type RewriterConfig struct {
-	Enabled        bool   // 是否启用重写
-	ServiceAddr    string // sql-rewriter gRPC 服务地址
-	LocalIndexerId uint64 // 本地 Indexer ID
-	CHUser         string // ClickHouse 连接用户名
-	CHPassword     string // ClickHouse 连接密码
+	Enabled        bool   // Whether to enable rewriting
+	ServiceAddr    string // sql-rewriter gRPC service address
+	LocalIndexerId uint64 // Local Indexer ID
+	CHUser         string // ClickHouse connection username
+	CHPassword     string // ClickHouse connection password
 	Timeout        time.Duration
 }
 
-// SentioNetworkRewriter 实现 Rewriter 接口
+// SentioNetworkRewriter implements the Rewriter interface
 type SentioNetworkRewriter struct {
 	config       RewriterConfig
 	networkState NetworkState
@@ -80,31 +80,31 @@ type SentioNetworkRewriter struct {
 	grpcClient   pb.RewriterServiceClient // cached gRPC client stub
 }
 
-// sentioNetworkTableRegex 匹配 Sentio-Network 模式表名
-// 格式: sentio_<processor_id>.<table_name>
+// sentioNetworkTableRegex matches Sentio-Network mode table names
+// Format: sentio_<processor_id>.<table_name>
 var sentioNetworkTableRegex = regexp.MustCompile(`(?i)\bsentio_([a-zA-Z0-9_]+)\.([a-zA-Z0-9_]+)\b`)
 
-// ParsedTable 表示解析后的表名信息
+// ParsedTable represents parsed table name information
 type ParsedTable struct {
-	FullMatch   string // 完整匹配，如 "sentio_coinbase.transfer"
-	ProcessorId string // processor_id，如 "coinbase"
-	TableName   string // 表名，如 "transfer"
+	FullMatch   string // Full match, e.g. "sentio_coinbase.transfer"
+	ProcessorId string // processor_id, e.g. "coinbase"
+	TableName   string // Table name, e.g. "transfer"
 }
 
-// NewSentioNetworkRewriter 创建一个新的 SentioNetworkRewriter
+// NewSentioNetworkRewriter creates a new SentioNetworkRewriter
 func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState) (*SentioNetworkRewriter, error) {
 	rewriter := &SentioNetworkRewriter{
 		config:       config,
 		networkState: state,
 	}
 
-	// 建立 gRPC 连接 (lazy connect, 不阻塞启动)
-	// 添加 keepalive 以保持长连接健康性
+	// Establish gRPC connection (lazy connect, non-blocking startup)
+	// Add keepalive to maintain long connection health
 	if config.ServiceAddr != "" {
 		kaParams := keepalive.ClientParameters{
-			Time:                30 * time.Second, // 每 30 秒发送 ping（P2: 从 10s 调整为 30s，减少开销）
-			Timeout:             5 * time.Second,  // ping 超时（从 3s 调整为 5s）
-			PermitWithoutStream: true,             // 无活跃流时也保持 ping
+			Time:                30 * time.Second, // Send ping every 30s (P2: adjusted from 10s to 30s to reduce overhead)
+			Timeout:             5 * time.Second,  // Ping timeout (adjusted from 3s to 5s)
+			PermitWithoutStream: true,             // Keep pinging even without active streams
 		}
 		conn, err := grpc.NewClient(
 			config.ServiceAddr,
@@ -121,61 +121,61 @@ func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState) (*Senti
 	return rewriter, nil
 }
 
-// Rewrite 将 Sentio-Network 模式 SQL 重写为真实 SQL
+// Rewrite rewrites Sentio-Network mode SQL into real SQL
 func (r *SentioNetworkRewriter) Rewrite(ctx context.Context, sql string) (string, error) {
-	// 解析 SQL 中的 Sentio-Network 模式表名
+	// Parse Sentio-Network mode table names in SQL
 	tables := r.parseSentioNetworkTables(sql)
 	if len(tables) == 0 {
-		// 没有 Sentio-Network 模式表名，返回原 SQL
+		// No Sentio-Network mode table names found; return original SQL
 		return sql, nil
 	}
 
-	// 构建重写映射
+	// Build rewrite mapping
 	tableWithDatabaseMap := make(map[string]TableWithDatabase)
 	remoteTableMap := make(map[string]RemoteTable)
 
 	for _, table := range tables {
-		// 获取 Processor 分配信息
+		// Get Processor allocation info
 		allocations, ok := r.networkState.GetProcessorAllocation(table.ProcessorId)
 		if !ok || len(allocations) == 0 {
 			log.Warnf("processor allocation not found for processor_id=%s, skipping rewrite", table.ProcessorId)
 			continue
 		}
 
-		// 取第一个分配（简化处理）
+		// Take the first allocation (simplified handling)
 		allocation := allocations[0]
 
-		// 获取 Indexer 信息
+		// Get Indexer info
 		indexerInfo, ok := r.networkState.GetIndexerInfo(allocation.IndexerId)
 		if !ok {
 			log.Warnf("indexer info not found for indexer_id=%d, skipping rewrite", allocation.IndexerId)
 			continue
 		}
 
-		// 获取 Processor 信息
+		// Get Processor info
 		processorInfo, ok := r.networkState.GetProcessorInfo(table.ProcessorId)
 		if !ok {
 			log.Warnf("processor info not found for processor_id=%s, using default", table.ProcessorId)
 			processorInfo = ProcessorInfo{ProcessorId: table.ProcessorId}
 		}
 
-		// 构建物理表名
+		// Build physical table name
 		physicalTable := r.buildPhysicalTableName(table.ProcessorId, table.TableName, processorInfo)
-		// 优先使用 ProcessorInfo.EntitySchema 作为数据库名，若为空则默认 "sentio"
+		// Prefer ProcessorInfo.EntitySchema as database name; default to "sentio" if empty
 		database := "sentio"
 		if processorInfo.EntitySchema != "" {
 			database = processorInfo.EntitySchema
 		}
 
 		if allocation.IndexerId == r.config.LocalIndexerId {
-			// 本地表：使用 table_with_database_map
+			// Local table: use table_with_database_map
 			tableWithDatabaseMap[table.FullMatch] = TableWithDatabase{
 				Database: database,
 				Table:    physicalTable,
 			}
 			log.Debugf("local table rewrite: %s -> %s.%s", table.FullMatch, database, physicalTable)
 		} else {
-			// 远程表：使用 remote_table_map
+			// Remote table: use remote_table_map
 			addr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
 			remoteTableMap[table.FullMatch] = RemoteTable{
 				Addr:     addr,
@@ -189,34 +189,34 @@ func (r *SentioNetworkRewriter) Rewrite(ctx context.Context, sql string) (string
 		}
 	}
 
-	// 如果没有需要重写的表，返回原 SQL
+	// If no tables need rewriting, return original SQL
 	if len(tableWithDatabaseMap) == 0 && len(remoteTableMap) == 0 {
 		return sql, nil
 	}
 
-	// 调用 sql-rewriter 服务进行重写
+	// Call sql-rewriter service for rewriting
 	if r.grpcConn != nil {
 		rewrittenSQL, err := r.callRewriterService(ctx, sql, tableWithDatabaseMap, remoteTableMap)
 		if err != nil {
 			log.Errorf("rewriter service call failed: %v, falling back to simple rewrite", err)
-			// 降级到简单替换
+			// Fall back to simple replacement
 			return r.simpleRewrite(sql, tableWithDatabaseMap, remoteTableMap), nil
 		}
 		return rewrittenSQL, nil
 	}
 
-	// 无 gRPC 连接时使用简单替换
+	// Use simple replacement when no gRPC connection
 	return r.simpleRewrite(sql, tableWithDatabaseMap, remoteTableMap), nil
 }
 
-// parseSentioNetworkTables 解析 SQL 中的 Sentio-Network 模式表名
+// parseSentioNetworkTables parses Sentio-Network mode table names in SQL
 func (r *SentioNetworkRewriter) parseSentioNetworkTables(sql string) []ParsedTable {
 	matches := sentioNetworkTableRegex.FindAllStringSubmatch(sql, -1)
 	if len(matches) == 0 {
 		return nil
 	}
 
-	// 去重
+	// Deduplicate
 	seen := make(map[string]bool)
 	var tables []ParsedTable
 	for _, match := range matches {
@@ -237,19 +237,19 @@ func (r *SentioNetworkRewriter) parseSentioNetworkTables(sql string) []ParsedTab
 	return tables
 }
 
-// buildPhysicalTableName 构建物理表名
+// buildPhysicalTableName builds the physical table name
 func (r *SentioNetworkRewriter) buildPhysicalTableName(processorId, tableName string, info ProcessorInfo) string {
-	// 如果 ProcessorInfo 中指定了 EntitySchemaVersion > 0，使用带前缀格式
-	// 否则直接返回原始表名（用于测试场景）
+	// If EntitySchemaVersion > 0 is specified in ProcessorInfo, use prefixed format
+	// Otherwise return the original table name (for test scenarios)
 	if info.EntitySchemaVersion > 0 {
 		prefix := r.generateTablePrefix(processorId)
 		return fmt.Sprintf("%s_%s", prefix, tableName)
 	}
-	// 直接返回原始表名
+	// Return original table name directly
 	return tableName
 }
 
-// generateTablePrefix 生成表名前缀
+// generateTablePrefix generates the table name prefix
 func (r *SentioNetworkRewriter) generateTablePrefix(processorId string) string {
 	if len(processorId) > 8 {
 		return processorId[:8]
@@ -257,13 +257,13 @@ func (r *SentioNetworkRewriter) generateTablePrefix(processorId string) string {
 	return processorId
 }
 
-// TableWithDatabase 表示带数据库的表
+// TableWithDatabase represents a table with its database
 type TableWithDatabase struct {
 	Database string
 	Table    string
 }
 
-// RemoteTable 表示远程表
+// RemoteTable represents a remote table
 type RemoteTable struct {
 	Addr     string
 	Database string
@@ -272,10 +272,10 @@ type RemoteTable struct {
 	Password string
 }
 
-// callRewriterService 调用 sql-rewriter gRPC 服务
-// R4-5 安全说明: RemoteTable.Password 以明文发送给 sql-rewriter gRPC 服务，
-// sql-rewriter 需要它来生成 remote() 函数调用。此通信仅在可信内网进行，
-// 如果部署环境变更（跨网络/公网），应切换到 TLS 加密通道。
+// callRewriterService calls the sql-rewriter gRPC service
+// R4-5 Security note: RemoteTable.Password is sent in plaintext to the sql-rewriter gRPC service,
+// sql-rewriter needs it to generate remote() function calls. This communication occurs only within trusted internal networks,
+// if the deployment environment changes (cross-network/public), switch to TLS encrypted channels.
 func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql string, tableWithDatabase map[string]TableWithDatabase, remoteTable map[string]RemoteTable) (string, error) {
 	client := r.grpcClient
 
@@ -314,7 +314,7 @@ func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql str
 		},
 	}
 
-	// 设置 gRPC 调用超时
+	// Set gRPC call timeout
 	timeout := r.config.Timeout
 	if timeout == 0 {
 		timeout = 5 * time.Second
@@ -333,23 +333,23 @@ func (r *SentioNetworkRewriter) callRewriterService(ctx context.Context, sql str
 	return resp.SqlAfterRewrite, nil
 }
 
-// simpleRewrite 简单字符串替换重写（降级方案）
-// 使用 word-boundary 感知的替换，避免误替换字符串字面量中的匹配
+// simpleRewrite performs simple string replacement rewriting (fallback approach)
+// Uses word-boundary aware replacement to avoid false matches in string literals
 func (r *SentioNetworkRewriter) simpleRewrite(sql string, tableWithDatabase map[string]TableWithDatabase, remoteTable map[string]RemoteTable) string {
 	result := sql
 
-	// 替换本地表（使用 word-boundary 正则）
+	// Replace local tables (using word-boundary regex)
 	for original, target := range tableWithDatabase {
 		replacement := fmt.Sprintf("%s.%s", target.Database, target.Table)
 		result = replaceOutsideQuotes(result, original, replacement)
 	}
 
-	// 替换远程表（使用 word-boundary 正则）
+	// Replace remote tables (using word-boundary regex)
 	for original, target := range remoteTable {
 		replacement := fmt.Sprintf("remote('%s', '%s', '%s', '%s', '%s')",
 			target.Addr, target.Database, target.Table, target.User, target.Password)
 		result = replaceOutsideQuotes(result, original, replacement)
-		// P2-9: 日志中使用 masking 避免密码泄露
+		// P2-9: Use masking in logs to avoid password leakage
 		maskedReplacement := fmt.Sprintf("remote('%s', '%s', '%s', '%s', '%s')",
 			target.Addr, target.Database, target.Table, target.User, maskPassword(target.Password))
 		log.Infof("simpleRewrite: remote table %q -> %s", original, maskedReplacement)
@@ -358,32 +358,32 @@ func (r *SentioNetworkRewriter) simpleRewrite(sql string, tableWithDatabase map[
 	return result
 }
 
-// replaceOutsideQuotes 在 SQL 中替换目标字符串，但跳过引号和注释内的内容。
-// 这避免了 strings.ReplaceAll 可能误替换字符串字面量/注释中的表名。
-// 支持三种引用风格：单引号(')、双引号(")、反引号(`)
-// 支持两种转义方式：反斜杠转义(\') 和 ClickHouse 连续引号转义(")
-// P2-8: 支持 SQL 注释：行注释(--) 和 块注释(/* */)
+// replaceOutsideQuotes replaces target strings in SQL, but skips content inside quotes and comments.
+// This avoids strings.ReplaceAll potentially replacing table names in string literals/comments.
+// Supports three quoting styles: single quotes('), double quotes("), backticks(`)
+// Supports two escape methods: backslash escape(\') and ClickHouse consecutive quote escape(")
+// P2-8: Supports SQL comments: line comments(--) and block comments(/* */)
 func replaceOutsideQuotes(sql, old, replacement string) string {
 	var result strings.Builder
 	result.Grow(len(sql))
 	i := 0
 	for i < len(sql) {
-		// P2-8: 检查行注释 (-- 到行尾)
+		// P2-8: Check line comment (-- to end of line)
 		if i+1 < len(sql) && sql[i] == '-' && sql[i+1] == '-' {
-			// 跳过整个行注释
+			// Skip the entire line comment
 			for i < len(sql) && sql[i] != '\n' {
 				result.WriteByte(sql[i])
 				i++
 			}
 			continue
 		}
-		// P2-8: 检查块注释 (/* ... */)
+		// P2-8: Check block comment (/* ... */)
 		if i+1 < len(sql) && sql[i] == '/' && sql[i+1] == '*' {
 			result.WriteByte(sql[i])
 			i++
 			result.WriteByte(sql[i])
 			i++
-			// 跳过直到找到 */
+			// Skip until */ is found
 			for i < len(sql) {
 				if i+1 < len(sql) && sql[i] == '*' && sql[i+1] == '/' {
 					result.WriteByte(sql[i])
@@ -397,17 +397,17 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 			}
 			continue
 		}
-		// 检查是否在引号内（含反引号，ClickHouse 兼容 MySQL 的标识符引用语法）
+		// Check if inside quotes (including backticks, ClickHouse is compatible with MySQL identifier quoting syntax)
 		if sql[i] == '\'' || sql[i] == '"' || sql[i] == '`' {
 			quote := sql[i]
 			result.WriteByte(quote)
 			i++
-			// 跳到匹配的关闭引号
+			// Skip to matching closing quote
 			for i < len(sql) {
 				result.WriteByte(sql[i])
 				if sql[i] == quote {
-					// 风险-4: 处理 ClickHouse 的连续引号转义（'' 或 "")
-					// 例如 SELECT 'it''s a test' 中 '' 是转义的单引号
+					// Risk-4: Handle ClickHouse consecutive quote escaping ('' or "")
+					// e.g. SELECT 'it''s a test' where '' is an escaped single quote
 					if i+1 < len(sql) && sql[i+1] == quote {
 						i++
 						result.WriteByte(sql[i])
@@ -417,7 +417,7 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 					i++
 					break
 				}
-				// 处理反斜杠转义引号（\'）
+				// Handle backslash escaped quotes (\')
 				if sql[i] == '\\' && i+1 < len(sql) {
 					i++
 					result.WriteByte(sql[i])
@@ -426,7 +426,7 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 			}
 			continue
 		}
-		// 引号外：尝试匹配
+		// Outside quotes: try to match
 		if i+len(old) <= len(sql) && sql[i:i+len(old)] == old {
 			result.WriteString(replacement)
 			i += len(old)
@@ -438,7 +438,7 @@ func replaceOutsideQuotes(sql, old, replacement string) string {
 	return result.String()
 }
 
-// Close 关闭 gRPC 连接
+// Close closes the gRPC connection
 func (r *SentioNetworkRewriter) Close() error {
 	if r.grpcConn != nil {
 		return r.grpcConn.Close()
@@ -454,7 +454,7 @@ func maskPassword(password string) string {
 	return password[:1] + strings.Repeat("*", len(password)-2) + password[len(password)-1:]
 }
 
-// NoopRewriter 空实现，不进行任何重写
+// NoopRewriter is a no-op implementation that performs no rewriting
 type NoopRewriter struct{}
 
 func (n NoopRewriter) Rewrite(ctx context.Context, sql string) (string, error) {
@@ -465,7 +465,7 @@ func (n NoopRewriter) Close() error {
 	return nil
 }
 
-// InMemoryNetworkState 内存中的网络状态实现（用于测试）
+// InMemoryNetworkState is an in-memory network state implementation (for testing)
 type InMemoryNetworkState struct {
 	mu                   sync.RWMutex
 	ProcessorAllocations map[string][]ProcessorAllocation
@@ -540,7 +540,7 @@ func LoadNetworkStateFromYAML(path string) (*InMemoryNetworkState, error) {
 
 // --- Helper functions for parsing ---
 
-// ParseIndexerId 解析 Indexer ID
+// ParseIndexerId parses the Indexer ID
 func ParseIndexerId(s string) (uint64, error) {
 	return strconv.ParseUint(s, 10, 64)
 }

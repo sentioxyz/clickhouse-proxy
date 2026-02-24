@@ -6,7 +6,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CK_BIN="/workspace/Clickhouse/build/programs/clickhouse"
 
 echo "[stop_demo] stopping proxies..."
-# 尝试根据配置路径和进程名匹配 proxy 进程。
+# Try to match proxy process by config path and process name.
 pkill -f "ck_remote_proxy -config ${ROOT_DIR}/local/proxy-a.json" 2>/dev/null || true
 pkill -f "ck_remote_proxy -config ${ROOT_DIR}/local/proxy-b.json" 2>/dev/null || true
 pkill -f "ck_remote_proxy -config local/proxy-a.json" 2>/dev/null || true

@@ -7,50 +7,50 @@ import (
 	"sync"
 )
 
-// chunkedFramePool 缓存 ChunkedWriter 的帧缓冲区，减少高频写入的 GC 压力
+// chunkedFramePool caches ChunkedWriter frame buffers to reduce GC pressure from high-frequency writes
 var chunkedFramePool = sync.Pool{
 	New: func() interface{} {
-		// 默认分配 64KB + 8 字节帧头/尾 的缓冲区
+		// Allocate 64KB + 8 byte frame header/trailer buffer by default
 		buf := make([]byte, 0, defaultChunkPayloadSize+chunkedHeaderSize*2)
 		return buf
 	},
 }
 
-// ClickHouse Chunked 协议帧格式（来自 ClickHouse C++ 源码 ReadBufferFromPocoSocketChunked.h）：
+// ClickHouse Chunked protocol frame format (from ClickHouse C++ source ReadBufferFromPocoSocketChunked.h):
 //
-//   Chunk begins   | [4 bytes LE: chunk_size]   ← uint32 小端序，表示本帧数据长度
+//   Chunk begins   | [4 bytes LE: chunk_size]   ← uint32 little-endian, frame data length
 //                  |   packet_type + packet_data
-//                  |   ... 可包含多个 packet ...
-//   Chunk ends     | [4 bytes: 0x00000000]      ← 4 字节零结束标记
+//                  |   ... may contain multiple packets ...
+//   Chunk ends     | [4 bytes: 0x00000000]      ← 4-byte zero end marker
 //
-// 三种模式：
-//   Basic:      单帧包含一个 packet
-//   Datastream: 单帧包含多个连续 packet
-//   Multipart:  packet 数据跨越多个帧（chunk part）
+// Three modes:
+//   Basic:      single frame contains one packet
+//   Datastream: single frame contains multiple consecutive packets
+//   Multipart:  packet data spans multiple frames (chunk parts)
 
 const (
-	// chunkedHeaderSize 是 chunk 帧头的大小（4 字节 uint32 LE）
+	// chunkedHeaderSize is the chunk frame header size (4-byte uint32 LE)
 	chunkedHeaderSize = 4
-	// chunkedEndMarker 是 chunk 结束标记值
+	// chunkedEndMarker is the chunk end marker value
 	chunkedEndMarker = uint32(0)
-	// maxChunkSize 是合理的最大 chunk 大小（防御性限制，256MB）
+	// maxChunkSize is the reasonable maximum chunk size (defensive limit, 256MB)
 	maxChunkSize = 256 * 1024 * 1024
-	// defaultChunkPayloadSize 是 ChunkedWriter 默认的 chunk 载荷大小
+	// defaultChunkPayloadSize is the ChunkedWriter's default chunk payload size
 	defaultChunkPayloadSize = 64 * 1024
 )
 
-// ChunkedReader 从底层 io.Reader 中剥离 chunked 帧头和结束标记，
-// 对上层暴露"裸"的协议数据流，使现有包解析逻辑无需任何修改。
+// ChunkedReader strips chunked frame headers and end markers from the underlying io.Reader,
+// exposing a "raw" protocol data stream to upper layers, requiring no changes to existing packet parsing logic.
 //
-// 实现 io.Reader 接口。当 enabled=false 时直接透传底层 Reader。
-// 注意：ChunkedReader 不是并发安全的。调用方必须保证单 goroutine 访问。
+// Implements io.Reader interface. When enabled=false, directly passes through to underlying Reader.
+// Note: ChunkedReader is not concurrency-safe. Callers must ensure single goroutine access.
 type ChunkedReader struct {
 	r         io.Reader
 	enabled   bool
-	remaining int // 当前帧剩余未读字节数
+	remaining int // Remaining unread bytes in the current frame
 }
 
-// NewChunkedReader 创建 ChunkedReader。enabled 控制是否启用 chunked 解帧。
+// NewChunkedReader creates a ChunkedReader. enabled controls whether chunked deframing is active.
 func NewChunkedReader(r io.Reader, enabled bool) *ChunkedReader {
 	return &ChunkedReader{
 		r:       r,
@@ -58,14 +58,14 @@ func NewChunkedReader(r io.Reader, enabled bool) *ChunkedReader {
 	}
 }
 
-// Enabled 返回当前是否启用 chunked 解帧。
+// Enabled returns whether chunked deframing is currently active.
 func (cr *ChunkedReader) Enabled() bool {
 	return cr.enabled
 }
 
-// Read 实现 io.Reader。
-// 当 enabled=true 时，自动剥离 chunk 帧头和结束标记。
-// 当 enabled=false 时，直接透传底层 Reader。
+// Read implements io.Reader.
+// When enabled=true, automatically strips chunk frame headers and end markers.
+// When enabled=false, directly passes through to underlying Reader.
 func (cr *ChunkedReader) Read(p []byte) (int, error) {
 	if !cr.enabled {
 		return cr.r.Read(p)
@@ -73,7 +73,7 @@ func (cr *ChunkedReader) Read(p []byte) (int, error) {
 
 	for {
 		if cr.remaining > 0 {
-			// 当前帧还有数据可读
+			// Current frame still has data to read
 			toRead := len(p)
 			if toRead > cr.remaining {
 				toRead = cr.remaining
@@ -89,24 +89,24 @@ func (cr *ChunkedReader) Read(p []byte) (int, error) {
 			continue
 		}
 
-		// 需要读取下一个 chunk header
+		// Need to read the next chunk header
 		size, err := cr.readChunkHeader()
 		if err != nil {
-			return 0, err // io.EOF 会被正确传播
+			return 0, err // io.EOF will be correctly propagated
 		}
 
 		if size == 0 {
-			// chunk 结束标记（0x00000000），继续读取下一个 chunk
+			// Chunk end marker (0x00000000); continue reading the next chunk
 			continue
 		}
 
 		cr.remaining = int(size)
-		// 回到循环顶部，从新帧中读取数据
+		// Return to top of loop, read data from new frame
 	}
 }
 
-// readChunkHeader 读取 4 字节 chunk 帧头，返回 chunk 大小。
-// 如果底层 Reader 已到达 EOF，返回 (0, io.EOF)。
+// readChunkHeader reads the 4-byte chunk frame header and returns the chunk size.
+// If the underlying Reader has reached EOF, returns (0, io.EOF).
 func (cr *ChunkedReader) readChunkHeader() (uint32, error) {
 	var header [chunkedHeaderSize]byte
 	_, err := io.ReadFull(cr.r, header[:])
@@ -123,17 +123,17 @@ func (cr *ChunkedReader) readChunkHeader() (uint32, error) {
 	return size, nil
 }
 
-// ChunkedWriter 将写入的数据用 chunked 帧格式包裹后发送到底层 Writer。
+// ChunkedWriter wraps written data in chunked frame format before sending to the underlying Writer.
 //
-// 每次 Write 调用产生一个 chunk：[4 bytes LE: size][data][4 bytes: 0x00000000]
-// 当 enabled=false 时直接透传到底层 Writer。
-// 注意：ChunkedWriter 不是并发安全的。调用方必须保证单 goroutine 访问。
+// Each Write call produces one chunk: [4 bytes LE: size][data][4 bytes: 0x00000000]
+// When enabled=false, directly passes through to underlying Writer.
+// Note: ChunkedWriter is not concurrency-safe. Callers must ensure single goroutine access.
 type ChunkedWriter struct {
 	w       io.Writer
 	enabled bool
 }
 
-// NewChunkedWriter 创建 ChunkedWriter。enabled 控制是否启用 chunked 封帧。
+// NewChunkedWriter creates a ChunkedWriter. enabled controls whether chunked framing is active.
 func NewChunkedWriter(w io.Writer, enabled bool) *ChunkedWriter {
 	return &ChunkedWriter{
 		w:       w,
@@ -141,17 +141,17 @@ func NewChunkedWriter(w io.Writer, enabled bool) *ChunkedWriter {
 	}
 }
 
-// Enabled 返回当前是否启用 chunked 封帧。
+// Enabled returns whether chunked framing is currently active.
 func (cw *ChunkedWriter) Enabled() bool {
 	return cw.enabled
 }
 
-// Write 实现 io.Writer。
-// 当 enabled=true 时，将数据包裹在 chunk 帧中：[size: 4 bytes LE][data][end: 4 bytes 0x00]
-// 当 enabled=false 时，直接透传到底层 Writer。
-// R2-3: 当数据超过 defaultChunkPayloadSize 时，分为多个 chunk 发送，
-// 对齐 ClickHouse WriteBufferFromPocoSocketChunked 的 multipart mode 行为。
-// P2 #8: 使用 sync.Pool 缓存帧缓冲区，减少高频小包写入的内存分配。
+// Write implements io.Writer.
+// When enabled=true, wraps data in a chunk frame: [size: 4 bytes LE][data][end: 4 bytes 0x00]
+// When enabled=false, directly passes through to underlying Writer.
+// R2-3: When data exceeds defaultChunkPayloadSize, split into multiple chunks,
+// aligned with ClickHouse WriteBufferFromPocoSocketChunked multipart mode behavior.
+// P2 #8: Use sync.Pool to cache frame buffers, reducing memory allocations for high-frequency small packet writes.
 func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 	if !cw.enabled {
 		return cw.w.Write(p)
@@ -162,7 +162,7 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 
 	totalWritten := 0
 	for len(p) > 0 {
-		// R2-3: 分片 — 每个 chunk 最大 defaultChunkPayloadSize
+		// R2-3: Fragmentation — each chunk has max size of defaultChunkPayloadSize
 		chunkSize := len(p)
 		if chunkSize > defaultChunkPayloadSize {
 			chunkSize = defaultChunkPayloadSize
@@ -170,7 +170,7 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 		chunk := p[:chunkSize]
 		p = p[chunkSize:]
 
-		// 合并为一次写入: [header:4][data:N][endMarker:4]
+		// Merge into a single write: [header:4][data:N][endMarker:4]
 		frameSize := chunkedHeaderSize + chunkSize + chunkedHeaderSize
 		frame := chunkedFramePool.Get().([]byte)
 		if cap(frame) < frameSize {
@@ -180,14 +180,14 @@ func (cw *ChunkedWriter) Write(p []byte) (int, error) {
 		}
 		binary.LittleEndian.PutUint32(frame[:chunkedHeaderSize], uint32(chunkSize))
 		copy(frame[chunkedHeaderSize:], chunk)
-		// endMarker 位于 frame[chunkedHeaderSize+chunkSize:]
+		// endMarker is at frame[chunkedHeaderSize+chunkSize:]
 		binary.LittleEndian.PutUint32(frame[chunkedHeaderSize+chunkSize:], 0)
 
 		_, err := cw.w.Write(frame)
 
-		// 归还到 pool（超大帧不放回，避免 pool 中堆积大 buffer）
-		// R4-6: 写入失败也归还 — buffer 在下次使用时通过 frame[:frameSize] 重切，
-		// 旧数据会被完全覆盖，不存在脏数据残留风险。
+		// Return to pool (oversized frames are not returned to avoid accumulating large buffers in the pool)
+		// R4-6: Return even on write failure — buffer is re-sliced via frame[:frameSize] on next use,
+		// old data will be completely overwritten, no risk of dirty data residue.
 		const maxPoolFrameSize = 256 * 1024 // 256KB
 		if cap(frame) <= maxPoolFrameSize {
 			chunkedFramePool.Put(frame)

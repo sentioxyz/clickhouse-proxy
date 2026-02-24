@@ -37,11 +37,11 @@ stop_clickhouse() {
 start_proxies() {
   echo "[run_demo] starting proxies..."
   mkdir -p "${ROOT_DIR}/.ck_runtime"
-  # 每次运行前清空旧日志，确保本次运行从空文件开始。
+  # Clear old logs before each run to ensure a fresh start.
   : > "${ROOT_DIR}/.ck_runtime/proxy-a.log"
   : > "${ROOT_DIR}/.ck_runtime/proxy-b.log"
 
-  # 前台 go run + 重定向日志到固定文件。
+  # Foreground go run + redirect logs to a fixed file.
   (cd "${ROOT_DIR}" && go run . -config local/proxy-a.json > .ck_runtime/proxy-a.log 2>&1) &
   PROXY_A_PID=$!
   (cd "${ROOT_DIR}" && go run . -config local/proxy-b.json > .ck_runtime/proxy-b.log 2>&1) &
@@ -64,7 +64,7 @@ main() {
   sleep 15
 
   start_proxies
-  # 等待 proxy 监听起来
+  # Wait for proxy to start listening
   sleep 5
 
   run_demo

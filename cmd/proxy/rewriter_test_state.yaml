@@ -1,4 +1,4 @@
-# 本地测试网络状态
+# Local test network state
 indexer_infos:
   1:
     indexer_id: 1
@@ -7,7 +7,7 @@ indexer_infos:
   2:
     indexer_id: 2
     indexer_url: "127.0.0.1"
-    clickhouse_proxy_port: 9001  # 指向同一个 proxy 模拟远程
+    clickhouse_proxy_port: 9001  # Point to the same proxy to simulate remote
 
 processor_allocations:
   coinbase:
