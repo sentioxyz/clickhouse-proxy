@@ -374,7 +374,8 @@ func TestSimpleRewrite_SafeFromInjection(t *testing.T) {
 		config: RewriterConfig{
 			LocalIndexerId: 1,
 		},
-		networkState: state,
+		networkState:         state,
+		tableRewriterFactory: DefaultTableRewriterFactory(),
 	}
 
 	// SQL 中字符串字面量包含表名模式

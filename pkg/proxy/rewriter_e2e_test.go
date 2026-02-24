@@ -218,7 +218,7 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "test123",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -295,7 +295,7 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret123",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -406,7 +406,7 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -465,7 +465,7 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -624,7 +624,7 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -669,7 +669,7 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -755,7 +755,7 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -800,7 +800,7 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -837,7 +837,7 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -897,7 +897,7 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -1050,7 +1050,7 @@ func BenchmarkRewrite(b *testing.B) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		b.Fatalf("failed to create rewriter: %v", err)
 	}

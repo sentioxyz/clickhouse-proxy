@@ -74,10 +74,11 @@ type RewriterConfig struct {
 
 // SentioNetworkRewriter implements the Rewriter interface
 type SentioNetworkRewriter struct {
-	config       RewriterConfig
-	networkState NetworkState
-	grpcConn     *grpc.ClientConn
-	grpcClient   pb.RewriterServiceClient // cached gRPC client stub
+	config               RewriterConfig
+	networkState         NetworkState
+	grpcConn             *grpc.ClientConn
+	grpcClient           pb.RewriterServiceClient // cached gRPC client stub
+	tableRewriterFactory SentioNetworkTableRewriterFactory
 }
 
 // sentioNetworkTableRegex matches Sentio-Network mode table names
@@ -91,55 +92,219 @@ type ParsedTable struct {
 	TableName   string // Table name, e.g. "transfer"
 }
 
-// NewSentioNetworkRewriter creates a new SentioNetworkRewriter
-func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState) (*SentioNetworkRewriter, error) {
+// SentioNetworkTableRewriter encapsulates Sentio network table name mapping logic.
+// Provided by @Chen, responsible for mapping virtual table names to physical table names.
+type SentioNetworkTableRewriter interface {
+	// Database returns the database name for this processor
+	Database() string
+	// RawTable maps a virtual table name to a physical table name; returns (physical_name, found, error)
+	RawTable(table string) (string, bool, error)
+	// RawTables batch-maps virtual table names to physical table names
+	RawTables(tables ...string) (map[string]string, error)
+	// All returns all table name mappings
+	All() map[string]string
+	// Reverse maps a physical table name back to a virtual table name
+	Reverse(rawTable string) (string, bool, error)
+}
+
+// SentioNetworkTableRewriterFactory creates a SentioNetworkTableRewriter for a given processor.
+type SentioNetworkTableRewriterFactory func(ctx context.Context, processorId string,
+	indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error)
+
+// NewSentioNetworkRewriter creates a new SentioNetworkRewriter.
+// The factory parameter provides a SentioNetworkTableRewriter for each processor.
+// Pass DefaultTableRewriterFactory() for backward-compatible simple prefix logic.
+func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState, factory SentioNetworkTableRewriterFactory) (*SentioNetworkRewriter, error) {
+	if factory == nil {
+		factory = DefaultTableRewriterFactory()
+	}
 	rewriter := &SentioNetworkRewriter{
-		config:       config,
-		networkState: state,
+		config:               config,
+		networkState:         state,
+		tableRewriterFactory: factory,
 	}
 
-	// Establish gRPC connection (lazy connect, non-blocking startup)
+	// Establish gRPC connection (blocking connect, ensures connection is ready before first RPC)
 	// Add keepalive to maintain long connection health
 	if config.ServiceAddr != "" {
 		kaParams := keepalive.ClientParameters{
-			Time:                30 * time.Second, // Send ping every 30s (P2: adjusted from 10s to 30s to reduce overhead)
-			Timeout:             5 * time.Second,  // Ping timeout (adjusted from 3s to 5s)
+			Time:                30 * time.Second, // Send ping every 30s
+			Timeout:             5 * time.Second,  // Ping timeout
 			PermitWithoutStream: true,             // Keep pinging even without active streams
 		}
-		conn, err := grpc.NewClient(
-			config.ServiceAddr,
+		connectTimeout := config.Timeout
+		if connectTimeout == 0 {
+			connectTimeout = 10 * time.Second
+		}
+		connectCtx, connectCancel := context.WithTimeout(context.Background(), connectTimeout)
+		defer connectCancel()
+
+		conn, err := grpc.DialContext(connectCtx, config.ServiceAddr,
 			grpc.WithTransportCredentials(insecure.NewCredentials()),
 			grpc.WithKeepaliveParams(kaParams),
+			grpc.WithBlock(), // Wait for connection to be established
 		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to create rewriter client for %s: %w", config.ServiceAddr, err)
+			log.Warnf("failed to connect to rewriter service at %s: %v, will work without gRPC", config.ServiceAddr, err)
+		} else {
+			rewriter.grpcConn = conn
+			rewriter.grpcClient = pb.NewRewriterServiceClient(conn)
+			log.Infof("connected to rewriter service at %s", config.ServiceAddr)
 		}
-		rewriter.grpcConn = conn
-		rewriter.grpcClient = pb.NewRewriterServiceClient(conn)
 	}
 
 	return rewriter, nil
 }
 
-// Rewrite rewrites Sentio-Network mode SQL into real SQL
+// Rewrite rewrites Sentio-Network mode SQL into real SQL.
+//
+// Two-phase approach (when gRPC is available):
+//
+//	Phase 1: Call sql-rewriter with empty options to get AST-parsed table names
+//	         (original_accessed_table_names) — accurate, no false positives.
+//	Phase 2: Filter for Sentio-Network pattern tables, build mappings via
+//	         NetworkState + SentioNetworkTableRewriter, then call sql-rewriter
+//	         again with the actual mappings to perform the rewrite.
+//
+// Fallback (no gRPC): Use regex-based parsing + simpleRewrite string replacement.
 func (r *SentioNetworkRewriter) Rewrite(ctx context.Context, sql string) (string, error) {
-	// Parse Sentio-Network mode table names in SQL
-	tables := r.parseSentioNetworkTables(sql)
+	// Determine table names: prefer AST-based parsing via gRPC, fallback to regex
+	var tables []ParsedTable
+	var useGRPC bool
+
+	if r.grpcConn != nil {
+		// Phase 1: Get AST-parsed table names from sql-rewriter
+		astTableNames, err := r.getASTTableNames(ctx, sql)
+		if err != nil {
+			log.Warnf("phase 1 AST parsing failed: %v, falling back to regex", err)
+			tables = r.parseSentioNetworkTables(sql)
+		} else {
+			// Filter AST table names for Sentio-Network pattern
+			tables = r.filterSentioNetworkTables(astTableNames)
+			useGRPC = true
+		}
+	} else {
+		// No gRPC connection: use regex-based parsing
+		tables = r.parseSentioNetworkTables(sql)
+	}
+
 	if len(tables) == 0 {
-		// No Sentio-Network mode table names found; return original SQL
 		return sql, nil
 	}
 
-	// Build rewrite mapping
+	// Build rewrite mapping from NetworkState + SentioNetworkTableRewriter
+	tableWithDatabaseMap, remoteTableMap := r.buildRewriteMappings(ctx, tables)
+
+	// If no tables need rewriting, return original SQL
+	if len(tableWithDatabaseMap) == 0 && len(remoteTableMap) == 0 {
+		return sql, nil
+	}
+
+	// Phase 2: Call sql-rewriter service with actual mappings
+	if useGRPC {
+		rewrittenSQL, err := r.callRewriterService(ctx, sql, tableWithDatabaseMap, remoteTableMap)
+		if err != nil {
+			log.Errorf("phase 2 rewriter service call failed: %v, falling back to simple rewrite", err)
+			return r.simpleRewrite(sql, tableWithDatabaseMap, remoteTableMap), nil
+		}
+		return rewrittenSQL, nil
+	}
+
+	// Fallback: Use simple replacement when no gRPC connection
+	return r.simpleRewrite(sql, tableWithDatabaseMap, remoteTableMap), nil
+}
+
+// getASTTableNames calls the sql-rewriter with empty options to get AST-parsed table names.
+// The sql-rewriter (C++ ClickHouse parser) returns accurate table names via original_accessed_table_names.
+func (r *SentioNetworkRewriter) getASTTableNames(ctx context.Context, sql string) ([]string, error) {
+	timeout := r.config.Timeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	// Send SQL with empty options — sql-rewriter will parse AST and return table names
+	req := &pb.RewriteSQLRequest{
+		Sql:     sql,
+		Options: nil, // no rewrite options, just parse
+	}
+
+	resp, err := r.grpcClient.Rewrite(ctxWithTimeout, req)
+	if err != nil {
+		return nil, fmt.Errorf("gRPC call failed: %w", err)
+	}
+	if resp.Code != pb.RewriteCode_Success {
+		return nil, fmt.Errorf("rewriter parse error: %s", resp.Message)
+	}
+
+	log.Debugf("AST parsed table names: %v", resp.OriginalAccessedTableNames)
+	return resp.OriginalAccessedTableNames, nil
+}
+
+// filterSentioNetworkTables filters AST-parsed table names for Sentio-Network pattern.
+// Supports two formats:
+//   - "sentio_<processorId>.<tableName>" — strips "sentio_" prefix to get processorId
+//   - "<processorId>.<tableName>"        — uses database part directly as processorId
+//
+// Any "database.table" format name is accepted; NetworkState lookup will determine validity.
+func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string) []ParsedTable {
+	seen := make(map[string]bool)
+	var tables []ParsedTable
+	for _, name := range astTableNames {
+		if seen[name] {
+			continue
+		}
+
+		// Split by "." — expect "database.table" format
+		parts := strings.SplitN(name, ".", 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			continue
+		}
+		dbPart := parts[0]    // e.g. "sentio_coinbase" or "coinbase"
+		tableName := parts[1] // e.g. "transfer"
+
+		// Extract processorId: strip "sentio_" prefix if present
+		processorId := dbPart
+		const prefix = "sentio_"
+		if strings.HasPrefix(strings.ToLower(dbPart), prefix) {
+			processorId = dbPart[len(prefix):]
+		}
+		if processorId == "" {
+			continue
+		}
+
+		seen[name] = true
+		tables = append(tables, ParsedTable{
+			FullMatch:   name,
+			ProcessorId: processorId,
+			TableName:   tableName,
+		})
+	}
+	return tables
+}
+
+// buildRewriteMappings builds the local/remote table mappings from NetworkState and SentioNetworkTableRewriter.
+func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables []ParsedTable) (map[string]TableWithDatabase, map[string]RemoteTable) {
 	tableWithDatabaseMap := make(map[string]TableWithDatabase)
 	remoteTableMap := make(map[string]RemoteTable)
 
+	// Group tables by processorId to avoid redundant TableRewriter creation
+	processorTables := make(map[string][]ParsedTable)
 	for _, table := range tables {
-		// Get Processor allocation info
-		allocations, ok := r.networkState.GetProcessorAllocation(table.ProcessorId)
+		processorTables[table.ProcessorId] = append(processorTables[table.ProcessorId], table)
+	}
+
+	for processorId, pTables := range processorTables {
+		// Get Processor allocation info — try processorId as-is first, then with "sentio_" prefix
+		allocations, ok := r.networkState.GetProcessorAllocation(processorId)
 		if !ok || len(allocations) == 0 {
-			log.Warnf("processor allocation not found for processor_id=%s, skipping rewrite", table.ProcessorId)
-			continue
+			// Retry with "sentio_" prefix
+			allocations, ok = r.networkState.GetProcessorAllocation("sentio_" + processorId)
+			if !ok || len(allocations) == 0 {
+				log.Warnf("processor allocation not found for processor_id=%s (also tried sentio_%s), skipping rewrite", processorId, processorId)
+				continue
+			}
 		}
 
 		// Take the first allocation (simplified handling)
@@ -153,60 +318,56 @@ func (r *SentioNetworkRewriter) Rewrite(ctx context.Context, sql string) (string
 		}
 
 		// Get Processor info
-		processorInfo, ok := r.networkState.GetProcessorInfo(table.ProcessorId)
+		processorInfo, ok := r.networkState.GetProcessorInfo(processorId)
 		if !ok {
-			log.Warnf("processor info not found for processor_id=%s, using default", table.ProcessorId)
-			processorInfo = ProcessorInfo{ProcessorId: table.ProcessorId}
+			log.Warnf("processor info not found for processor_id=%s, using default", processorId)
+			processorInfo = ProcessorInfo{ProcessorId: processorId}
 		}
 
-		// Build physical table name
-		physicalTable := r.buildPhysicalTableName(table.ProcessorId, table.TableName, processorInfo)
-		// Prefer ProcessorInfo.EntitySchema as database name; default to "sentio" if empty
-		database := "sentio"
-		if processorInfo.EntitySchema != "" {
-			database = processorInfo.EntitySchema
-		}
-
-		if allocation.IndexerId == r.config.LocalIndexerId {
-			// Local table: use table_with_database_map
-			tableWithDatabaseMap[table.FullMatch] = TableWithDatabase{
-				Database: database,
-				Table:    physicalTable,
-			}
-			log.Debugf("local table rewrite: %s -> %s.%s", table.FullMatch, database, physicalTable)
-		} else {
-			// Remote table: use remote_table_map
-			addr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
-			remoteTableMap[table.FullMatch] = RemoteTable{
-				Addr:     addr,
-				Database: database,
-				Table:    physicalTable,
-				User:     r.config.CHUser,
-				Password: r.config.CHPassword,
-			}
-			log.Debugf("remote table rewrite: %s -> remote('%s', '%s', '%s', '%s', '***')",
-				table.FullMatch, addr, database, physicalTable, r.config.CHUser)
-		}
-	}
-
-	// If no tables need rewriting, return original SQL
-	if len(tableWithDatabaseMap) == 0 && len(remoteTableMap) == 0 {
-		return sql, nil
-	}
-
-	// Call sql-rewriter service for rewriting
-	if r.grpcConn != nil {
-		rewrittenSQL, err := r.callRewriterService(ctx, sql, tableWithDatabaseMap, remoteTableMap)
+		// Create SentioNetworkTableRewriter for this processor
+		tableRewriter, err := r.tableRewriterFactory(ctx, processorId, indexerInfo, processorInfo)
 		if err != nil {
-			log.Errorf("rewriter service call failed: %v, falling back to simple rewrite", err)
-			// Fall back to simple replacement
-			return r.simpleRewrite(sql, tableWithDatabaseMap, remoteTableMap), nil
+			log.Warnf("failed to create table rewriter for processor_id=%s: %v, skipping", processorId, err)
+			continue
 		}
-		return rewrittenSQL, nil
+		database := tableRewriter.Database()
+
+		for _, table := range pTables {
+			// Use SentioNetworkTableRewriter to resolve physical table name
+			physicalTable, found, err := tableRewriter.RawTable(table.TableName)
+			if err != nil {
+				log.Warnf("table rewriter RawTable failed for %s: %v, skipping", table.FullMatch, err)
+				continue
+			}
+			if !found {
+				log.Warnf("table %s not found in rewriter mappings for processor_id=%s, skipping", table.FullMatch, processorId)
+				continue
+			}
+
+			if allocation.IndexerId == r.config.LocalIndexerId {
+				// Local table: use table_with_database_map
+				tableWithDatabaseMap[table.FullMatch] = TableWithDatabase{
+					Database: database,
+					Table:    physicalTable,
+				}
+				log.Debugf("local table rewrite: %s -> %s.%s", table.FullMatch, database, physicalTable)
+			} else {
+				// Remote table: use remote_table_map
+				addr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
+				remoteTableMap[table.FullMatch] = RemoteTable{
+					Addr:     addr,
+					Database: database,
+					Table:    physicalTable,
+					User:     r.config.CHUser,
+					Password: r.config.CHPassword,
+				}
+				log.Debugf("remote table rewrite: %s -> remote('%s', '%s', '%s', '%s', '***')",
+					table.FullMatch, addr, database, physicalTable, r.config.CHUser)
+			}
+		}
 	}
 
-	// Use simple replacement when no gRPC connection
-	return r.simpleRewrite(sql, tableWithDatabaseMap, remoteTableMap), nil
+	return tableWithDatabaseMap, remoteTableMap
 }
 
 // parseSentioNetworkTables parses Sentio-Network mode table names in SQL
@@ -237,24 +398,59 @@ func (r *SentioNetworkRewriter) parseSentioNetworkTables(sql string) []ParsedTab
 	return tables
 }
 
-// buildPhysicalTableName builds the physical table name
-func (r *SentioNetworkRewriter) buildPhysicalTableName(processorId, tableName string, info ProcessorInfo) string {
-	// If EntitySchemaVersion > 0 is specified in ProcessorInfo, use prefixed format
-	// Otherwise return the original table name (for test scenarios)
-	if info.EntitySchemaVersion > 0 {
-		prefix := r.generateTablePrefix(processorId)
-		return fmt.Sprintf("%s_%s", prefix, tableName)
+// DefaultTableRewriterFactory returns a factory that creates simpleTableRewriter instances.
+// This preserves the legacy prefix-truncation logic for backward compatibility and testing.
+func DefaultTableRewriterFactory() SentioNetworkTableRewriterFactory {
+	return func(ctx context.Context, processorId string,
+		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
+		return &simpleTableRewriter{
+			processorId:   processorId,
+			processorInfo: processorInfo,
+		}, nil
 	}
-	// Return original table name directly
-	return tableName
 }
 
-// generateTablePrefix generates the table name prefix
-func (r *SentioNetworkRewriter) generateTablePrefix(processorId string) string {
-	if len(processorId) > 8 {
-		return processorId[:8]
+// simpleTableRewriter is a backward-compatible SentioNetworkTableRewriter implementation
+// that uses the legacy prefix-truncation logic.
+type simpleTableRewriter struct {
+	processorId   string
+	processorInfo ProcessorInfo
+}
+
+func (s *simpleTableRewriter) Database() string {
+	// EntitySchema contains the entity schema definition (GraphQL), not the database name.
+	// The default database for Sentio tables is always "sentio".
+	// In the real implementation (@Chen's rewriter_sdk.go), Database() returns conn.GetDatabase().
+	return "sentio"
+}
+
+func (s *simpleTableRewriter) RawTable(table string) (string, bool, error) {
+	if s.processorInfo.EntitySchemaVersion > 0 {
+		prefix := s.processorId
+		if len(prefix) > 8 {
+			prefix = prefix[:8]
+		}
+		return fmt.Sprintf("%s_%s", prefix, table), true, nil
 	}
-	return processorId
+	return table, true, nil
+}
+
+func (s *simpleTableRewriter) RawTables(tables ...string) (map[string]string, error) {
+	result := make(map[string]string, len(tables))
+	for _, t := range tables {
+		raw, _, err := s.RawTable(t)
+		if err != nil {
+			return nil, err
+		}
+		result[t] = raw
+	}
+	return result, nil
+}
+
+func (s *simpleTableRewriter) All() map[string]string { return nil }
+
+func (s *simpleTableRewriter) Reverse(rawTable string) (string, bool, error) {
+	return "", false, nil
 }
 
 // TableWithDatabase represents a table with its database

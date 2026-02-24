@@ -101,7 +101,7 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 		CHPassword:     "test123",
 	}
 
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}

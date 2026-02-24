@@ -1,0 +1,28 @@
+indexer_infos:
+  5:
+    indexer_id: 5
+    indexer_url: "64.38.131.242"
+    compute_node_rpc_port: 10001
+    storage_node_rpc_port: 10002
+    clickhouse_proxy_port: 9001
+processor_allocations:
+  dvBsZtMc:
+    - processor_id: dvBsZtMc
+      indexer_id: 5
+processor_infos:
+  dvBsZtMc:
+    processor_id: dvBsZtMc
+    entity_schema: |
+      type GasSpent @entity {
+        id: ID!
+        from: String
+        to: String
+        gasValue: BigInt
+        gasUsed: BigInt
+        gasPrice: BigInt
+        effectiveGasPrice: BigInt
+        blockNumber: BigInt
+        transactionHash: Bytes
+        indexedAt: BigInt
+      }
+    entity_schema_version: 0

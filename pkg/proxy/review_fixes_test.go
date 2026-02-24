@@ -512,7 +512,7 @@ func TestRewriter_BacktickIntegration(t *testing.T) {
 		CHUser:         "default",
 		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}

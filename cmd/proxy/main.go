@@ -77,7 +77,7 @@ func main() {
 			CHPassword:     cfg.CHPassword,
 			Timeout:        cfg.RewriterTimeout.Duration,
 		}
-		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState)
+		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState, proxy.DefaultTableRewriterFactory())
 		if err != nil {
 			log.Warnf("failed to create rewriter: %v, rewriting disabled", err)
 		} else {
