@@ -97,6 +97,7 @@ func main() {
 			Enabled:     true,
 			ServiceAddr: cfg.RewriterServiceAddr,
 			Upstream:    cfg.Upstream,
+			Listen:      cfg.Listen,
 			Timeout:     cfg.RewriterTimeout.Duration,
 		}
 		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState, tableRewriterFactory)

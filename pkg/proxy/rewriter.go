@@ -55,6 +55,7 @@ type RewriterConfig struct {
 	Enabled     bool   // Whether to enable rewriting
 	ServiceAddr string // sql-rewriter gRPC service address (required when enabled)
 	Upstream    string // Upstream ClickHouse address (used for local/remote detection)
+	Listen      string // Proxy listen address (e.g. ":9001"), used for remote() addr rewrite to localhost
 	Timeout     time.Duration
 }
 
@@ -325,16 +326,20 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 				}
 				log.Debugf("local table rewrite: %s -> %s.%s", table.FullMatch, database, physicalTable)
 			} else {
-				// Remote table: use client's credentials for remote() function
+				// Remote table: rewrite addr to localhost (back to local Proxy1)
+				// and encode route info into user parameter for dynamic upstream routing.
+				// Format: __route__<target_proxy_addr>__<real_user>
+				localAddr := "localhost" + r.config.Listen // e.g. "localhost:9001"
+				routeUser := fmt.Sprintf("__route__%s__%s", indexerAddr, user)
 				remoteTableMap[table.FullMatch] = RemoteTable{
-					Addr:     indexerAddr,
+					Addr:     localAddr,
 					Database: database,
 					Table:    physicalTable,
-					User:     user,
+					User:     routeUser,
 					Password: password,
 				}
 				log.Debugf("remote table rewrite: %s -> remote('%s', '%s', '%s', '%s', '***')",
-					table.FullMatch, indexerAddr, database, physicalTable, user)
+					table.FullMatch, localAddr, database, physicalTable, routeUser)
 			}
 		}
 	}
