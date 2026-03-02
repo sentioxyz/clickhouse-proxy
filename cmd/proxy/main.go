@@ -63,27 +63,49 @@ func main() {
 				log.Warnf("rewriter enabled but no network state file configured, using empty state")
 				networkState = proxy.NewInMemoryNetworkState()
 			}
+		case "redis":
+			if cfg.NetworkStateRedis != "" {
+				state, err := proxy.NewRedisNetworkState(cfg.NetworkStateRedis)
+				if err != nil {
+					log.Fatalf("failed to connect to Redis network state: %v", err)
+				}
+				defer state.Close()
+				networkState = state
+			} else {
+				log.Fatalf("network_state_source is 'redis' but network_state_redis address is not configured")
+			}
 		default:
 			log.Warnf("unknown network state source %q, using empty state", cfg.NetworkStateSource)
 			networkState = proxy.NewInMemoryNetworkState()
 		}
 
+		// Create table rewriter factory
+		// If CKHManagerConfigPath is set, use the SDK factory with real ckhmanager
+		// Otherwise, fall back to simpleTableRewriter for testing
+		var tableRewriterFactory proxy.SentioNetworkTableRewriterFactory
+		if cfg.CKHManagerConfigPath != "" {
+			ckhManager := proxy.LoadCKHManager(cfg.CKHManagerConfigPath)
+			tableRewriterFactory = proxy.SDKTableRewriterFactory(ckhManager, cfg.PrivateKeyHex)
+			log.Infof("using SDK TableRewriterFactory with ckhmanager config=%s", cfg.CKHManagerConfigPath)
+		} else {
+			log.Warnf("ckh_manager_config not set, using fallback simpleTableRewriter (not suitable for production)")
+			tableRewriterFactory = proxy.DefaultTableRewriterFactory("sentio")
+		}
+
 		// Create rewriter
 		rwConfig := proxy.RewriterConfig{
-			Enabled:        true,
-			ServiceAddr:    cfg.RewriterServiceAddr,
-			LocalIndexerId: cfg.RewriterLocalIndexerId,
-			CHUser:         cfg.CHUser,
-			CHPassword:     cfg.CHPassword,
-			Timeout:        cfg.RewriterTimeout.Duration,
+			Enabled:     true,
+			ServiceAddr: cfg.RewriterServiceAddr,
+			Upstream:    cfg.Upstream,
+			Timeout:     cfg.RewriterTimeout.Duration,
 		}
-		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState, proxy.DefaultTableRewriterFactory())
+		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState, tableRewriterFactory)
 		if err != nil {
 			log.Warnf("failed to create rewriter: %v, rewriting disabled", err)
 		} else {
 			rewriter = rw
 			defer rw.Close()
-			log.Infof("SQL rewriter enabled, service_addr=%s local_indexer_id=%d", cfg.RewriterServiceAddr, cfg.RewriterLocalIndexerId)
+			log.Infof("SQL rewriter enabled, service_addr=%s upstream=%s", cfg.RewriterServiceAddr, cfg.Upstream)
 		}
 	}
 

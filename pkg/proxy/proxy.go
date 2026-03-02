@@ -1129,7 +1129,9 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		return
 	}
 	clientRevision := hello.ProtocolVersion
-	log.Infof("[conn %d] streaming: Hello decoded, client=%s revision=%d", id, hello.Name, clientRevision)
+	clientUser := hello.User
+	clientPassword := hello.Password
+	log.Infof("[conn %d] streaming: Hello decoded, client=%s user=%s revision=%d", id, hello.Name, clientUser, clientRevision)
 
 	// Record handshake start time
 	handshakeStart := time.Now()
@@ -1493,7 +1495,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			// SQL rewriting
 			if p.rewriter != nil && p.cfg.RewriterEnabled {
 				rewriteStart := time.Now()
-				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body)
+				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body, clientUser, clientPassword)
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
 				if err != nil {
 					log.Warnf("[conn %d] streaming: SQL rewrite failed: %v", id, err)

@@ -372,16 +372,15 @@ func TestSimpleRewrite_SafeFromInjection(t *testing.T) {
 
 	rewriter := &SentioNetworkRewriter{
 		config: RewriterConfig{
-			LocalIndexerId: 1,
 		},
 		networkState:         state,
-		tableRewriterFactory: DefaultTableRewriterFactory(),
+		tableRewriterFactory: DefaultTableRewriterFactory("sentio"),
 	}
 
 	// SQL 中字符串字面量包含表名模式
 	sql := "SELECT * FROM sentio_coinbase.transfer WHERE desc = 'sentio_coinbase.transfer is a table'"
 
-	result, err := rewriter.Rewrite(context.Background(), sql)
+	result, err := rewriter.Rewrite(context.Background(), sql, "default", "test123")
 	if err != nil {
 		t.Fatalf("Rewrite 失败: %v", err)
 	}

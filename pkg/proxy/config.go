@@ -30,19 +30,19 @@ type Config struct {
 	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"` // If true, requests without auth token are allowed
 
 	// SQL Rewriter configuration
-	RewriterEnabled        bool     `json:"rewriter_enabled"`          // 是否启用 SQL 重写
-	RewriterServiceAddr    string   `json:"rewriter_service_addr"`     // sql-rewriter gRPC 服务地址
-	RewriterLocalIndexerId uint64   `json:"rewriter_local_indexer_id"` // 本地 Indexer ID
-	RewriterTimeout        Duration `json:"rewriter_timeout"`          // 重写超时时间
+	RewriterEnabled     bool     `json:"rewriter_enabled"`      // Whether to enable SQL rewriting
+	RewriterServiceAddr string   `json:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
+	RewriterTimeout     Duration `json:"rewriter_timeout"`      // Rewrite timeout
 
 	// Network State configuration
-	NetworkStateSource   string `json:"network_state_source"`   // 状态源: "file" 或 "postgres"
-	NetworkStateFile     string `json:"network_state_file"`     // 状态文件路径
-	NetworkStatePostgres string `json:"network_state_postgres"` // PostgreSQL 连接串
+	NetworkStateSource   string `json:"network_state_source"`   // State source: "file", "redis"
+	NetworkStateFile     string `json:"network_state_file"`     // YAML file path (for "file" source)
+	NetworkStateRedis    string `json:"network_state_redis"`    // Redis address (for "redis" source, e.g. "localhost:6379")
+	NetworkStatePostgres string `json:"network_state_postgres"` // PostgreSQL connection string
 
-	// ClickHouse credentials for remote table access
-	CHUser     string `json:"ch_user"`     // ClickHouse 用户名
-	CHPassword string `json:"ch_password"` // ClickHouse 密码
+	// CKHManager configuration (for SDK TableMapper - physical table name resolution)
+	CKHManagerConfigPath string `json:"ckh_manager_config"` // Path to ckhmanager YAML/JSON config file
+	PrivateKeyHex        string `json:"private_key_hex"`    // Private key hex for ClickHouse request signing (optional)
 
 	// Streaming bufio size (bytes). Default: 131072 (128KB).
 	StreamingBufSize int `json:"streaming_buf_size"`
@@ -113,17 +113,14 @@ func DefaultConfig() Config {
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
 		AuthAllowNoAuth:      false,
 		// Rewriter defaults: disabled by default
-		RewriterEnabled:        false,
-		RewriterServiceAddr:    envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
-		RewriterLocalIndexerId: 0,
-		RewriterTimeout:        Duration{5 * time.Second},
+		RewriterEnabled:     false,
+		RewriterServiceAddr: envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
+		RewriterTimeout:     Duration{5 * time.Second},
 		// Network state defaults
 		NetworkStateSource:   envOrDefault("CK_NETWORK_STATE_SOURCE", "file"),
 		NetworkStateFile:     envOrDefault("CK_NETWORK_STATE_FILE", ""),
+		NetworkStateRedis:    envOrDefault("CK_NETWORK_STATE_REDIS", ""),
 		NetworkStatePostgres: envOrDefault("CK_NETWORK_STATE_POSTGRES", ""),
-		// ClickHouse credentials
-		CHUser:     envOrDefault("CK_CH_USER", "default"),
-		CHPassword: envOrDefault("CK_CH_PASSWORD", ""),
 		// Streaming buffer size
 		StreamingBufSize:      131072, // 128KB
 		ValidateChecksum:      false,
@@ -153,9 +150,8 @@ func LoadConfig(path string) Config {
 	if err := json.Unmarshal(raw, &cfg); err != nil {
 		log.Fatalf("parse config file %s: %v", path, err)
 	}
-	// R1-10: 记录加载的配置（密码脱敏）
-	log.Infof("config loaded from %s: listen=%s upstream=%s ch_user=%s ch_password=%s",
-		path, cfg.Listen, cfg.Upstream, cfg.CHUser, maskPassword(cfg.CHPassword))
+	log.Infof("config loaded from %s: listen=%s upstream=%s",
+		path, cfg.Listen, cfg.Upstream)
 	return cfg
 }
 
