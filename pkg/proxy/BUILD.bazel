@@ -9,6 +9,7 @@ go_library(
         "proxy.go",
         "query_codec.go",
         "rewriter.go",
+        "route.go",
         "validator.go",
     ],
     importpath = "ck_remote_proxy/pkg/proxy",

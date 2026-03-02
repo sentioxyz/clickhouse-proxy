@@ -621,82 +621,102 @@ func (p *Proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		tc.SetNoDelay(true) // P2-12: Disable Nagle algorithm to reduce small packet latency
 	}
 
-	dialer := &net.Dialer{
-		Timeout:   p.cfg.DialTimeout.Duration,
-		KeepAlive: 30 * time.Second,
-	}
-
-	upstreamCtx := ctx
-	var cancel context.CancelFunc
-	if p.cfg.DialTimeout.Duration > 0 {
-		upstreamCtx, cancel = context.WithTimeout(ctx, p.cfg.DialTimeout.Duration)
-	} else {
-		upstreamCtx, cancel = context.WithCancel(ctx)
-	}
-	defer cancel()
-
-	upstreamConn, err := dialer.DialContext(upstreamCtx, "tcp", p.cfg.Upstream)
-	if err != nil {
-		log.Infof("[conn %d] dial upstream %s error: %v", id, p.cfg.Upstream, err)
-		p.observer.Error("dial", err)
-		return
-	}
-	defer upstreamConn.Close()
-	if tc, ok := upstreamConn.(*net.TCPConn); ok {
-		tc.SetKeepAlive(true)
-		tc.SetKeepAlivePeriod(30 * time.Second)
-		tc.SetNoDelay(true) // P2-12: Disable Nagle algorithm to reduce small packet latency
-	}
-
-	var closeOnce sync.Once
-	closeBoth := func() {
-		closeOnce.Do(func() {
-			clientConn.Close()
-			upstreamConn.Close()
-		})
-	}
-
-	// P2-6: Connection-level maximum lifetime limit
-	if p.cfg.MaxConnectionLifetime.Duration > 0 {
-		lifetimeTimer := time.AfterFunc(p.cfg.MaxConnectionLifetime.Duration, func() {
-			log.Infof("[conn %d] max connection lifetime (%s) exceeded, closing", id, p.cfg.MaxConnectionLifetime.Duration)
-			closeBoth()
-		})
-		defer lifetimeTimer.Stop()
-	}
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
 	if p.rewriter != nil && p.cfg.RewriterEnabled {
-		// Streaming mode: copyClientToUpstreamStreaming must first synchronously complete
-		// Hello/ServerHello/Addendum handshake (reads ServerHello from upstream),
-		// before starting copyUpstreamToClient (to avoid two goroutines reading upstream concurrently).
+		// Streaming mode: upstream dial is deferred to copyClientToUpstreamStreaming,
+		// because the Hello user field may contain __route__ routing info that determines
+		// which upstream to connect to (dynamic upstream routing for subquery forwarding).
 		handshakeDone := make(chan struct{})
-		// Upstream bufio.Reader, set by copyClientToUpstreamStreaming
+		var upstreamConn net.Conn // set by copyClientToUpstreamStreaming after Hello parsing
 		var upstreamBr *bufio.Reader
-		// queryDoneCh: upstream goroutine sends signal when EndOfStream(5)/Exception(2) is detected,
-		// the packet loop receives non-blockingly via select to reset compression state.
-		// Buffer size set to 8 to ensure multiple rapid consecutive EndOfStream signals are not lost.
 		queryDoneCh := make(chan struct{}, 8)
-		// Chunked negotiation results, set by copyClientToUpstreamStreaming during handshake
 		var srvSendChunked, clientRecvChunked string
+
+		var closeOnce sync.Once
+		closeBoth := func() {
+			closeOnce.Do(func() {
+				clientConn.Close()
+				if upstreamConn != nil {
+					upstreamConn.Close()
+				}
+			})
+		}
+
+		if p.cfg.MaxConnectionLifetime.Duration > 0 {
+			lifetimeTimer := time.AfterFunc(p.cfg.MaxConnectionLifetime.Duration, func() {
+				log.Infof("[conn %d] max connection lifetime (%s) exceeded, closing", id, p.cfg.MaxConnectionLifetime.Duration)
+				closeBoth()
+			})
+			defer lifetimeTimer.Stop()
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
 
 		go func() {
 			defer wg.Done()
-			// Wait for handshake to complete before starting upstream→client copy
 			<-handshakeDone
+			if upstreamConn == nil {
+				return // copyClientToUpstreamStreaming failed to dial
+			}
 			p.copyUpstreamToClientFromReader(id, clientConn, upstreamConn, upstreamBr, queryDoneCh, srvSendChunked, clientRecvChunked)
 			closeBoth()
 		}()
 
 		go func() {
 			defer wg.Done()
-			p.copyClientToUpstreamStreaming(ctx, id, clientConn, upstreamConn, handshakeDone, &upstreamBr, queryDoneCh, &srvSendChunked, &clientRecvChunked)
+			p.copyClientToUpstreamStreaming(ctx, id, clientConn, &upstreamConn, handshakeDone, &upstreamBr, queryDoneCh, &srvSendChunked, &clientRecvChunked)
 			closeBoth()
 		}()
+
+		wg.Wait()
 	} else {
-		// Non-streaming mode: both goroutines start concurrently
+		// Non-streaming mode: dial upstream immediately, both goroutines start concurrently
+		dialer := &net.Dialer{
+			Timeout:   p.cfg.DialTimeout.Duration,
+			KeepAlive: 30 * time.Second,
+		}
+
+		upstreamCtx := ctx
+		var cancel context.CancelFunc
+		if p.cfg.DialTimeout.Duration > 0 {
+			upstreamCtx, cancel = context.WithTimeout(ctx, p.cfg.DialTimeout.Duration)
+		} else {
+			upstreamCtx, cancel = context.WithCancel(ctx)
+		}
+		defer cancel()
+
+		upstreamConn, err := dialer.DialContext(upstreamCtx, "tcp", p.cfg.Upstream)
+		if err != nil {
+			log.Infof("[conn %d] dial upstream %s error: %v", id, p.cfg.Upstream, err)
+			p.observer.Error("dial", err)
+			return
+		}
+		defer upstreamConn.Close()
+		if tc, ok := upstreamConn.(*net.TCPConn); ok {
+			tc.SetKeepAlive(true)
+			tc.SetKeepAlivePeriod(30 * time.Second)
+			tc.SetNoDelay(true)
+		}
+
+		var closeOnce sync.Once
+		closeBoth := func() {
+			closeOnce.Do(func() {
+				clientConn.Close()
+				upstreamConn.Close()
+			})
+		}
+
+		if p.cfg.MaxConnectionLifetime.Duration > 0 {
+			lifetimeTimer := time.AfterFunc(p.cfg.MaxConnectionLifetime.Duration, func() {
+				log.Infof("[conn %d] max connection lifetime (%s) exceeded, closing", id, p.cfg.MaxConnectionLifetime.Duration)
+				closeBoth()
+			})
+			defer lifetimeTimer.Stop()
+		}
+
+		var wg sync.WaitGroup
+		wg.Add(2)
+
 		go func() {
 			defer wg.Done()
 			p.copyUpstreamToClient(id, clientConn, upstreamConn)
@@ -708,9 +728,10 @@ func (p *Proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 			p.copyClientToUpstream(ctx, id, clientConn, upstreamConn)
 			closeBoth()
 		}()
+
+		wg.Wait()
 	}
 
-	wg.Wait()
 	log.Infof("[conn %d] closed", id)
 }
 
@@ -1077,7 +1098,7 @@ func (p *Proxy) handleDataBlock(
 	return nil
 }
 
-func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn, upstreamConn net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan struct{}, srvSendChunkedOut, clientRecvChunkedOut *string) {
+func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn net.Conn, upstreamConnOut *net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan struct{}, srvSendChunkedOut, clientRecvChunkedOut *string) {
 	// Ensure handshakeDone is closed when function exits, preventing copyUpstreamToClient goroutine from blocking forever
 	handshakeClosed := false
 	defer func() {
@@ -1094,10 +1115,6 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	br := bufio.NewReaderSize(clientConn, bufSize)
 	chReader := proto.NewReader(br)
 
-	// Create upstream bufio.Reader (copyUpstreamToClient will also read from this)
-	upBr := bufio.NewReaderSize(upstreamConn, bufSize)
-	*upstreamBrOut = upBr
-
 	// ========== Phase 1: Hello Handshake ==========
 	if p.cfg.IdleTimeout.Duration > 0 {
 		_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -1110,14 +1127,21 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	if typeByte != byte(proto.ClientCodeHello) {
 		log.Infof("[conn %d] streaming: expected Hello(0), got %d, falling back", id, typeByte)
 		_ = br.UnreadByte()
+		// Fallback: dial default upstream, then raw copy
+		dialer := &net.Dialer{Timeout: p.cfg.DialTimeout.Duration, KeepAlive: 30 * time.Second}
+		upConn, err := dialer.DialContext(ctx, "tcp", p.cfg.Upstream)
+		if err != nil {
+			log.Infof("[conn %d] streaming fallback: dial upstream error: %v", id, err)
+			return
+		}
+		*upstreamConnOut = upConn
 		close(handshakeDone)
 		handshakeClosed = true
-		p.fallbackRawCopy(id, br, clientConn, upstreamConn)
+		p.fallbackRawCopy(id, br, clientConn, upConn)
 		return
 	}
 
 	// P1-3: Use TeeReader to record Hello's raw bytes for raw passthrough
-	// Avoids the risk of ClientHello.Encode() potentially omitting new protocol version fields
 	var helloBuf bytes.Buffer
 	teeReader := io.TeeReader(br, &helloBuf)
 	teeBr := bufio.NewReaderSize(teeReader, bufSize)
@@ -1129,17 +1153,72 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		return
 	}
 	clientRevision := hello.ProtocolVersion
-	log.Infof("[conn %d] streaming: Hello decoded, client=%s revision=%d", id, hello.Name, clientRevision)
+	clientUser := hello.User
+	clientPassword := hello.Password
+	log.Infof("[conn %d] streaming: Hello decoded, client=%s user=%s revision=%d", id, hello.Name, clientUser, clientRevision)
 
 	// Record handshake start time
 	handshakeStart := time.Now()
 
-	// Send Hello type byte + original decoded bytes together to upstream
-	// helloBuf contains all Hello raw bytes recorded by TeeReader (excluding typeByte)
-	helloPayload := make([]byte, 1+helloBuf.Len())
-	helloPayload[0] = typeByte
-	copy(helloPayload[1:], helloBuf.Bytes())
-	if _, err := upstreamConn.Write(helloPayload); err != nil {
+	// ========== Route detection: check __route__ prefix in user field ==========
+	upstreamTarget := p.cfg.Upstream // default upstream
+	var helloToSend []byte           // Hello bytes to forward to upstream
+
+	targetAddr, realUser, isRoute := parseRouteFromUser(clientUser)
+	if isRoute && isLocalConnection(clientConn) {
+		// Route detected from localhost: connect to target proxy instead of default upstream
+		upstreamTarget = targetAddr
+		log.Infof("[conn %d] streaming: __route__ detected, target=%s realUser=%s", id, targetAddr, realUser)
+
+		// Rewrite Hello: replace user with realUser (strip __route__ prefix)
+		rewrittenHello, err := rewriteHelloUser(helloBuf.Bytes(), realUser)
+		if err != nil {
+			log.Warnf("[conn %d] streaming: Hello rewrite failed: %v, using original", id, err)
+			// Fall back to original Hello
+			helloToSend = make([]byte, 1+helloBuf.Len())
+			helloToSend[0] = typeByte
+			copy(helloToSend[1:], helloBuf.Bytes())
+		} else {
+			helloToSend = rewrittenHello // already includes type byte
+		}
+
+		// Override clientUser for SQL rewriter (use real user, not __route__...)
+		clientUser = realUser
+	} else {
+		if isRoute && !isLocalConnection(clientConn) {
+			log.Warnf("[conn %d] streaming: __route__ user from non-local connection %s, ignoring route (SSRF prevention)",
+				id, clientConn.RemoteAddr())
+		}
+		// No route: send original Hello as-is
+		helloToSend = make([]byte, 1+helloBuf.Len())
+		helloToSend[0] = typeByte
+		copy(helloToSend[1:], helloBuf.Bytes())
+	}
+
+	// ========== Dial upstream (dynamic target) ==========
+	dialer := &net.Dialer{
+		Timeout:   p.cfg.DialTimeout.Duration,
+		KeepAlive: 30 * time.Second,
+	}
+	upstreamConn, err := dialer.DialContext(ctx, "tcp", upstreamTarget)
+	if err != nil {
+		log.Infof("[conn %d] streaming: dial upstream %s error: %v", id, upstreamTarget, err)
+		p.observer.Error("dial", err)
+		return
+	}
+	if tc, ok := upstreamConn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true)
+	}
+	*upstreamConnOut = upstreamConn
+
+	// Create upstream bufio.Reader (copyUpstreamToClient will also read from this)
+	upBr := bufio.NewReaderSize(upstreamConn, bufSize)
+	*upstreamBrOut = upBr
+
+	// Send Hello to upstream
+	if _, err := upstreamConn.Write(helloToSend); err != nil {
 		log.Infof("[conn %d] streaming: write hello error: %v", id, err)
 		return
 	}
@@ -1493,7 +1572,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			// SQL rewriting
 			if p.rewriter != nil && p.cfg.RewriterEnabled {
 				rewriteStart := time.Now()
-				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body)
+				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body, clientUser, clientPassword)
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
 				if err != nil {
 					log.Warnf("[conn %d] streaming: SQL rewrite failed: %v", id, err)
