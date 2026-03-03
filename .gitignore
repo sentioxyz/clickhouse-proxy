@@ -47,4 +47,4 @@ CONTEXT_SUMMARY.md
 
 clickhouse-proxy-linux
 integration_test_client-linux
-proxy
+/proxy

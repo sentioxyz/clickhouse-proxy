@@ -214,11 +214,8 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 	// 创建 rewriter
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1, // 本地 indexer
-		CHUser:         "default",
-		CHPassword:     "test123",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -261,7 +258,7 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -291,11 +288,8 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1, // 本地 indexer 是 1
-		CHUser:         "default",
-		CHPassword:     "secret123",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -328,7 +322,7 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -358,11 +352,8 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -373,7 +364,7 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 	// 核心场景：混合本地和远程表的 UNION ALL（来自 tmp_paste_content.md）
 	inputSQL := `SELECT COUNT(*) FROM sentio_coinbase.transfer UNION ALL SELECT COUNT(*) FROM sentio_pancakeswap123.Withdrawl`
 
-	result, err := rewriter.Rewrite(ctx, inputSQL)
+	result, err := rewriter.Rewrite(ctx, inputSQL, "default", "test123")
 	if err != nil {
 		t.Fatalf("rewrite failed: %v", err)
 	}
@@ -402,11 +393,8 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -434,7 +422,7 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -461,11 +449,8 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -497,7 +482,7 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -519,11 +504,8 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -571,7 +553,7 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 
 			if tc.expectError {
 				if err == nil {
@@ -604,7 +586,7 @@ func TestEndToEnd_NoopRewriterFallback(t *testing.T) {
 	}
 
 	for _, sql := range testCases {
-		result, err := rewriter.Rewrite(ctx, sql)
+		result, err := rewriter.Rewrite(ctx, sql, "default", "test123")
 		if err != nil {
 			t.Errorf("NoopRewriter should not return error, got: %v", err)
 		}
@@ -620,11 +602,8 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -643,7 +622,7 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 			defer wg.Done()
 			for j := 0; j < numIterations; j++ {
 				sql := fmt.Sprintf("SELECT * FROM sentio_coinbase.transfer_%d_%d", id, j)
-				_, err := rewriter.Rewrite(ctx, sql)
+				_, err := rewriter.Rewrite(ctx, sql, "default", "test123")
 				if err != nil {
 					errCh <- err
 				}
@@ -665,11 +644,8 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -705,7 +681,7 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -735,7 +711,7 @@ func TestEndToEnd_ConfigDisabled(t *testing.T) {
 
 	ctx := context.Background()
 	sql := "SELECT * FROM sentio_coinbase.transfer"
-	result, err := rewriter.Rewrite(ctx, sql)
+	result, err := rewriter.Rewrite(ctx, sql, "default", "test123")
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -751,11 +727,8 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	// 初始状态为空
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -765,7 +738,7 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	sql := "SELECT * FROM sentio_newprocessor.events"
 
 	// 第一次：processor 不存在，应返回原 SQL
-	result1, _ := rewriter.Rewrite(ctx, sql)
+	result1, _ := rewriter.Rewrite(ctx, sql, "default", "test123")
 	if result1 != sql {
 		t.Log("First rewrite (processor not found): returned original SQL as expected")
 	}
@@ -784,7 +757,7 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	}
 
 	// 第二次：processor 存在，应重写
-	result2, _ := rewriter.Rewrite(ctx, sql)
+	result2, _ := rewriter.Rewrite(ctx, sql, "default", "test123")
 	if result2 == sql {
 		t.Log("Second rewrite (processor added): SQL rewritten as expected")
 	}
@@ -796,11 +769,8 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -818,7 +788,7 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 	}
 
 	for i, sql := range queries {
-		result, err := rewriter.Rewrite(ctx, sql)
+		result, err := rewriter.Rewrite(ctx, sql, "default", "test123")
 		if err != nil {
 			t.Errorf("query %d (%q) rewrite failed: %v", i, sql, err)
 			continue
@@ -833,11 +803,8 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -874,7 +841,7 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tc.inputSQL)
+			result, err := rewriter.Rewrite(ctx, tc.inputSQL, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -893,11 +860,8 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -919,7 +883,7 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 	largeSQL := sb.String()
 	t.Logf("Large SQL size: %d bytes", len(largeSQL))
 
-	result, err := rewriter.Rewrite(ctx, largeSQL)
+	result, err := rewriter.Rewrite(ctx, largeSQL, "default", "test123")
 	if err != nil {
 		t.Fatalf("large SQL rewrite failed: %v", err)
 	}
@@ -1046,11 +1010,8 @@ func BenchmarkRewrite(b *testing.B) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		b.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -1061,7 +1022,7 @@ func BenchmarkRewrite(b *testing.B) {
 
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		rewriter.Rewrite(ctx, sql)
+		rewriter.Rewrite(ctx, sql, "default", "test123")
 	}
 }
 

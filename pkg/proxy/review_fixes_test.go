@@ -508,11 +508,8 @@ func TestRewriter_BacktickIntegration(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "secret",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory())
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -539,7 +536,7 @@ func TestRewriter_BacktickIntegration(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := rewriter.Rewrite(ctx, tt.sql)
+			result, err := rewriter.Rewrite(ctx, tt.sql, "default", "test123")
 			if err != nil {
 				t.Fatalf("Rewrite error: %v", err)
 			}
