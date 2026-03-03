@@ -96,12 +96,9 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled:        true,
-		LocalIndexerId: 1,
-		CHUser:         "default",
-		CHPassword:     "test123",
 	}
 
-	rewriter, err := NewSentioNetworkRewriter(config, state)
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -145,7 +142,7 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			result, err := rewriter.Rewrite(ctx, tt.sql)
+			result, err := rewriter.Rewrite(ctx, tt.sql, "default", "test123")
 			if err != nil {
 				t.Fatalf("rewrite failed: %v", err)
 			}
@@ -176,7 +173,7 @@ func TestNoopRewriter(t *testing.T) {
 	ctx := context.Background()
 
 	sql := "SELECT * FROM sentio_coinbase.transfer"
-	result, err := rewriter.Rewrite(ctx, sql)
+	result, err := rewriter.Rewrite(ctx, sql, "default", "test123")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

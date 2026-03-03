@@ -403,7 +403,7 @@ func decodeClientInfoCustom(r *proto.Reader, info *proto.ClientInfo, revision in
 	}
 
 	// InterserverJWT
-	if proto.FeatureInterserverJWT.In(revision) {
+	if proto.Feature(54476).In(revision) {
 		eq.HasJWT, err = r.Bool()
 		if err != nil {
 			return wrapErr("jwt flag", err)
@@ -506,7 +506,7 @@ func encodeClientInfoCustom(b *proto.Buffer, info *proto.ClientInfo, revision in
 	}
 
 	// InterserverJWT — ch-go EncodeAware 遗漏的字段
-	if proto.FeatureInterserverJWT.In(revision) {
+	if proto.Feature(54476).In(revision) {
 		if eq.HasJWT {
 			b.PutByte(1)
 			b.PutString(eq.JWT)
