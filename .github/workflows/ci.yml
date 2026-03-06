@@ -1,0 +1,151 @@
+name: CI - Distributed Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  DEPLOY_USER: sentio
+  REMOTE_BASE: /home/sentio/node/distributed
+  # Pinned sentio-core commit hash. Update this when upgrading the dependency.
+  SENTIO_CORE_REF: 73d1ae22edda
+
+jobs:
+  build-and-test:
+    name: Build & Distributed Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: sentio_build_d
+    env:
+      DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+      DEPLOY_PORT: ${{ secrets.DEPLOY_PORT }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Configure Go private modules
+        env:
+          GH_PAT: ${{ secrets.GH_PAT }}
+        run: |
+          git config --global url."https://${GH_PAT}@github.com/".insteadOf "https://github.com/"
+          go env -w GOPRIVATE=github.com/sentioxyz/*
+
+      - name: Fix local replace for CI
+        # The local go.mod uses a filesystem replace for sentio-core.
+        # In CI we override it to fetch the pinned commit from GitHub.
+        run: |
+          go mod edit -replace sentioxyz/sentio-core=github.com/sentioxyz/sentio-core@${{ env.SENTIO_CORE_REF }}
+          go mod tidy
+
+      - name: Build proxy binary (linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy ./cmd/proxy/
+
+      - name: Build integration test client (linux/amd64)
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o integration_test_client ./tools/integration_test_client/
+
+      - name: Configure SSH
+        env:
+          SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          cat >> ~/.ssh/config <<EOF
+          Host deploy-target
+            HostName ${{ env.DEPLOY_HOST }}
+            Port ${{ env.DEPLOY_PORT }}
+            User ${{ env.DEPLOY_USER }}
+            IdentityFile ~/.ssh/id_deploy
+            # Accept any host key — acceptable for an ephemeral CI runner.
+            StrictHostKeyChecking no
+            UserKnownHostsFile /dev/null
+          EOF
+
+      - name: Deploy binaries to test server
+        run: |
+          echo ">>> Uploading proxy binary..."
+          scp clickhouse-proxy deploy-target:${{ env.REMOTE_BASE }}/clickhouse-proxy-latest
+
+          echo ">>> Uploading integration test client..."
+          scp integration_test_client deploy-target:${{ env.REMOTE_BASE }}/integration_test_client
+
+          echo ">>> Stopping old proxy processes..."
+          ssh deploy-target "killall ck_proxy1 ck_proxy2 2>/dev/null || true; sleep 1"
+
+          echo ">>> Replacing proxy1 and proxy2 binaries..."
+          ssh deploy-target "cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy1/ck_proxy1 && \
+                             cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy2/ck_proxy2"
+
+      - name: Run distributed tests
+        run: |
+          ssh deploy-target "bash ${{ env.REMOTE_BASE }}/run_full_test.sh" 2>&1 | tee test_output.txt
+        shell: bash --noprofile --norc -eo pipefail {0}
+
+      - name: Generate test summary
+        if: always()
+        run: |
+          echo "## 🧪 Distributed Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          if [ ! -f test_output.txt ]; then
+            echo "⚠️ No test output captured." >> $GITHUB_STEP_SUMMARY
+            exit 0
+          fi
+
+          PASSED=$(grep -oP '✅ 通过: \K\d+' test_output.txt || echo "0")
+          FAILED=$(grep -oP '❌ 失败: \K\d+' test_output.txt || echo "0")
+          SKIPPED=$(grep -oP '⚠️  跳过: \K\d+' test_output.txt || echo "0")
+
+          if [ "$PASSED" = "0" ] && [ "$FAILED" = "0" ] && [ "$SKIPPED" = "0" ]; then
+            echo "⚠️ Warning: Could not parse test results. Output format may have changed." >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "| Metric | Count |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ✅ Passed | $PASSED |" >> $GITHUB_STEP_SUMMARY
+          echo "| ❌ Failed | $FAILED |" >> $GITHUB_STEP_SUMMARY
+          echo "| ⚠️ Skipped | $SKIPPED |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "<details><summary>📋 SQL Test Details</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          grep -E '(▶️|✅ PASS|❌ FAIL|⚠️  跳过)' test_output.txt >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "## 🔐 Auth Signing Test Results" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          AUTH_VALID=$(grep -oP 'Auth-valid:\s+\K(✅ 通过|❌ 失败)' test_output.txt || echo "N/A")
+          AUTH_INVALID=$(grep -oP 'Auth-invalid:\s+\K(✅ 通过|❌ 失败)' test_output.txt || echo "N/A")
+          echo "| Phase | Result |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Auth-valid (correct key) | $AUTH_VALID |" >> $GITHUB_STEP_SUMMARY
+          echo "| Auth-invalid (wrong key) | $AUTH_INVALID |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          echo "<details><summary>📋 Auth Test Details</summary>" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          sed -n '/=== 6\./,$p' test_output.txt | grep -E '(✅|❌|\[Test|Auth|auth|阶段|签名|token)' >> $GITHUB_STEP_SUMMARY || true
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "</details>" >> $GITHUB_STEP_SUMMARY
+
+      - name: Cleanup SSH keys
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_deploy
+          rm -f ~/.ssh/config
