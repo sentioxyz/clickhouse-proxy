@@ -15,7 +15,7 @@ import (
 
 var (
 	proxyAddr = flag.String("addr", "127.0.0.1:9000", "Proxy address")
-	privKey   = flag.String("key", "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318", "Private key for JWS auth")
+	privKey   = flag.String("key", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "Private key for JWS auth")
 )
 
 func main() {

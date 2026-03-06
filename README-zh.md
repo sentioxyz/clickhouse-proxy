@@ -360,7 +360,7 @@ proxy 支持基于 **以太坊 secp256k1 签名的 JWS 认证**。启用后，�
 {
     "auth_enabled": true,
     "auth_allowed_addresses": [
-        "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23"
+        "0x1111111111111111111111111111111111111111"
     ],
     "auth_max_token_age": "1m",
     "auth_allow_no_auth": false

@@ -1,7 +1,7 @@
 indexer_infos:
   5:
     indexer_id: 5
-    indexer_url: "64.38.131.242"
+    indexer_url: "192.0.2.1"
     compute_node_rpc_port: 10001
     storage_node_rpc_port: 10002
     clickhouse_proxy_port: 9001

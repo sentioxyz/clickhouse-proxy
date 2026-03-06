@@ -23,8 +23,8 @@ const (
 	// TEST-ONLY keys — used exclusively for CI/integration testing.
 	// Do NOT use in production. These addresses must be in the proxy's allowed list.
 
-	// CorrectPrivateKeyHex — Address: 0x2932A8aAd29e41b90A447E586651587bea3eB11E
-	CorrectPrivateKeyHex = "e7bc94e4a2346bfb31ce777e079044718ed02d53d8c297c69fce4259e96557bd"
+	// CorrectPrivateKeyHex — Address: 0x2222222222222222222222222222222222222222
+	CorrectPrivateKeyHex = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	// WrongPrivateKeyHex — Address NOT in allowed list
 	WrongPrivateKeyHex = "1111111111111111111111111111111111111111111111111111111111111111"

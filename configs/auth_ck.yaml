@@ -18,9 +18,9 @@ data:
       "max_data_log_bytes": 200,
       "auth_enabled": true,
       "auth_allowed_addresses": [
-        "0x2c7536e3605d9c16a7a3d7b1898e529396a65c23",
-        "0x2932A8aAd29e41b90A447E586651587bea3eB11E",
-        "0x1Be31A94361a391bBaFB2a4CCd704F57dc04d4bb"
+        "0x1111111111111111111111111111111111111111",
+        "0x2222222222222222222222222222222222222222",
+        "0x3333333333333333333333333333333333333333"
       ],
       "auth_max_token_age": "1m"
     }
@@ -72,7 +72,7 @@ spec:
     users:
       clickhouse_operator/networks/ip:
         - "0.0.0.0/0"
-      sentio/password: "2vwzZBJ6cbZbyoKm4j"
+      sentio/password: "example_password"
       sentio/networks/ip:
         - "0.0.0.0/0"
       sentio/access_management: "1"
@@ -99,7 +99,7 @@ spec:
             sentio.xyz/general: "true"
           containers:
             - name: clickhouse
-              image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-server:25.7-sentio-release-decimal512
+              image: your-registry.example.com/clickhouse-server:latest
               ports:
                 - name: "metrics"
                   containerPort: 9363
@@ -114,7 +114,7 @@ spec:
                   memory: 8Gi
                   cpu: 4
             - name: proxy
-              image: us-west1-docker.pkg.dev/sentio-352722/sentio/clickhouse-proxy:f9f02ad
+              image: your-registry.example.com/clickhouse-proxy:latest
               imagePullPolicy: Always
               securityContext:
                 runAsNonRoot: true
