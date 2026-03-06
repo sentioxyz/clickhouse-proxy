@@ -48,7 +48,7 @@ func generateTestToken(t *testing.T, privKeyHex string, iat time.Time, qhash str
 
 func TestEthValidator_ValidToken(t *testing.T) {
 	// Use a known test private key
-	privKeyHex := "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
@@ -74,7 +74,7 @@ func TestEthValidator_ValidToken(t *testing.T) {
 }
 
 func TestEthValidator_MissingToken(t *testing.T) {
-	privKeyHex := "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
@@ -92,7 +92,7 @@ func TestEthValidator_MissingToken(t *testing.T) {
 }
 
 func TestEthValidator_ExpiredToken(t *testing.T) {
-	privKeyHex := "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
@@ -118,7 +118,7 @@ func TestEthValidator_ExpiredToken(t *testing.T) {
 }
 
 func TestEthValidator_QueryHashMismatch(t *testing.T) {
-	privKeyHex := "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
@@ -148,7 +148,7 @@ func TestEthValidator_UnauthorizedAddress(t *testing.T) {
 	validator := NewEthValidator([]string{"0x1234567890123456789012345678901234567890"}, 1*time.Minute, true, false)
 
 	// Use our test key which has a different address
-	privKeyHex := "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
 	sql := "SELECT 1"
 	sqlHash := keccak256Hex([]byte(sql))
@@ -184,7 +184,7 @@ func TestEthValidator_Disabled(t *testing.T) {
 }
 
 func TestParseJWS(t *testing.T) {
-	privKeyHex := "4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318"
+	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	sql := "SELECT 1"
 	sqlHash := keccak256Hex([]byte(sql))
 

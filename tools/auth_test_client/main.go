@@ -25,20 +25,20 @@ const (
 	// For this test to work with the EXISTING auth_ck.yaml, we need to add another key to the yaml first.
 	// OR, we can just use the existing keys in the YAML if we had more.
 	// Currently auth_ck.yaml has:
-	// 1. 0x2c7536e3605d9c16a7a3d7b1898e529396a65c23 (Original)
-	// 2. 0x86cE23361B15507dDbf734EE32904312C6A16eE3 (Original)
-	// 3. 0x2932A8aAd29e41b90A447E586651587bea3eB11E (Added by us)
+	// 1. 0x1111111111111111111111111111111111111111 (Example)
+	// 2. 0x4444444444444444444444444444444444444444 (Example)
+	// 3. 0x2222222222222222222222222222222222222222 (Example)
 
 	// Let's use one of the original keys as the "Second Correct Key" for multisig testing.
 	// Private key for 0x86cE... is not known to us here easily unless we generate it or have it.
 	// To make it easy, let's generate a NEW key and add it to `auth_ck.yaml` in the next step.
 	// For now, I will add the logic assuming we have a `CorrectPrivateKeyHex2`.
 
-	// Address: 0x2932A8aAd29e41b90A447E586651587bea3eB11E
-	CorrectPrivateKeyHex1 = "e7bc94e4a2346bfb31ce777e079044718ed02d53d8c297c69fce4259e96557bd"
+	// Address: 0x2222222222222222222222222222222222222222
+	CorrectPrivateKeyHex1 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
-	// Address: 0x709F74A4e8C545E00d98499252445E1643261642 (Newly generated for multisig test)
-	CorrectPrivateKeyHex2 = "1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef"
+	// Address: 0x5555555555555555555555555555555555555555 (Example for multisig test)
+	CorrectPrivateKeyHex2 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 	// WrongPrivateKeyHex corresponds to an address NOT in auth_ck.yaml
 	WrongPrivateKeyHex = "1111111111111111111111111111111111111111111111111111111111111111"
@@ -75,7 +75,7 @@ func main() {
 	// Command line flags
 	addr := flag.String("addr", "127.0.0.1:9002", "ClickHouse proxy address (default 9002)")
 	user := flag.String("user", "sentio", "ClickHouse username")
-	pass := flag.String("password", "2vwzZBJ6cbZbyoKm4j", "ClickHouse password")
+	pass := flag.String("password", "example_password", "ClickHouse password")
 	flag.Parse()
 
 	log.Println("===========================================")
