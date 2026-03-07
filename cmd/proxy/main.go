@@ -111,6 +111,17 @@ func main() {
 	}
 
 	p := proxy.NewProxy(cfg, validator, rewriter)
+
+	// Initialize relay JWS signer for proxy-to-proxy (__route__) token propagation
+	if cfg.RelayPrivateKeyHex != "" {
+		signer, err := proxy.NewRelaySigner(cfg.RelayPrivateKeyHex)
+		if err != nil {
+			log.Fatalf("failed to create relay signer: %v", err)
+		}
+		p.SetRelaySigner(signer)
+		log.Infof("relay JWS signer enabled, address=%s", signer.Address())
+	}
+
 	if err := p.Serve(ctx); err != nil {
 		log.Fatalf("proxy stopped: %v", err)
 	}

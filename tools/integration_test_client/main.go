@@ -85,9 +85,13 @@ func main() {
 		if !runPhaseAuthInvalid() {
 			exitCode = 1
 		}
+	case "auth-relay":
+		if !runPhaseAuthRelay() {
+			exitCode = 1
+		}
 	case "all":
 		log.Println("⚠️  'all' 模式需要在各阶段间手动切换 proxy 配置")
-		log.Println("请使用 -phase noauth/auth-valid/auth-invalid 分别执行")
+		log.Println("请使用 -phase noauth/auth-valid/auth-invalid/auth-relay 分别执行")
 		exitCode = 1
 	default:
 		log.Printf("未知阶段: %s", *phase)
@@ -1028,6 +1032,171 @@ func runPhaseAuthInvalid() bool {
 		} else {
 			allPassed = false
 		}
+	}
+
+	return allPassed
+}
+
+// ========== Phase 4: Auth Relay ==========
+// Tests proxy-to-proxy relay token propagation.
+// Requires: Auth Proxy1 (39001) with rewriter + Auth Proxy2 (39002), both with relay_private_key_hex.
+// Queries using sentio_remote_proc.* tables go through:
+//
+//	Client → Proxy1 (JWS) → CH1 → __route__ → Proxy1 (relay JWS) → Proxy2 (validate) → CH2
+func runPhaseAuthRelay() bool {
+	log.Println("╔══════════════════════════════════════════╗")
+	log.Println("║  阶段四: Relay Token 跨节点认证测试        ║")
+	log.Println("╚══════════════════════════════════════════╝")
+	log.Println()
+
+	key, err := crypto.HexToECDSA(CorrectPrivateKeyHex)
+	if err != nil {
+		log.Fatalf("解析私钥失败: %v", err)
+	}
+	log.Printf("客户端密钥地址: %s", crypto.PubkeyToAddress(key.PublicKey).Hex())
+	log.Println()
+
+	signFunc := makeSignFunc(key)
+	allPassed := true
+
+	// 建立带 auth 的连接到 Proxy1
+	conn := openConnection(signFunc)
+	if conn == nil {
+		log.Println("❌ 无法连接到 Auth Proxy1")
+		return false
+	}
+	defer conn.Close()
+
+	// Test R.1: 基础连通性 — SELECT 1 (本地，不经过 relay)
+	log.Println("[Test R.1] 基础连通性: SELECT 1")
+	var result uint8
+	if err := conn.QueryRow(context.Background(), "SELECT 1").Scan(&result); err != nil {
+		log.Printf("  ❌ SELECT 1 失败: %v", err)
+		allPassed = false
+	} else {
+		log.Println("  ✅ SELECT 1 = 1")
+	}
+
+	// Test R.2: 本地表查询 (rewriter 重写为本地表，不经过 relay)
+	log.Println("[Test R.2] 本地表查询 (sentio_local_proc.local_data → 本地重写)")
+	if !runQueryRowCount(conn, "relay_local",
+		"SELECT id, name, value FROM sentio_local_proc.local_data ORDER BY id", 3) {
+		allPassed = false
+	}
+
+	// Test R.3: 远程表查询 — 核心 relay 测试
+	// sentio_remote_proc.products → rewriter → __route__ → Proxy1 inject relay token → Proxy2 validate → CH2
+	log.Println("[Test R.3] 远程表查询 (sentio_remote_proc.products → __route__ + relay token)")
+	if !runQueryMinRowCount(conn, "relay_remote_basic",
+		"SELECT product_id, product_name, category, price, stock FROM sentio_remote_proc.products ORDER BY product_id", 5) {
+		log.Println("  ⚠️  这是核心 relay 测试，失败意味着 relay token 传播有问题")
+		allPassed = false
+	}
+
+	// Test R.4: 远程表 WHERE + ORDER + LIMIT
+	log.Println("[Test R.4] 远程 WHERE+ORDER+LIMIT (relay)")
+	if !runQueryRowCount(conn, "relay_remote_where",
+		"SELECT product_id, product_name, price FROM sentio_remote_proc.products WHERE price > 100 ORDER BY price DESC LIMIT 2", 2) {
+		allPassed = false
+	}
+
+	// Test R.5: 远程表 count()
+	log.Println("[Test R.5] 远程 count() (relay)")
+	if !runQueryRowCount(conn, "relay_remote_count",
+		"SELECT count() FROM sentio_remote_proc.products", 1) {
+		allPassed = false
+	}
+
+	// Test R.6: 跨节点 INNER JOIN (本地 orders + 远程 products)
+	log.Println("[Test R.6] 跨节点 INNER JOIN (local orders × remote products via relay)")
+	if !runQueryMinRowCount(conn, "relay_cross_join",
+		`SELECT o.order_id, o.customer, p.product_name, o.quantity, p.price, o.amount
+		FROM sentio_local_proc.orders AS o
+		INNER JOIN sentio_remote_proc.products AS p
+			ON o.product_id = p.product_id
+		ORDER BY o.order_id`, 5) {
+		allPassed = false
+	}
+
+	// Test R.7: 跨节点 UNION ALL
+	log.Println("[Test R.7] 跨节点 UNION ALL (local + remote via relay)")
+	if !runQueryMinRowCount(conn, "relay_cross_union",
+		`SELECT * FROM (
+			SELECT 'CH1' AS source, customer AS name FROM sentio_local_proc.orders
+			UNION ALL
+			SELECT 'CH2' AS source, product_name AS name FROM sentio_remote_proc.products
+		) ORDER BY source, name`, 10) {
+		allPassed = false
+	}
+
+	// Test R.8: 跨节点 IN 子查询
+	log.Println("[Test R.8] 跨节点 IN 子查询 (relay)")
+	if !runQueryMinRowCount(conn, "relay_cross_subquery",
+		`SELECT order_id, customer, product_id, amount
+		FROM sentio_local_proc.orders
+		WHERE product_id IN (
+			SELECT product_id FROM sentio_remote_proc.products
+			WHERE category = 'Electronics'
+		) ORDER BY order_id`, 2) {
+		allPassed = false
+	}
+
+	// Test R.9: 跨节点聚合 GROUP BY
+	log.Println("[Test R.9] 跨节点聚合 GROUP BY (relay)")
+	if !runQueryMinRowCount(conn, "relay_cross_aggregate",
+		`SELECT p.category, count() AS order_count, sum(o.amount) AS total_amount
+		FROM sentio_local_proc.orders AS o
+		INNER JOIN sentio_remote_proc.products AS p
+			ON o.product_id = p.product_id
+		GROUP BY p.category
+		ORDER BY p.category`, 2) {
+		allPassed = false
+	}
+
+	// Test R.10: CTE 跨节点查询
+	log.Println("[Test R.10] CTE 跨节点查询 (relay)")
+	if !runQueryMinRowCount(conn, "relay_cross_cte",
+		`WITH
+			expensive AS (
+				SELECT product_id, product_name, price
+				FROM sentio_remote_proc.products
+				WHERE price > 100
+			),
+			big_orders AS (
+				SELECT order_id, customer, product_id, amount
+				FROM sentio_local_proc.orders
+				WHERE amount > 50
+			)
+		SELECT b.order_id, b.customer, e.product_name, e.price, b.amount
+		FROM big_orders AS b
+		INNER JOIN expensive AS e ON b.product_id = e.product_id
+		ORDER BY b.order_id`, 2) {
+		allPassed = false
+	}
+
+	// Test R.11: 远程空结果 (relay)
+	log.Println("[Test R.11] 远程空结果 (relay)")
+	if !runQueryRowCount(conn, "relay_remote_empty",
+		"SELECT count() FROM sentio_remote_proc.products WHERE product_id > 99999", 1) {
+		allPassed = false
+	}
+
+	// Test R.12: 跨节点 LEFT JOIN
+	log.Println("[Test R.12] 跨节点 LEFT JOIN (relay)")
+	if !runQueryMinRowCount(conn, "relay_cross_left_join",
+		`SELECT o.order_id, o.customer, p.product_name, p.category
+		FROM sentio_local_proc.orders AS o
+		LEFT JOIN sentio_remote_proc.products AS p
+			ON o.product_id = p.product_id
+		ORDER BY o.order_id`, 5) {
+		allPassed = false
+	}
+
+	log.Println()
+	if allPassed {
+		log.Println("✅ 全部 Relay 测试通过！跨节点 __route__ + JWS relay token 验证成功")
+	} else {
+		log.Println("❌ 存在 Relay 测试失败")
 	}
 
 	return allPassed
