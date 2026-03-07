@@ -1,6 +1,6 @@
 # ClickHouse Proxy
 
-一个轻量级的 ClickHouse 原生 TCP 协议代理。它在客户端与 ClickHouse 服务器之间透明转发流量，同时提供 **查询审计**、**JWS 认证**、**SQL 重写** 和 **Prometheus 监控** 等能力。
+一个轻量级的 ClickHouse 原生 TCP 协议代理。它在客户端与 ClickHouse 服务器之间透明转发流量，同时提供 **查询审计**、**JWS 认证**、**SQL 重写**、**动态上游路由** 和 **Prometheus 监控** 等能力。
 
 ---
 
@@ -9,8 +9,6 @@
 - [环境准备](#环境准备)
 - [快速开始](#快速开始)
 - [编译指南](#编译指南)
-  - [Go 原生编译](#go-原生编译)
-  - [Bazel 编译](#bazel-编译)
 - [配置详解](#配置详解)
   - [配置文件](#配置文件)
   - [环境变量](#环境变量)
@@ -21,7 +19,11 @@
   - [裸机部署](#裸机部署)
   - [Kubernetes 部署](#kubernetes-部署)
 - [认证配置](#认证配置)
+  - [Relay Token 传播](#relay-token-传播)
 - [SQL 重写配置](#sql-重写配置)
+- [架构说明](#架构说明)
+  - [动态上游路由](#动态上游路由)
+  - [Chunked 协议支持](#chunked-协议支持)
 - [测试](#测试)
 - [监控指标](#监控指标)
 
@@ -32,7 +34,6 @@
 | 依赖 | 版本要求 | 说明 |
 |------|---------|------|
 | Go   | 1.25+   | 必需，用于编译 |
-| Bazel | 8.0+   | 可选，项目也支持 Bazel 编译 |
 | Docker | 20.10+ | 可选，用于容器化部署 |
 
 ## 快速开始
@@ -58,8 +59,6 @@ clickhouse-client --host localhost --port 9001
 
 ## 编译指南
 
-### Go 原生编译
-
 ```bash
 # 标准编译
 go build -o clickhouse-proxy ./cmd/proxy/
@@ -72,31 +71,6 @@ make build
 ```
 
 编译完成后会在当前目录生成 `clickhouse-proxy` 二进制文件。
-
-### Bazel 编译
-
-项目使用 Bazel 8.0 + bzlmod 管理构建，Go SDK 版本为 1.25.3。
-
-```bash
-# 安装 Bazel（如未安装）
-# macOS:
-brew install bazel
-# 或参考 https://bazel.build/install
-
-# 确认 Bazel 版本（项目要求 8.0，见 .bazelversion 文件）
-bazel --version
-
-# 编译
-bazel build //cmd/proxy:proxy
-
-# 输出的二进制位于：
-ls bazel-bin/cmd/proxy/proxy_/proxy
-
-# 运行测试
-bazel test //pkg/proxy:proxy_test
-```
-
-> **注意**：Bazel 首次编译会下载依赖，时间较长。后续的增量编译会非常快。
 
 ---
 
@@ -143,9 +117,8 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 | `CK_REWRITER_ADDR` | `rewriter_service_addr` | `localhost:50051` |
 | `CK_NETWORK_STATE_SOURCE` | `network_state_source` | `file` |
 | `CK_NETWORK_STATE_FILE` | `network_state_file` | （无） |
+| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | （无） |
 | `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | （无） |
-| `CK_CH_USER` | `ch_user` | `default` |
-| `CK_CH_PASSWORD` | `ch_password` | （无） |
 
 ### 完整参数表
 
@@ -179,6 +152,7 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 | `auth_allowed_addresses` | []string | `[]` | 允许执行查询的以太坊地址列表 |
 | `auth_max_token_age` | duration | `1m` | JWS token 最大有效期 |
 | `auth_allow_no_auth` | bool | `false` | 是否允许不携带 token 的请求通过 |
+| `relay_private_key_hex` | string | （空） | 用于签发 relay JWS token 的以太坊私钥，在 proxy 间 `__route__` 连接中使用。集群内所有 proxy 应使用相同的私钥，对应地址须在 `auth_allowed_addresses` 中 |
 
 #### SQL 重写配置
 
@@ -186,23 +160,23 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 |------|------|-------|------|
 | `rewriter_enabled` | bool | `false` | 是否启用 SQL 重写功能 |
 | `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC 服务地址 |
-| `rewriter_local_indexer_id` | uint64 | `0` | 本地 Indexer 节点 ID |
 | `rewriter_timeout` | duration | `5s` | SQL 重写请求超时时间 |
 
 #### 网络状态配置
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|-------|------|
-| `network_state_source` | string | `file` | 网络状态数据来源，支持 `file` |
-| `network_state_file` | string | （空） | 网络状态 YAML 文件路径 |
+| `network_state_source` | string | `file` | 网络状态数据来源，支持 `file` 和 `redis` |
+| `network_state_file` | string | （空） | 网络状态 YAML 文件路径（`file` 模式使用） |
+| `network_state_redis` | string | （空） | Redis statemirror 地址（如 `localhost:6379`） |
 | `network_state_postgres` | string | （空） | PostgreSQL 连接串（预留） |
 
-#### ClickHouse 凭证
+#### CKH Manager（表名解析）
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|-------|------|
-| `ch_user` | string | `default` | 连接上游 ClickHouse 的用户名 |
-| `ch_password` | string | （空） | 连接上游 ClickHouse 的密码 |
+| `ckh_manager_config` | string | （空） | CKH Manager 配置文件路径（YAML/JSON），用于基于 SDK 的物理表名解析 |
+| `private_key_hex` | string | （空） | ClickHouse 请求签名的私钥（可选） |
 
 #### 高级配置
 
@@ -254,10 +228,13 @@ metrics listening on :9091
 
 ```bash
 # 本地构建
-docker build -t clickhouse-proxy:latest .
+docker build -f deploy/Dockerfile -t clickhouse-proxy:latest .
 
 # 构建并推送到私有仓库
 make docker push
+
+# 构建并推送认证版本（标签格式：auth-<commit>）
+make auth_proxy
 ```
 
 #### 运行容器
@@ -287,7 +264,7 @@ docker run -d \
   clickhouse-proxy:latest
 ```
 
-> **说明**：Docker 镜像使用多阶段构建，基于 `alpine:latest`，体积很小。运行时进程为 `/app/clickhouse-proxy`。
+> **说明**：Docker 镜像使用多阶段构建，基于 `alpine:latest`，体积很小。Dockerfile 位于 `deploy/Dockerfile`。
 
 #### 镜像信息
 
@@ -316,7 +293,6 @@ cd /opt/clickhouse-proxy
 ./clickhouse-proxy -config config.json
 
 # 4. (可选) 使用 systemd 管理服务
-# 创建 /etc/systemd/system/clickhouse-proxy.service
 ```
 
 systemd 服务文件示例：
@@ -340,10 +316,10 @@ WantedBy=multi-user.target
 
 ### Kubernetes 部署
 
-项目中的 `auth_ck.yaml` 提供了完整的 Kubernetes 部署示例，包含 ConfigMap + Sidecar 模式：
+项目中的 `configs/auth_ck.yaml` 提供了完整的 Kubernetes 部署示例，包含 ConfigMap + Sidecar 模式：
 
 ```bash
-kubectl apply -f auth_ck.yaml
+kubectl apply -f configs/auth_ck.yaml
 ```
 
 生产环境推荐使用 **ConfigMap** 管理配置文件。
@@ -385,11 +361,35 @@ rows, err := conn.Query(ctx, "SELECT 1")
 
 支持 JWS Compact 序列化（单签名）和 JWS JSON 序列化（多签名）两种格式。
 
+### Relay Token 传播
+
+在多 proxy 集群中，当 ClickHouse 通过 `__route__` 连接发起 `remote()` 子查询时（Proxy1 → ClickHouse → Proxy2），Proxy1 会自动签发 relay JWS token 并注入到查询设置中，然后转发到 Proxy2。
+
+**工作流程：**
+1. Proxy1 收到来自本地 ClickHouse 的 `__route__` 连接。
+2. Proxy1 拦截第一个 Query 包，使用共享的以太坊私钥签发 relay JWS token。
+3. Proxy1 通过 `SQL_x_auth_token` 设置注入 token，转发到 Proxy2。
+4. Proxy2 通过普通的 JWS 验证流程校验 relay token。
+
+**配置：**
+
+```json
+{
+    "auth_enabled": true,
+    "relay_private_key_hex": "shared-ethereum-private-key-hex",
+    "auth_allowed_addresses": [
+        "0x<relay-private-key-对应的以太坊地址>"
+    ]
+}
+```
+
+> **重要**：集群内所有 proxy 必须共享相同的 `relay_private_key_hex`，且对应的以太坊地址必须在 `auth_allowed_addresses` 中。
+
 ---
 
 ## SQL 重写配置
 
-proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_name>` 格式的虚拟表名重写为实际的 ClickHouse `remote()` 表达式。该功能需要外部 gRPC 重写服务支持。
+proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_name>` 格式的虚拟表名重写为实际的 ClickHouse `remote()` 表达式。该功能需要外部 gRPC 重写服务和网络状态数据源。
 
 ### 启用 SQL 重写
 
@@ -397,20 +397,40 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 {
     "rewriter_enabled": true,
     "rewriter_service_addr": "localhost:50051",
-    "rewriter_local_indexer_id": 1,
     "rewriter_timeout": "5s",
     "network_state_source": "file",
-    "network_state_file": "./network_state.yaml",
-    "ch_user": "default",
-    "ch_password": ""
+    "network_state_file": "./network_state.yaml"
+}
+```
+
+#### 使用 Redis 作为网络状态源
+
+在生产环境中，proxy 支持 Redis statemirror 作为实时网络状态源：
+
+```json
+{
+    "rewriter_enabled": true,
+    "rewriter_service_addr": "localhost:50051",
+    "network_state_source": "redis",
+    "network_state_redis": "localhost:6379"
+}
+```
+
+#### 使用 CKH Manager 进行表名解析
+
+在生产环境中，可通过 CKH Manager 进行物理表名解析（虚拟表名 → 物理表名）：
+
+```json
+{
+    "rewriter_enabled": true,
+    "ckh_manager_config": "/path/to/ckhmanager.yaml",
+    "private_key_hex": "optional-signing-key"
 }
 ```
 
 ### 按查询跳过重写
 
 当 SQL 重写全局开启时，客户端可以通过 ClickHouse 自定义设置 `SQL_skip_rewrite` 在 **单条查询** 级别跳过重写。这对于 `INSERT` 等不需要重写的语句尤其有用。
-
-设置 `SQL_skip_rewrite=1` 后，该查询将直接透传到上游 ClickHouse，不进行任何表名重写。
 
 ```go
 // Go 客户端示例：INSERT 时跳过重写
@@ -424,6 +444,37 @@ conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
 
 ---
 
+## 架构说明
+
+### 动态上游路由
+
+proxy 通过 `__route__` 编码用户参数支持 **动态上游路由**，实现多 proxy 集群下的 ClickHouse 分布式查询。
+
+当 SQL 重写生成 `remote()` 函数调用时，user 参数会被编码为：
+
+```
+__route__<target_proxy_addr>__<real_user>
+```
+
+**工作流程：**
+1. ClickHouse 解析 `remote()` 并连接到本地 proxy。
+2. Proxy 检测到 Hello 包中 user 字段包含 `__route__` 前缀。
+3. Proxy 提取目标 proxy 地址和真实用户名。
+4. Proxy 直连目标 proxy，重写 Hello 包中的 user 字段为真实用户名，透明转发连接。
+
+**安全性：** 仅允许来自 `localhost`（127.0.0.1 或 ::1）的连接使用 `__route__` 路由，防止 SSRF 攻击。
+
+### Chunked 协议支持
+
+proxy 透明处理 ClickHouse 的 **Chunked 传输协议**（新版 ClickHouse 引入）。Chunked 帧格式会在握手协商阶段自动检测：
+
+- **ChunkedReader**：剥离 chunk 帧头和结束标记，向解析器暴露原始协议数据。
+- **ChunkedWriter**：将输出数据包装为 chunked 帧，超过 64KB 的负载自动分片。
+
+此功能自动处理，无需任何配置。
+
+---
+
 ## 测试
 
 ### 单元测试
@@ -431,9 +482,6 @@ conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
 ```bash
 # Go 原生
 go test ./...
-
-# Bazel
-bazel test //pkg/proxy:proxy_test
 ```
 
 ### 本地集成测试
@@ -500,4 +548,4 @@ scrape_configs:
 
 ### 接入 Grafana
 
-项目中的 `dashboard.json` 提供了预配置的 Grafana 仪表板，可直接导入使用。
+项目中的 `configs/dashboard.json` 提供了预配置的 Grafana 仪表板，可直接导入使用。

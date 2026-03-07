@@ -1,6 +1,6 @@
 # ClickHouse Proxy
 
-A lightweight ClickHouse native TCP protocol proxy. It sits transparently between clients and ClickHouse servers, providing **query auditing**, **JWS authentication**, **SQL rewriting**, and **Prometheus monitoring** capabilities.
+A lightweight ClickHouse native TCP protocol proxy. It sits transparently between clients and ClickHouse servers, providing **query auditing**, **JWS authentication**, **SQL rewriting**, **dynamic upstream routing**, and **Prometheus monitoring** capabilities.
 
 ---
 
@@ -9,8 +9,6 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 - [Prerequisites](#prerequisites)
 - [Quick Start](#quick-start)
 - [Build](#build)
-  - [Go Native Build](#go-native-build)
-  - [Bazel Build](#bazel-build)
 - [Configuration](#configuration)
   - [Config File](#config-file)
   - [Environment Variables](#environment-variables)
@@ -21,7 +19,11 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
   - [Bare-metal Deployment](#bare-metal-deployment)
   - [Kubernetes Deployment](#kubernetes-deployment)
 - [Authentication](#authentication)
+  - [Relay Token Propagation](#relay-token-propagation)
 - [SQL Rewriter](#sql-rewriter)
+- [Architecture](#architecture)
+  - [Dynamic Upstream Routing](#dynamic-upstream-routing)
+  - [Chunked Protocol Support](#chunked-protocol-support)
 - [Testing](#testing)
 - [Metrics](#metrics)
 
@@ -32,7 +34,6 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 | Dependency | Version | Notes |
 |-----------|---------|-------|
 | Go | 1.25+ | Required for building |
-| Bazel | 8.0+ | Optional, the project also supports Bazel builds |
 | Docker | 20.10+ | Optional, for containerized deployment |
 
 ## Quick Start
@@ -58,8 +59,6 @@ clickhouse-client --host localhost --port 9001
 
 ## Build
 
-### Go Native Build
-
 ```bash
 # Standard build
 go build -o clickhouse-proxy ./cmd/proxy/
@@ -72,31 +71,6 @@ make build
 ```
 
 This produces a `clickhouse-proxy` binary in the current directory.
-
-### Bazel Build
-
-The project uses Bazel 8.0 with bzlmod for build management. Go SDK version is 1.25.3.
-
-```bash
-# Install Bazel (if not already installed)
-# macOS:
-brew install bazel
-# See https://bazel.build/install for other platforms
-
-# Verify Bazel version (project requires 8.0, see .bazelversion)
-bazel --version
-
-# Build
-bazel build //cmd/proxy:proxy
-
-# The output binary is located at:
-ls bazel-bin/cmd/proxy/proxy_/proxy
-
-# Run tests
-bazel test //pkg/proxy:proxy_test
-```
-
-> **Note**: The first Bazel build downloads all dependencies and may take a while. Subsequent incremental builds will be much faster.
 
 ---
 
@@ -143,9 +117,8 @@ The following config options can be overridden via environment variables (lower 
 | `CK_REWRITER_ADDR` | `rewriter_service_addr` | `localhost:50051` |
 | `CK_NETWORK_STATE_SOURCE` | `network_state_source` | `file` |
 | `CK_NETWORK_STATE_FILE` | `network_state_file` | (none) |
+| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | (none) |
 | `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | (none) |
-| `CK_CH_USER` | `ch_user` | `default` |
-| `CK_CH_PASSWORD` | `ch_password` | (none) |
 
 ### Full Parameter Reference
 
@@ -179,6 +152,7 @@ The following config options can be overridden via environment variables (lower 
 | `auth_allowed_addresses` | []string | `[]` | List of Ethereum addresses allowed to execute queries |
 | `auth_max_token_age` | duration | `1m` | Maximum age of JWS tokens |
 | `auth_allow_no_auth` | bool | `false` | Allow requests without an auth token to pass through |
+| `relay_private_key_hex` | string | (empty) | Ethereum private key for signing relay JWS tokens in proxy-to-proxy (`__route__`) connections. All proxies in a cluster should share the same key. The corresponding address must be in `auth_allowed_addresses` |
 
 #### SQL Rewriter
 
@@ -186,23 +160,23 @@ The following config options can be overridden via environment variables (lower 
 |-----------|------|---------|-------------|
 | `rewriter_enabled` | bool | `false` | Enable SQL rewriting |
 | `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC service address |
-| `rewriter_local_indexer_id` | uint64 | `0` | Local Indexer node ID |
 | `rewriter_timeout` | duration | `5s` | SQL rewrite request timeout |
 
 #### Network State
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `network_state_source` | string | `file` | Network state data source; supports `file` |
-| `network_state_file` | string | (empty) | Path to the network state YAML file |
+| `network_state_source` | string | `file` | Network state data source; supports `file` and `redis` |
+| `network_state_file` | string | (empty) | Path to the network state YAML file (for `file` source) |
+| `network_state_redis` | string | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
 | `network_state_postgres` | string | (empty) | PostgreSQL connection string (reserved) |
 
-#### ClickHouse Credentials
+#### CKH Manager (Table Resolution)
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `ch_user` | string | `default` | Username for connecting to the upstream ClickHouse |
-| `ch_password` | string | (empty) | Password for connecting to the upstream ClickHouse |
+| `ckh_manager_config` | string | (empty) | Path to CKH Manager YAML/JSON config file for SDK-based physical table name resolution |
+| `private_key_hex` | string | (empty) | Private key hex for ClickHouse request signing (optional) |
 
 #### Advanced
 
@@ -254,10 +228,13 @@ Press `Ctrl+C` for a graceful shutdown; final statistics are printed before exit
 
 ```bash
 # Local build
-docker build -t clickhouse-proxy:latest .
+docker build -f deploy/Dockerfile -t clickhouse-proxy:latest .
 
 # Build and push to the private registry
 make docker push
+
+# Build and push auth-enabled version (tagged auth-<commit>)
+make auth_proxy
 ```
 
 #### Run a Container
@@ -287,7 +264,7 @@ docker run -d \
   clickhouse-proxy:latest
 ```
 
-> **Note**: The Docker image uses a multi-stage build based on `alpine:latest`, resulting in a very small image. The runtime binary is `/app/clickhouse-proxy`.
+> **Note**: The Docker image uses a multi-stage build based on `alpine:latest`, resulting in a very small image. The Dockerfile is located at `deploy/Dockerfile`.
 
 #### Image Details
 
@@ -339,10 +316,10 @@ WantedBy=multi-user.target
 
 ### Kubernetes Deployment
 
-The repository includes `auth_ck.yaml` with a complete Kubernetes deployment example using ConfigMap + Sidecar pattern:
+The repository includes `configs/auth_ck.yaml` with a complete Kubernetes deployment example using ConfigMap + Sidecar pattern:
 
 ```bash
-kubectl apply -f auth_ck.yaml
+kubectl apply -f configs/auth_ck.yaml
 ```
 
 For production, **ConfigMap** is the recommended way to manage the configuration file.
@@ -384,11 +361,35 @@ The **payload** contains two fields:
 
 Both JWS Compact Serialization (single signature) and JWS JSON Serialization (multi-signature) formats are supported.
 
+### Relay Token Propagation
+
+In a multi-proxy cluster, when ClickHouse initiates a `remote()` sub-query via `__route__` connections (Proxy1 → ClickHouse → Proxy2), Proxy1 automatically signs a relay JWS token and injects it into the query settings before forwarding to Proxy2.
+
+**How it works:**
+1. Proxy1 receives a `__route__` connection from the local ClickHouse.
+2. Proxy1 intercepts the first Query packet and signs a relay JWS token using the shared Ethereum private key.
+3. Proxy1 injects the token via `SQL_x_auth_token` setting and forwards to Proxy2.
+4. Proxy2 validates the relay token through its normal JWS validation flow.
+
+**Configuration:**
+
+```json
+{
+    "auth_enabled": true,
+    "relay_private_key_hex": "your-shared-ethereum-private-key-hex",
+    "auth_allowed_addresses": [
+        "0x<address-derived-from-relay-private-key>"
+    ]
+}
+```
+
+> **Important**: All proxies in the cluster must share the same `relay_private_key_hex`, and the corresponding Ethereum address must be in `auth_allowed_addresses`.
+
 ---
 
 ## SQL Rewriter
 
-The proxy supports **Sentio Network SQL rewriting**, transforming virtual table names in the format `sentio_<processor_id>.<table_name>` into actual ClickHouse `remote()` expressions. This feature requires an external gRPC rewriter service.
+The proxy supports **Sentio Network SQL rewriting**, transforming virtual table names in the format `sentio_<processor_id>.<table_name>` into actual ClickHouse `remote()` expressions. This feature requires an external gRPC rewriter service and a network state provider.
 
 ### Enable SQL Rewriting
 
@@ -396,12 +397,34 @@ The proxy supports **Sentio Network SQL rewriting**, transforming virtual table 
 {
     "rewriter_enabled": true,
     "rewriter_service_addr": "localhost:50051",
-    "rewriter_local_indexer_id": 1,
     "rewriter_timeout": "5s",
     "network_state_source": "file",
-    "network_state_file": "./network_state.yaml",
-    "ch_user": "default",
-    "ch_password": ""
+    "network_state_file": "./network_state.yaml"
+}
+```
+
+#### Using Redis for Network State
+
+For production environments, the proxy supports Redis statemirror as a real-time network state source:
+
+```json
+{
+    "rewriter_enabled": true,
+    "rewriter_service_addr": "localhost:50051",
+    "network_state_source": "redis",
+    "network_state_redis": "localhost:6379"
+}
+```
+
+#### Using CKH Manager for Table Resolution
+
+For production table name resolution (virtual → physical), configure the CKH Manager:
+
+```json
+{
+    "rewriter_enabled": true,
+    "ckh_manager_config": "/path/to/ckhmanager.yaml",
+    "private_key_hex": "optional-signing-key"
 }
 ```
 
@@ -419,6 +442,39 @@ conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
 
 > **Note**: `SQL_skip_rewrite` is a proxy-only custom setting. It is automatically stripped before forwarding to the upstream ClickHouse server.
 
+---
+
+## Architecture
+
+### Dynamic Upstream Routing
+
+The proxy supports **dynamic upstream routing** via `__route__` encoded user parameters, enabling ClickHouse distributed queries across a multi-proxy cluster.
+
+When ClickHouse generates `remote()` function calls during SQL rewriting, the user parameter is encoded as:
+
+```
+__route__<target_proxy_addr>__<real_user>
+```
+
+**Flow:**
+1. ClickHouse resolves `remote()` and connects to the local proxy.
+2. The proxy detects the `__route__` prefix in the Hello packet's user field.
+3. The proxy extracts the target proxy address and real user name.
+4. The proxy dials the target proxy directly, rewrites the Hello packet to replace the user field with the real user, and transparently forwards the connection.
+
+**Security:** Only connections from `localhost` (127.0.0.1 or ::1) are allowed to use `__route__` routing, preventing SSRF attacks.
+
+### Chunked Protocol Support
+
+The proxy transparently handles ClickHouse's **chunked transport protocol** (introduced in newer ClickHouse versions). Chunked framing is automatically detected during handshake negotiation:
+
+- **ChunkedReader**: Strips chunk frame headers and end markers, exposing raw protocol data to the parser.
+- **ChunkedWriter**: Wraps outgoing data in chunked frames with automatic fragmentation for payloads exceeding 64KB.
+
+This is handled automatically and requires no configuration.
+
+---
+
 ## Testing
 
 ### Unit Tests
@@ -426,9 +482,6 @@ conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
 ```bash
 # Go native
 go test ./...
-
-# Bazel
-bazel test //pkg/proxy:proxy_test
 ```
 
 ### Local Integration Tests
@@ -495,4 +548,4 @@ scrape_configs:
 
 ### Grafana Dashboard
 
-Import the pre-configured `dashboard.json` included in this repository into Grafana for out-of-the-box monitoring.
+Import the pre-configured `configs/dashboard.json` included in this repository into Grafana for out-of-the-box monitoring.
