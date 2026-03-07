@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"crypto/ecdsa"
 	"encoding/base64"
@@ -10,6 +11,9 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -52,10 +56,12 @@ type mixedResult struct {
 }
 
 var (
-	addr  = flag.String("addr", "127.0.0.1:19001", "ClickHouse proxy address")
-	user  = flag.String("user", "default", "ClickHouse username")
-	pass  = flag.String("password", "", "ClickHouse password")
-	phase = flag.String("phase", "all", "Test phase: noauth, auth-valid, auth-invalid, or all")
+	addr    = flag.String("addr", "127.0.0.1:19001", "ClickHouse proxy address")
+	user    = flag.String("user", "default", "ClickHouse username")
+	pass    = flag.String("password", "", "ClickHouse password")
+	phase   = flag.String("phase", "all", "Test phase: noauth, auth-valid, auth-invalid, or all")
+	sqlfile = flag.String("sqlfile", "", "SQL 测试文件路径 (-- [TEST: name] 格式)")
+	runOnly = flag.String("run", "", "仅运行指定名称的测试用例 (可选)")
 )
 
 func main() {
@@ -270,20 +276,153 @@ func runPhaseAuthValid() bool {
 		}
 	}
 
-	// ========== SQL 专项测试 ==========
-	if !runSQLTests(conn, signFunc) {
-		allPassed = false
+	// ========== SQL 文件驱动测试 ==========
+	if *sqlfile != "" {
+		if !runSQLFileTests(signFunc, *sqlfile, *runOnly) {
+			allPassed = false
+		}
+	} else {
+		log.Println("ℹ️  未指定 -sqlfile，跳过 SQL 专项测试")
 	}
 
 	return allPassed
 }
 
-// runSQLTests runs SQL-specific integration tests covering all /tests/all_tests.sql cases.
-// Each test is executed twice: once with connection-level signing, once with query-level signing.
-func runSQLTests(conn clickhouse.Conn, signFunc func(string) (string, error)) bool {
+// SQLTestCase represents a single test case parsed from a SQL file.
+type SQLTestCase struct {
+	Name  string
+	Query string
+}
+
+// parseSQLFile reads a SQL file and splits it into test cases by -- [TEST: name] markers.
+func parseSQLFile(path string) ([]SQLTestCase, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开 SQL 文件失败: %w", err)
+	}
+	defer f.Close()
+
+	var cases []SQLTestCase
+	var currentName string
+	var currentLines []string
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "-- [TEST: ") && strings.HasSuffix(line, "]") {
+			// 保存上一个用例
+			if currentName != "" {
+				query := strings.TrimSpace(strings.Join(currentLines, "\n"))
+				if query != "" {
+					cases = append(cases, SQLTestCase{Name: currentName, Query: query})
+				}
+			}
+			// 提取新用例名称
+			currentName = line[len("-- [TEST: ") : len(line)-1]
+			currentLines = nil
+		} else {
+			// 跳过纯注释行 (非 SQL 的中文说明)
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "--") && !strings.HasPrefix(trimmed, "-- FROM") {
+				continue
+			}
+			currentLines = append(currentLines, line)
+		}
+	}
+	// 最后一个用例
+	if currentName != "" {
+		query := strings.TrimSpace(strings.Join(currentLines, "\n"))
+		if query != "" {
+			cases = append(cases, SQLTestCase{Name: currentName, Query: query})
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取 SQL 文件失败: %w", err)
+	}
+	return cases, nil
+}
+
+// parseResultFile reads a .result file and returns a map of test_name -> expected_output.
+func parseResultFile(path string) (map[string]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("打开结果文件失败: %w", err)
+	}
+	defer f.Close()
+
+	results := make(map[string]string)
+	var currentName string
+	var currentLines []string
+
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if strings.HasPrefix(line, "-- [TEST: ") && strings.HasSuffix(line, "]") {
+			if currentName != "" {
+				results[currentName] = strings.TrimSpace(strings.Join(currentLines, "\n"))
+			}
+			currentName = line[len("-- [TEST: ") : len(line)-1]
+			currentLines = nil
+		} else {
+			currentLines = append(currentLines, line)
+		}
+	}
+	if currentName != "" {
+		results[currentName] = strings.TrimSpace(strings.Join(currentLines, "\n"))
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("读取结果文件失败: %w", err)
+	}
+	return results, nil
+}
+
+// runSQLFileTests loads test cases from a SQL file and executes them with dual signing modes.
+// If a corresponding .result file exists, it compares actual output against expected.
+func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilter string) bool {
+	log.Printf("📄 加载 SQL 测试文件: %s", sqlFilePath)
+
+	testCases, err := parseSQLFile(sqlFilePath)
+	if err != nil {
+		log.Printf("  ❌ %v", err)
+		return false
+	}
+
+	// 尝试加载同名 .result 文件
+	resultPath := strings.TrimSuffix(sqlFilePath, filepath.Ext(sqlFilePath)) + ".result"
+	var expectedResults map[string]string
+	if _, err := os.Stat(resultPath); err == nil {
+		expectedResults, err = parseResultFile(resultPath)
+		if err != nil {
+			log.Printf("  ⚠️  加载结果文件失败: %v (将只检查查询是否成功)", err)
+		} else {
+			log.Printf("📄 加载结果文件: %s (%d 个预期结果)", resultPath, len(expectedResults))
+		}
+	} else {
+		log.Printf("ℹ️  未找到结果文件 %s，将只检查查询是否成功", resultPath)
+	}
+
+	// 过滤
+	if runFilter != "" {
+		var filtered []SQLTestCase
+		for _, tc := range testCases {
+			if tc.Name == runFilter || strings.Contains(tc.Name, runFilter) {
+				filtered = append(filtered, tc)
+			}
+		}
+		if len(filtered) == 0 {
+			log.Printf("  ❌ 没有找到匹配 '%s' 的测试用例", runFilter)
+			return false
+		}
+		testCases = filtered
+		log.Printf("🔍 过滤后: %d 个测试用例", len(testCases))
+	}
+
+	log.Printf("🔍 共 %d 个测试用例", len(testCases))
+	log.Println()
+
 	allPassed := true
 
-	// Two signing modes: connection-level and query-level
+	// 双签名模式
 	type signMode struct {
 		name    string
 		connSF  func(string) (string, error)
@@ -307,8 +446,7 @@ func runSQLTests(conn clickhouse.Conn, signFunc func(string) (string, error)) bo
 	}
 
 	for mi, mode := range modes {
-		log.Println()
-		log.Printf("========== SQL 专项测试 - 模式 %d: %s ==========", mi+1, mode.name)
+		log.Printf("========== SQL 文件测试 - 模式 %d: %s ==========", mi+1, mode.name)
 		log.Println()
 
 		c := openConnection(mode.connSF)
@@ -321,416 +459,46 @@ func runSQLTests(conn clickhouse.Conn, signFunc func(string) (string, error)) bo
 		ctx := mode.makeCtx()
 		prefix := fmt.Sprintf("[%s]", mode.name)
 
-		// 01: SELECT 1
-		log.Printf("%s [01] SELECT 1", prefix)
-		if !runQueryRowCountCtx(c, ctx, "01_basic_select", "SELECT 1", 1) {
-			allPassed = false
-		}
+		for _, tc := range testCases {
+			log.Printf("%s [%s]", prefix, tc.Name)
 
-		// 02: SELECT version()
-		log.Printf("%s [02] SELECT version()", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "02_version", "SELECT version()", 1) {
-			allPassed = false
-		}
-
-		// 03: 算术运算
-		log.Printf("%s [03] SELECT 1 + 2", prefix)
-		if !runQueryRowCountCtx(c, ctx, "03_arithmetic", "SELECT 1 + 2", 1) {
-			allPassed = false
-		}
-
-		// 04: 本地表计数
-		log.Printf("%s [04] count() sentio_local_proc.local_data", prefix)
-		if !runQueryRowCountCtx(c, ctx, "04_local_count", "SELECT count() FROM sentio_local_proc.local_data", 1) {
-			allPassed = false
-		}
-
-		// 05: 本地全量 SELECT
-		log.Printf("%s [05] sentio_local_proc.orders 全量", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "05_local_select", "SELECT order_id, customer, product_id, quantity, amount, order_date FROM sentio_local_proc.orders ORDER BY order_id", 5) {
-			allPassed = false
-		}
-
-		// 06: 本地 WHERE
-		log.Printf("%s [06] sentio_local_proc.orders WHERE customer='Alice'", prefix)
-		if !runQueryRowCountCtx(c, ctx, "06_local_where", "SELECT order_id, customer, amount FROM sentio_local_proc.orders WHERE customer = 'Alice' ORDER BY order_id", 2) {
-			allPassed = false
-		}
-
-		// 07: 远程查本地
-		log.Printf("%s [07] sentio_local_proc.local_data ORDER BY id", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "07_remote_self", "SELECT id, name, value FROM sentio_local_proc.local_data ORDER BY id", 3) {
-			allPassed = false
-		}
-
-		// 08: 远程基础
-		log.Printf("%s [08] count() sentio_remote_proc.products", prefix)
-		if !runQueryRowCountCtx(c, ctx, "08_remote_basic", "SELECT count() FROM sentio_remote_proc.products", 1) {
-			allPassed = false
-		}
-
-		// 09: 远程全量
-		log.Printf("%s [09] sentio_remote_proc.products 全量", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "09_remote_select", "SELECT product_id, product_name, category, price, stock FROM sentio_remote_proc.products ORDER BY product_id", 5) {
-			allPassed = false
-		}
-
-		// 10: 远程 WHERE+ORDER+LIMIT
-		log.Printf("%s [10] 远程 WHERE+ORDER+LIMIT", prefix)
-		if !runQueryRowCountCtx(c, ctx, "10_remote_where", "SELECT product_id, product_name, price FROM sentio_remote_proc.products WHERE price > 100 ORDER BY price DESC LIMIT 2", 2) {
-			allPassed = false
-		}
-
-		// 11: 远程空结果
-		log.Printf("%s [11] 远程空结果", prefix)
-		if !runQueryRowCountCtx(c, ctx, "11_remote_empty", "SELECT count() FROM sentio_remote_proc.products WHERE product_id > 99999", 1) {
-			allPassed = false
-		}
-
-		// 12: 远程 IF/CASE 表达式
-		log.Printf("%s [12] 远程表达式 IF/CASE", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "12_remote_expression",
-			`SELECT product_id, product_name, price,
-			if(price > 100, 'expensive', 'cheap') AS level,
-			CASE category
-				WHEN 'Electronics' THEN 'Tech'
-				WHEN 'Premium' THEN 'Luxury'
-				ELSE 'Other'
-			END AS label
-		FROM sentio_remote_proc.products
-		ORDER BY product_id`, 5) {
-			allPassed = false
-		}
-
-		// 13: 远程表达式排序+LIMIT
-		log.Printf("%s [13] 远程表达式排序 LIMIT", prefix)
-		if !runQueryRowCountCtx(c, ctx, "13_remote_order_expr",
-			`SELECT product_id, product_name, price, price * stock AS total_value
-		FROM sentio_remote_proc.products
-		ORDER BY total_value DESC
-		LIMIT 3`, 3) {
-			allPassed = false
-		}
-
-		// 14: 远程窗口函数
-		log.Printf("%s [14] 远程窗口函数", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "14_remote_window",
-			`SELECT product_id, product_name, price,
-			row_number() OVER (ORDER BY price DESC) AS rank,
-			lag(price) OVER (ORDER BY price DESC) AS prev_price
-		FROM sentio_remote_proc.products
-		ORDER BY price DESC`, 5) {
-			allPassed = false
-		}
-
-		// 15: 本地 SELF JOIN
-		log.Printf("%s [15] 本地 SELF JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "15_local_self_join",
-			`SELECT a.order_id, a.customer, b.order_id AS other_order, b.customer AS other_customer
-		FROM sentio_local_proc.orders AS a
-		INNER JOIN sentio_local_proc.orders AS b ON a.customer = b.customer AND a.order_id < b.order_id
-		ORDER BY a.order_id, b.order_id`, 1) {
-			allPassed = false
-		}
-
-		// 16: 本地两表 JOIN
-		log.Printf("%s [16] 本地两表 JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "16_local_two_table_join",
-			`SELECT o.order_id, o.customer, d.name
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_local_proc.local_data AS d ON o.order_id % 3 + 1 = d.id
-		ORDER BY o.order_id`, 5) {
-			allPassed = false
-		}
-
-		// 17: 本地 UNION ALL
-		log.Printf("%s [17] 本地 UNION ALL", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "17_local_union",
-			`SELECT * FROM (
-			SELECT 'order' AS type, toString(order_id) AS id, customer AS name FROM sentio_local_proc.orders
-			UNION ALL
-			SELECT 'data' AS type, toString(id) AS id, name FROM sentio_local_proc.local_data
-		) ORDER BY type, id`, 8) {
-			allPassed = false
-		}
-
-		// 18: 本地标量子查询
-		log.Printf("%s [18] 本地标量子查询", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "18_local_subquery",
-			`SELECT order_id, customer, amount
-		FROM sentio_local_proc.orders
-		WHERE amount > (SELECT avg(value) * 10 FROM sentio_local_proc.local_data)
-		ORDER BY order_id`, 1) {
-			allPassed = false
-		}
-
-		// 19: 跨节点 INNER JOIN
-		log.Printf("%s [19] 跨节点 INNER JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "19_cross_inner_join",
-			`SELECT o.order_id, o.customer, p.product_name, o.quantity, p.price, o.amount
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		ORDER BY o.order_id`, 5) {
-			allPassed = false
-		}
-
-		// 20: 跨节点 RIGHT JOIN
-		log.Printf("%s [20] 跨节点 RIGHT JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "20_cross_right_join",
-			`SELECT p.product_id, p.product_name, o.order_id, o.customer
-		FROM sentio_local_proc.orders AS o
-		RIGHT JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		ORDER BY p.product_id, o.order_id`, 6) {
-			allPassed = false
-		}
-
-		// 21: 跨节点 JOIN USING
-		log.Printf("%s [21] 跨节点 JOIN USING", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "21_cross_join_using",
-			`SELECT product_id, customer, product_name, amount
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_remote_proc.products AS p USING (product_id)
-		ORDER BY product_id, customer`, 5) {
-			allPassed = false
-		}
-
-		// 22: 跨节点 DISTINCT + JOIN
-		log.Printf("%s [22] DISTINCT + JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "22_cross_distinct_join",
-			`SELECT DISTINCT customer
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		ORDER BY customer`, 3) {
-			allPassed = false
-		}
-
-		// 23: 跨节点 LEFT JOIN
-		log.Printf("%s [23] 跨节点 LEFT JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "23_cross_left_join",
-			`SELECT o.order_id, o.customer, p.product_name, p.category
-		FROM sentio_local_proc.orders AS o
-		LEFT JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		ORDER BY o.order_id`, 5) {
-			allPassed = false
-		}
-
-		// 24: 跨节点 UNION ALL
-		log.Printf("%s [24] 跨节点 UNION ALL", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "24_cross_union",
-			`SELECT * FROM (
-			SELECT 'orders' AS source, customer AS name FROM sentio_local_proc.orders
-			UNION ALL
-			SELECT 'products' AS source, product_name AS name FROM sentio_remote_proc.products
-		) ORDER BY source, name`, 10) {
-			allPassed = false
-		}
-
-		// 25: 跨节点 UNION ALL + WHERE
-		log.Printf("%s [25] UNION ALL + WHERE", prefix)
-		if !runQueryRowCountCtx(c, ctx, "25_cross_union_where",
-			`SELECT * FROM (
-			SELECT order_id AS id, customer AS name FROM sentio_local_proc.orders
-			UNION ALL
-			SELECT product_id AS id, product_name AS name FROM sentio_remote_proc.products
-		) WHERE id = 101 ORDER BY name`, 1) {
-			allPassed = false
-		}
-
-		// 26: 跨节点 DISTINCT
-		log.Printf("%s [26] 跨节点 DISTINCT", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "26_cross_distinct",
-			`SELECT DISTINCT category FROM (
-			SELECT category FROM sentio_remote_proc.products
-			UNION ALL
-			SELECT 'Electronics' AS category FROM sentio_local_proc.orders WHERE product_id IN (101, 102)
-		) ORDER BY category`, 3) {
-			allPassed = false
-		}
-
-		// 27: 跨节点 IN 子查询
-		log.Printf("%s [27] 跨节点 IN 子查询", prefix)
-		if !runQueryRowCountCtx(c, ctx, "27_cross_in_subquery",
-			`SELECT order_id, customer, product_id, amount
-		FROM sentio_local_proc.orders
-		WHERE product_id IN (
-			SELECT product_id FROM sentio_remote_proc.products WHERE category = 'Electronics'
-		) ORDER BY order_id`, 3) {
-			allPassed = false
-		}
-
-		// 28: 跨节点标量子查询
-		log.Printf("%s [28] 跨节点标量子查询", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "28_cross_scalar_subquery",
-			`SELECT order_id, customer, amount,
-			(SELECT max(price) FROM sentio_remote_proc.products) AS max_price
-		FROM sentio_local_proc.orders ORDER BY order_id`, 5) {
-			allPassed = false
-		}
-
-		// 29: 跨节点 EXISTS (IN Premium)
-		log.Printf("%s [29] 跨节点 EXISTS/IN Premium", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "29_cross_exists",
-			`SELECT order_id, customer, product_id, amount
-		FROM sentio_local_proc.orders
-		WHERE product_id IN (
-			SELECT product_id FROM sentio_remote_proc.products WHERE category = 'Premium'
-		) ORDER BY order_id`, 1) {
-			allPassed = false
-		}
-
-		// 30: 跨节点 GROUP BY 聚合
-		log.Printf("%s [30] 跨节点 GROUP BY 聚合", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "30_cross_aggregate",
-			`SELECT p.category, count() AS cnt, sum(o.quantity) AS total_qty, sum(o.amount) AS total_amt
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		GROUP BY p.category ORDER BY p.category`, 2) {
-			allPassed = false
-		}
-
-		// 31: 跨节点 HAVING
-		log.Printf("%s [31] 跨节点 HAVING", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "31_cross_having",
-			`SELECT p.category, count() AS cnt, sum(o.amount) AS total
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		GROUP BY p.category HAVING cnt >= 2 ORDER BY p.category`, 1) {
-			allPassed = false
-		}
-
-		// 32: 跨节点 GROUP BY WITH TOTALS
-		log.Printf("%s [32] GROUP BY WITH TOTALS", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "32_cross_totals",
-			`SELECT p.category, count() AS cnt, sum(o.amount) AS total
-		FROM sentio_local_proc.orders AS o
-		INNER JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
-		GROUP BY p.category WITH TOTALS ORDER BY p.category`, 2) {
-			allPassed = false
-		}
-
-		// 33: 三源 UNION ALL
-		log.Printf("%s [33] 三源 UNION ALL", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "33_cross_multi_table",
-			`SELECT * FROM (
-			SELECT 'local_data' AS src, toString(id) AS key, name AS val FROM sentio_local_proc.local_data
-			UNION ALL
-			SELECT 'orders' AS src, toString(order_id) AS key, customer AS val FROM sentio_local_proc.orders
-			UNION ALL
-			SELECT 'products' AS src, toString(product_id) AS key, product_name AS val FROM sentio_remote_proc.products
-		) ORDER BY src, key`, 13) {
-			allPassed = false
-		}
-
-		// 34: CTE 跨节点
-		log.Printf("%s [34] CTE 跨节点", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "34_cross_cte",
-			`WITH
-			expensive AS (SELECT product_id, product_name, price FROM sentio_remote_proc.products WHERE price > 100),
-			big_orders AS (SELECT order_id, customer, product_id, amount FROM sentio_local_proc.orders WHERE amount > 50)
-		SELECT b.order_id, b.customer, e.product_name, e.price, b.amount
-		FROM big_orders AS b
-		INNER JOIN expensive AS e ON b.product_id = e.product_id
-		ORDER BY b.order_id`, 2) {
-			allPassed = false
-		}
-
-		// 35: 远程 SELF JOIN
-		log.Printf("%s [35] 远程 SELF JOIN", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "35_remote_self_join",
-			`SELECT p1.product_id, p1.product_name, p2.product_name AS related_name
-		FROM sentio_remote_proc.products AS p1
-		INNER JOIN sentio_remote_proc.products AS p2 ON p1.category = p2.category AND p1.product_id < p2.product_id
-		ORDER BY p1.product_id, p2.product_id`, 1) {
-			allPassed = false
-		}
-
-		// 36: 远程 UNION ALL
-		log.Printf("%s [36] 远程 UNION ALL", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "36_remote_union",
-			`SELECT * FROM (
-			SELECT product_id AS id, product_name AS name, 'cheap' AS tag FROM sentio_remote_proc.products WHERE price < 50
-			UNION ALL
-			SELECT product_id AS id, product_name AS name, 'expensive' AS tag FROM sentio_remote_proc.products WHERE price >= 100
-		) ORDER BY id`, 1) {
-			allPassed = false
-		}
-
-		// 37: 远程标量子查询
-		log.Printf("%s [37] 远程标量子查询", prefix)
-		if !runQueryMinRowCountCtx(c, ctx, "37_remote_subquery",
-			`SELECT product_id, product_name, price
-		FROM sentio_remote_proc.products
-		WHERE price > (SELECT avg(price) FROM sentio_remote_proc.products)
-		ORDER BY product_id`, 1) {
-			allPassed = false
-		}
-
-		// 38: __route__ 本地路由
-		log.Printf("%s [38] __route__=local_proc", prefix)
-		if !runQueryRowCountCtx(c, ctx, "38_route_local", "SELECT '__route__=local_proc', count() FROM sentio_local_proc.local_data", 1) {
-			allPassed = false
-		}
-
-		// 39: arrayJoin
-		log.Printf("%s [39] arrayJoin 展开数组", prefix)
-		if !runQueryRowCountCtx(c, ctx, "39_array_join",
-			`SELECT order_id, customer, arrayJoin([1, 2, 3]) AS arr_val
-		FROM sentio_local_proc.orders
-		WHERE order_id = 1001
-		ORDER BY arr_val`, 3) {
-			allPassed = false
-		}
-
-		// 40: GLOBAL IN
-		log.Printf("%s [40] GLOBAL IN 跨节点子查询", prefix)
-		if !runQueryRowCountCtx(c, ctx, "40_global_in",
-			`SELECT order_id, customer, product_id, amount
-		FROM sentio_local_proc.orders
-		WHERE product_id GLOBAL IN (
-			SELECT product_id FROM sentio_remote_proc.products WHERE category = 'Electronics'
-		) ORDER BY order_id`, 3) {
-			allPassed = false
+			if strings.HasPrefix(tc.Name, "E") {
+				// E* 类错误用例
+				switch {
+				case tc.Name == "E08_concurrent":
+					// E08 需要并发执行，跳过普通流程
+					log.Printf("  ⏭️  跳过 (需要特殊并发执行)")
+				case tc.Name == "E06_string_literal" || tc.Name == "E07_comment":
+					// E06/E07 预期成功
+					if !runExpectSuccess(c, ctx, tc.Name, tc.Query) {
+						allPassed = false
+					}
+				default:
+					// E01-E05 等预期错误
+					if !runExpectError(c, ctx, tc.Name, tc.Query) {
+						allPassed = false
+					}
+				}
+			} else if expected, ok := expectedResults[tc.Name]; ok && expected != "" {
+				// 有预期结果 → 对比输出
+				if !runQueryCompareResultCtx(c, ctx, tc.Name, tc.Query, expected) {
+					allPassed = false
+				}
+			} else {
+				// 无预期结果 → 仅检查执行成功
+				if !runExpectSuccess(c, ctx, tc.Name, tc.Query) {
+					allPassed = false
+				}
+			}
 		}
 
 		c.Close()
-	} // end dual-mode loop
+	}
 
-	// ========== 错误用例 (E01-E08) — 仅在连接级签名下执行一次 ==========
+	// ========== 特殊测试: E08 并发 + 连接池压力 (仅执行一次) ==========
 	log.Println()
-	log.Println("--- 错误用例测试 (E01-E08) ---")
+	log.Println("--- 并发 & 压力测试 ---")
 	log.Println()
-
-	ec := openConnection(signFunc)
-	if ec == nil {
-		log.Println("  ❌ 错误用例: 打开连接失败")
-		return false
-	}
-	defer ec.Close()
-	ectx := context.Background()
-
-	// E01: 不存在的 processor_id
-	log.Println("[E01] unknown processor")
-	if !runExpectError(ec, ectx, "E01_unknown_proc", "SELECT * FROM sentio_unknown_proc.orders") {
-		allPassed = false
-	}
-
-	// E02: 不存在的表名
-	log.Println("[E02] nonexistent table")
-	if !runExpectError(ec, ectx, "E02_nonexistent_table", "SELECT * FROM sentio_local_proc.nonexistent_table") {
-		allPassed = false
-	}
-
-	// E06: 字符串中的虚拟表名不应被重写
-	log.Println("[E06] string literal 不被重写")
-	if !runExpectSuccess(ec, ectx, "E06_string_literal", "SELECT 'sentio_local_proc.orders' AS table_name") {
-		allPassed = false
-	}
-
-	// E07: 注释中的虚拟表名不应被重写
-	log.Println("[E07] comment 不被重写")
-	if !runExpectSuccess(ec, ectx, "E07_comment", "SELECT 1 -- FROM sentio_local_proc.orders") {
-		allPassed = false
-	}
 
 	// E08: 并发查询 (5 goroutine)
 	log.Println("[E08] 并发查询 Rewriter 线程安全")
@@ -814,6 +582,116 @@ func runSQLTests(conn clickhouse.Conn, signFunc func(string) (string, error)) bo
 	}
 
 	return allPassed
+}
+
+// formatValue converts a scanned column value to its CLI-compatible string representation.
+// Handles time.Time formatting, Nullable pointer dereferencing, and nil values.
+func formatValue(v interface{}) string {
+	if v == nil {
+		return ""
+	}
+	rv := reflect.ValueOf(v)
+	// Dereference pointers (Nullable columns like *float64, *string, etc.)
+	if rv.Kind() == reflect.Ptr {
+		if rv.IsNil() {
+			return ""
+		}
+		return formatValue(rv.Elem().Interface())
+	}
+	// Format time.Time as date-only (matching clickhouse client output)
+	if t, ok := v.(time.Time); ok {
+		if t.Hour() == 0 && t.Minute() == 0 && t.Second() == 0 && t.Nanosecond() == 0 {
+			return t.Format("2006-01-02")
+		}
+		return t.Format("2006-01-02 15:04:05")
+	}
+	return fmt.Sprintf("%v", v)
+}
+
+// runQueryCompareResultCtx executes a query and compares tab-separated row output against expected.
+func runQueryCompareResultCtx(conn clickhouse.Conn, ctx context.Context, testName, query, expected string) bool {
+	rows, err := conn.Query(ctx, query)
+	if err != nil {
+		log.Printf("  ❌ %s 查询失败: %v", testName, err)
+		return false
+	}
+	defer rows.Close()
+
+	var outputLines []string
+	var cachedScanTypes []reflect.Type
+	for rows.Next() {
+		if cachedScanTypes == nil {
+			colTypes := rows.ColumnTypes()
+			cachedScanTypes = make([]reflect.Type, len(colTypes))
+			for i, ct := range colTypes {
+				cachedScanTypes[i] = ct.ScanType()
+			}
+		}
+		vals := make([]interface{}, len(cachedScanTypes))
+		for i, st := range cachedScanTypes {
+			vals[i] = reflect.New(st).Interface()
+		}
+		if err := rows.Scan(vals...); err != nil {
+			log.Printf("  ❌ %s 扫描行失败: %v", testName, err)
+			return false
+		}
+		parts := make([]string, len(vals))
+		for i, v := range vals {
+			parts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
+		}
+		// Trim trailing empty columns (matches CLI behavior for NULL columns)
+		for len(parts) > 0 && parts[len(parts)-1] == "" {
+			parts = parts[:len(parts)-1]
+		}
+		outputLines = append(outputLines, strings.Join(parts, "\t"))
+	}
+
+	// Handle WITH TOTALS: read totals row via rows.Totals() and append with empty line separator
+	if cachedScanTypes != nil {
+		totalsVals := make([]interface{}, len(cachedScanTypes))
+		for i, st := range cachedScanTypes {
+			totalsVals[i] = reflect.New(st).Interface()
+		}
+		if err := rows.Totals(totalsVals...); err == nil {
+			totalsParts := make([]string, len(totalsVals))
+			for i, v := range totalsVals {
+				totalsParts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
+			}
+			// Only append if at least one totals value is non-empty
+			hasValue := false
+			for _, p := range totalsParts {
+				if p != "" && p != "0" {
+					hasValue = true
+					break
+				}
+			}
+			if hasValue {
+				outputLines = append(outputLines, "")
+				for len(totalsParts) > 0 && totalsParts[len(totalsParts)-1] == "" {
+					totalsParts = totalsParts[:len(totalsParts)-1]
+				}
+				outputLines = append(outputLines, strings.Join(totalsParts, "\t"))
+			}
+		}
+	}
+
+	actual := strings.Join(outputLines, "\n")
+	if actual == expected {
+		log.Printf("  ✅ %s PASS (%d 行)", testName, len(outputLines))
+		return true
+	}
+
+	log.Printf("  ❌ %s FAIL", testName)
+	log.Printf("   ┌─ Expected ─")
+	for _, line := range strings.Split(expected, "\n") {
+		log.Printf("   │ %s", line)
+	}
+	log.Printf("   ├─ Actual ─")
+	for _, line := range strings.Split(actual, "\n") {
+		log.Printf("   │ %s", line)
+	}
+	log.Printf("   └────────────────────────────────────────")
+	return false
 }
 
 // ========== Phase 3: Auth Invalid ==========
