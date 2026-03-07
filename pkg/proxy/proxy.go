@@ -1530,16 +1530,17 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				}
 			}
 
-			// P2-1: Strip auth token settings after signature verification; do not send to ClickHouse Server
-			// In streaming mode, remove token after decode; it will naturally be excluded during encode
-			eq.Settings = stripAuthTokenSettings(eq.Settings)
-			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
-
 			// Check per-query skip_rewrite flag from client settings
+			// Must be checked BEFORE stripAuthTokenSettings, which removes proxy-specific keys
 			skipRewrite := hasSkipRewriteFlag(eq.Settings, eq.OldSettings)
 			if skipRewrite {
 				log.Infof("[conn %d] streaming: skip_rewrite flag detected, skipping SQL rewrite", id)
 			}
+
+			// P2-1: Strip auth token settings after signature verification; do not send to ClickHouse Server
+			// In streaming mode, remove token after decode; it will naturally be excluded during encode
+			eq.Settings = stripAuthTokenSettings(eq.Settings)
+			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
 
 			// SQL rewriting (skip for __route__ connections and per-query skip_rewrite flag)
 			if p.rewriter != nil && p.cfg.RewriterEnabled && !isRoute && !skipRewrite {
@@ -1548,6 +1549,9 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
 				if err != nil {
 					log.Warnf("[conn %d] streaming: SQL rewrite failed: %v", id, err)
+					// Send Exception to client and stop processing
+					sendExceptionToClient(clientConn, 62, "UNKNOWN_TABLE", fmt.Sprintf("SQL rewrite failed: %v", err))
+					return
 				} else if rewrittenSQL != eq.Body {
 					log.Infof("[conn %d] streaming rewrite: %q -> %q", id, eq.Body, rewrittenSQL)
 					eq.Body = rewrittenSQL
@@ -1945,6 +1949,21 @@ func isTimeout(err error) bool {
 	return false
 }
 
+// sendExceptionToClient sends a ClickHouse Exception packet to the client.
+// This is used when the proxy itself detects an error (e.g., SQL rewrite failure)
+// and needs to inform the client before closing the connection.
+// Format: [ServerCodeException(2)] + [code: Int32] + [name: String] + [message: String] + [stack: String] + [nested: Bool]
+func sendExceptionToClient(conn net.Conn, code int32, name string, message string) {
+	buf := &proto.Buffer{}
+	proto.ServerCodeException.Encode(buf)
+	buf.PutInt32(code)
+	buf.PutString(name)
+	buf.PutString(message)
+	buf.PutString("")  // stack trace (empty)
+	buf.PutBool(false) // nested
+	conn.Write(buf.Buf)
+}
+
 // SkipRewriteSettingKey is the setting key used to skip SQL rewrite for a specific query.
 // When a client sets this to "1" in query settings, the proxy will bypass SQL rewriting for that query.
 const SkipRewriteSettingKey = "SQL_skip_rewrite"
@@ -1988,8 +2007,12 @@ func stripAuthTokenOldSettings(settings []OldSetting) []OldSetting {
 // Returns true if "SQL_skip_rewrite" or "skip_rewrite" is set to "1" (or uint64 value 1).
 func hasSkipRewriteFlag(settings []proto.Setting, oldSettings []OldSetting) bool {
 	for _, s := range settings {
-		if (s.Key == SkipRewriteSettingKey || s.Key == "skip_rewrite") && s.Value == "1" {
-			return true
+		if s.Key == SkipRewriteSettingKey || s.Key == "skip_rewrite" {
+			// clickhouse-go CustomSetting wraps string values in single quotes (e.g., '1')
+			v := strings.Trim(s.Value, "'")
+			if v == "1" {
+				return true
+			}
 		}
 	}
 	for _, s := range oldSettings {

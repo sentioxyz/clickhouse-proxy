@@ -102,6 +102,20 @@ func TestHasSkipRewriteFlag(t *testing.T) {
 			},
 			want: false,
 		},
+		{
+			name: "SQL_skip_rewrite='1' quoted (clickhouse-go CustomSetting)",
+			settings: []proto.Setting{
+				{Key: "SQL_skip_rewrite", Value: "'1'"},
+			},
+			want: true,
+		},
+		{
+			name: "SQL_skip_rewrite='0' quoted (not enabled)",
+			settings: []proto.Setting{
+				{Key: "SQL_skip_rewrite", Value: "'0'"},
+			},
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {

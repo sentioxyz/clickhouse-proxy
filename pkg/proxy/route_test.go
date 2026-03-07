@@ -246,7 +246,10 @@ func TestBuildRewriteMappingsRouteEncoding(t *testing.T) {
 		{FullMatch: "sentio_coinbase.transfer", ProcessorId: "coinbase", TableName: "transfer"},
 	}
 
-	_, remoteMap := rewriter.buildRewriteMappings(nil, tables, "default", "password")
+	_, remoteMap, err := rewriter.buildRewriteMappings(nil, tables, "default", "password")
+	if err != nil {
+		t.Fatalf("buildRewriteMappings failed: %v", err)
+	}
 
 	if len(remoteMap) != 1 {
 		t.Fatalf("expected 1 remote table, got %d", len(remoteMap))
