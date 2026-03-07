@@ -130,11 +130,12 @@ func (s *packetStats) snapshot() map[string]int64 {
 }
 
 type Proxy struct {
-	cfg       Config
-	stats     *packetStats
-	validator Validator
-	rewriter  Rewriter
-	observer  *MetricsObserver
+	cfg         Config
+	stats       *packetStats
+	validator   Validator
+	rewriter    Rewriter
+	observer    *MetricsObserver
+	relaySigner *RelaySigner // Signs relay JWS tokens for __route__ connections
 	// compressedBufPool removed: proto.Reader.ReadRaw always returns a newly allocated slice,
 	// so data cannot be read into a pool-obtained buffer, making the pool ineffective.
 	bufferPool sync.Pool // Reuse proto.Buffer to reduce allocations in the packet loop
@@ -154,6 +155,11 @@ func NewProxy(cfg Config, v Validator, r Rewriter) *Proxy {
 		rewriter:  r,
 		observer:  NewMetricsObserver(),
 	}
+}
+
+// SetRelaySigner sets the relay JWS signer for proxy-to-proxy token propagation.
+func (p *Proxy) SetRelaySigner(s *RelaySigner) {
+	p.relaySigner = s
 }
 
 // getBuffer retrieves a proto.Buffer from bufferPool and resets its content.
@@ -1414,19 +1420,29 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		log.Infof("[conn %d] streaming: addendum forwarded (quota_key=%q, clientSendChunked=%q, clientRecvChunked=%q)", id, quotaKey, clientSendChunked, clientRecvChunked)
 	}
 
-	// ========== Server-to-server raw copy fallback ==========
-	// For __route__ connections AND ClickHouse server-to-server connections,
-	// skip the structured packet loop and fall back to raw bidirectional copy.
-	// The streaming parser's compressed data handling has issues with server-to-server traffic.
+	// ========== __route__ connection: inject relay JWS token ==========
+	// IMPORTANT: isRoute must be checked BEFORE isServerClient because __route__
+	// connections come from ClickHouse (hello.Name="ClickHouse server"), which would
+	// match isServerClient and incorrectly bypass relay token injection.
+	if isRoute {
+		log.Infof("[conn %d] __route__ connection: handshake done, entering relay token injection mode", id)
+		p.handleRouteWithRelay(id, br, chReader, clientConn, upstreamConn, revision)
+		return
+	}
+
+	// ========== Server-to-server connection handling ==========
 	// ClickHouse server clients identify themselves as "ClickHouse server" in Hello.
 	isServerClient := strings.Contains(hello.Name, "server")
-	if isRoute || isServerClient {
-		if isRoute {
-			log.Infof("[conn %d] __route__ connection: handshake done, switching to raw copy mode", id)
+	if isServerClient {
+		if p.validator != nil {
+			// Auth enabled: intercept Query to validate relay JWS token, then raw copy
+			log.Infof("[conn %d] ClickHouse server client with auth (%s): validating relay token", id, hello.Name)
+			p.handleServerClientWithAuth(id, br, chReader, clientConn, upstreamConn, revision)
 		} else {
+			// No auth: straight raw copy
 			log.Infof("[conn %d] ClickHouse server client detected (%s): switching to raw copy mode", id, hello.Name)
+			p.fallbackRawCopy(id, br, clientConn, upstreamConn)
 		}
-		p.fallbackRawCopy(id, br, clientConn, upstreamConn)
 		return
 	}
 
@@ -1918,6 +1934,214 @@ func (p *Proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn,
 			return
 		}
 	}
+}
+
+// handleRouteWithRelay handles __route__ connections with relay JWS token injection.
+// ClickHouse may send pre-Query packets (e.g. TablesStatusRequest) before the actual
+// Query. This method starts upstream→client copy in a goroutine, then loops on the
+// client→upstream direction to intercept the Query packet for token injection.
+func (p *Proxy) handleRouteWithRelay(id int64, br *bufio.Reader, chReader *proto.Reader,
+	clientConn, upstreamConn net.Conn, revision int) {
+
+	// If no relay signer configured, just do raw copy (same as before)
+	if p.relaySigner == nil {
+		log.Infof("[conn %d] __route__: no relay signer, falling back to raw copy", id)
+		p.fallbackRawCopy(id, br, clientConn, upstreamConn)
+		return
+	}
+
+	// Start upstream → client copy in background goroutine.
+	// This handles responses to TablesStatusRequest and eventual query results.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		io.Copy(clientConn, upstreamConn)
+	}()
+
+	// Loop on client → upstream direction to intercept Query packet
+	queryInjected := false
+	for !queryInjected {
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+
+		codeByte, err := br.ReadByte()
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !isTimeout(err) {
+				log.Infof("[conn %d] __route__: read packet type error: %v", id, err)
+			}
+			upstreamConn.Close()
+			<-done
+			return
+		}
+		code := proto.ClientCode(codeByte)
+
+		if code == proto.ClientCodeQuery {
+			// Found the Query packet — decode, inject relay token, forward
+			eq, err := decodeQueryCustom(chReader, revision)
+			if err != nil {
+				log.Warnf("[conn %d] __route__: Query decode error: %v, forwarding raw", id, err)
+				upstreamConn.Write([]byte{codeByte})
+				break
+			}
+
+			// Sign and inject relay JWS token
+			token, err := p.relaySigner.SignToken(eq.Body)
+			if err != nil {
+				log.Warnf("[conn %d] __route__: relay token signing failed: %v, forwarding without token", id, err)
+			} else {
+				eq.Settings = append(eq.Settings, proto.Setting{
+					Key:   AuthTokenSettingKey,
+					Value: token,
+				})
+				log.Infof("[conn %d] __route__: relay JWS token injected (signer=%s, sql_len=%d)",
+					id, p.relaySigner.Address(), len(eq.Body))
+			}
+
+			// Re-encode and forward the modified Query
+			qbuf := p.getBuffer()
+			encodeQueryCustom(qbuf, eq, revision)
+			if _, err := upstreamConn.Write(qbuf.Buf); err != nil {
+				p.putBuffer(qbuf)
+				log.Infof("[conn %d] __route__: write query error: %v", id, err)
+				upstreamConn.Close()
+				<-done
+				return
+			}
+			p.putBuffer(qbuf)
+			queryInjected = true
+		} else {
+			// Non-Query packet (TablesStatusRequest, Ping, etc.) — forward as-is
+			log.Infof("[conn %d] __route__: forwarding pre-query packet code=%d (%s)", id, codeByte, code.String())
+			if _, err := upstreamConn.Write([]byte{codeByte}); err != nil {
+				upstreamConn.Close()
+				<-done
+				return
+			}
+			// Forward any remaining buffered data (the packet body)
+			if buffered := br.Buffered(); buffered > 0 {
+				buf := make([]byte, buffered)
+				n, _ := br.Read(buf)
+				if n > 0 {
+					if _, err := upstreamConn.Write(buf[:n]); err != nil {
+						upstreamConn.Close()
+						<-done
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// After Query injection, pipe remaining client → upstream traffic
+	io.Copy(upstreamConn, br)
+	upstreamConn.Close()
+	<-done
+}
+
+// handleServerClientWithAuth handles ClickHouse server client connections when auth is enabled.
+// It intercepts the Query packet to validate the relay JWS token, strips auth settings,
+// then falls back to raw copy. Pre-Query packets (TablesStatusRequest) are forwarded as-is.
+func (p *Proxy) handleServerClientWithAuth(id int64, br *bufio.Reader, chReader *proto.Reader,
+	clientConn, upstreamConn net.Conn, revision int) {
+
+	// Start upstream → client copy in background goroutine
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		io.Copy(clientConn, upstreamConn)
+	}()
+
+	ctx := context.Background()
+	queryValidated := false
+
+	for !queryValidated {
+		if p.cfg.IdleTimeout.Duration > 0 {
+			_ = clientConn.SetReadDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
+		}
+
+		codeByte, err := br.ReadByte()
+		if err != nil {
+			if !errors.Is(err, io.EOF) && !isTimeout(err) {
+				log.Infof("[conn %d] server-auth: read packet type error: %v", id, err)
+			}
+			upstreamConn.Close()
+			<-done
+			return
+		}
+		code := proto.ClientCode(codeByte)
+
+		if code == proto.ClientCodeQuery {
+			// Decode the Query packet
+			eq, err := decodeQueryCustom(chReader, revision)
+			if err != nil {
+				log.Warnf("[conn %d] server-auth: Query decode error: %v, rejecting", id, err)
+				upstreamConn.Close()
+				<-done
+				return
+			}
+
+			// Validate JWS token
+			settingsMap := make(map[string]string, len(eq.Settings))
+			for _, s := range eq.Settings {
+				settingsMap[s.Key] = s.Value
+			}
+			meta := QueryMeta{
+				ConnID:       id,
+				ClientAddr:   clientConn.RemoteAddr().String(),
+				UpstreamAddr: p.cfg.Upstream,
+				SQL:          eq.Body,
+				Settings:     settingsMap,
+			}
+			if err := p.validator.ValidateQuery(ctx, meta); err != nil {
+				log.Infof("[conn %d] server-auth: relay token rejected: %v", id, err)
+				upstreamConn.Close()
+				<-done
+				return
+			}
+			log.Infof("[conn %d] server-auth: relay token validated, sql_len=%d", id, len(eq.Body))
+
+			// Strip auth token settings before forwarding to ClickHouse
+			eq.Settings = stripAuthTokenSettings(eq.Settings)
+
+			// Re-encode and forward
+			qbuf := p.getBuffer()
+			encodeQueryCustom(qbuf, eq, revision)
+			if _, err := upstreamConn.Write(qbuf.Buf); err != nil {
+				p.putBuffer(qbuf)
+				log.Infof("[conn %d] server-auth: write query error: %v", id, err)
+				upstreamConn.Close()
+				<-done
+				return
+			}
+			p.putBuffer(qbuf)
+			queryValidated = true
+		} else {
+			// Non-Query packet — forward as-is
+			log.Infof("[conn %d] server-auth: forwarding pre-query packet code=%d (%s)", id, codeByte, code.String())
+			if _, err := upstreamConn.Write([]byte{codeByte}); err != nil {
+				upstreamConn.Close()
+				<-done
+				return
+			}
+			if buffered := br.Buffered(); buffered > 0 {
+				buf := make([]byte, buffered)
+				n, _ := br.Read(buf)
+				if n > 0 {
+					if _, err := upstreamConn.Write(buf[:n]); err != nil {
+						upstreamConn.Close()
+						<-done
+						return
+					}
+				}
+			}
+		}
+	}
+
+	// After validation, pipe remaining client → upstream traffic
+	io.Copy(upstreamConn, br)
+	upstreamConn.Close()
+	<-done
 }
 
 func (p *Proxy) logPacket(id int64, clientAddr string, pktType string, chunk []byte) {
