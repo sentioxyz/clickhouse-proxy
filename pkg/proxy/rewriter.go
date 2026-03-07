@@ -168,7 +168,10 @@ func (r *SentioNetworkRewriter) Rewrite(ctx context.Context, sql string, user st
 
 	// Build rewrite mapping from NetworkState + SentioNetworkTableRewriter
 	// user/password are from client Hello, used for remote() function calls
-	tableWithDatabaseMap, remoteTableMap := r.buildRewriteMappings(ctx, tables, user, password)
+	tableWithDatabaseMap, remoteTableMap, err := r.buildRewriteMappings(ctx, tables, user, password)
+	if err != nil {
+		return "", err
+	}
 
 	// If no tables need rewriting, return original SQL
 	if len(tableWithDatabaseMap) == 0 && len(remoteTableMap) == 0 {
@@ -255,7 +258,7 @@ func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string
 
 // buildRewriteMappings builds the local/remote table mappings from NetworkState and SentioNetworkTableRewriter.
 // user and password are from client Hello, used for remote() function calls.
-func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables []ParsedTable, user string, password string) (map[string]TableWithDatabase, map[string]RemoteTable) {
+func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables []ParsedTable, user string, password string) (map[string]TableWithDatabase, map[string]RemoteTable, error) {
 	tableWithDatabaseMap := make(map[string]TableWithDatabase)
 	remoteTableMap := make(map[string]RemoteTable)
 
@@ -272,8 +275,7 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 			// Retry with "sentio_" prefix
 			allocations, ok = r.networkState.GetProcessorAllocation("sentio_" + processorId)
 			if !ok || len(allocations) == 0 {
-				log.Warnf("processor allocation not found for processor_id=%s (also tried sentio_%s), skipping rewrite", processorId, processorId)
-				continue
+				return nil, nil, fmt.Errorf("processor allocation not found for processor_id=%s (also tried sentio_%s)", processorId, processorId)
 			}
 		}
 
@@ -283,8 +285,7 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		// Get Indexer info
 		indexerInfo, ok := r.networkState.GetIndexerInfo(allocation.IndexerId)
 		if !ok {
-			log.Warnf("indexer info not found for indexer_id=%d, skipping rewrite", allocation.IndexerId)
-			continue
+			return nil, nil, fmt.Errorf("indexer info not found for indexer_id=%d (processor_id=%s)", allocation.IndexerId, processorId)
 		}
 
 		// Get Processor info
@@ -297,8 +298,7 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		// Create SentioNetworkTableRewriter for this processor
 		tableRewriter, err := r.tableRewriterFactory(ctx, processorId, indexerInfo, processorInfo)
 		if err != nil {
-			log.Warnf("failed to create table rewriter for processor_id=%s: %v, skipping", processorId, err)
-			continue
+			return nil, nil, fmt.Errorf("failed to create table rewriter for processor_id=%s: %w", processorId, err)
 		}
 		database := tableRewriter.Database()
 
@@ -310,12 +310,10 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 			// Use SentioNetworkTableRewriter to resolve physical table name
 			physicalTable, found, err := tableRewriter.RawTable(table.TableName)
 			if err != nil {
-				log.Warnf("table rewriter RawTable failed for %s: %v, skipping", table.FullMatch, err)
-				continue
+				return nil, nil, fmt.Errorf("table rewriter RawTable failed for %s: %w", table.FullMatch, err)
 			}
 			if !found {
-				log.Warnf("table %s not found in rewriter mappings for processor_id=%s, skipping", table.FullMatch, processorId)
-				continue
+				return nil, nil, fmt.Errorf("table %s not found in rewriter mappings for processor_id=%s", table.FullMatch, processorId)
 			}
 
 			if isLocal {
@@ -344,7 +342,7 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		}
 	}
 
-	return tableWithDatabaseMap, remoteTableMap
+	return tableWithDatabaseMap, remoteTableMap, nil
 }
 
 // parseSentioNetworkTables parses Sentio-Network mode table names in SQL

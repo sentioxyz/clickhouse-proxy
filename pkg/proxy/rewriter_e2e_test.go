@@ -213,7 +213,7 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 
 	// 创建 rewriter
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -287,7 +287,7 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -351,7 +351,7 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -392,7 +392,7 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -448,7 +448,7 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -503,7 +503,7 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -522,8 +522,8 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 		{
 			name:           "unknown processor_id",
 			inputSQL:       "SELECT * FROM sentio_unknown_processor.table",
-			expectError:    false, // 应该不会报错，只是不重写
-			expectNoChange: true,  // 因为找不到 processor，保持原样
+			expectError:    true, // processor 找不到时应返回错误
+			expectNoChange: false,
 		},
 		{
 			name:           "normal table (not sentio pattern)",
@@ -601,7 +601,7 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -643,7 +643,7 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -726,7 +726,7 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 
 	// 初始状态为空
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -737,10 +737,12 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	ctx := context.Background()
 	sql := "SELECT * FROM sentio_newprocessor.events"
 
-	// 第一次：processor 不存在，应返回原 SQL
-	result1, _ := rewriter.Rewrite(ctx, sql, "default", "test123")
-	if result1 != sql {
-		t.Log("First rewrite (processor not found): returned original SQL as expected")
+	// 第一次：processor 不存在，应返回错误
+	_, err = rewriter.Rewrite(ctx, sql, "default", "test123")
+	if err == nil {
+		t.Error("expected error when processor not found, but got nil")
+	} else {
+		t.Logf("First rewrite (processor not found): got expected error: %v", err)
 	}
 
 	// 动态添加 processor
@@ -768,7 +770,7 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -802,7 +804,7 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -859,7 +861,7 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -1009,7 +1011,7 @@ func BenchmarkRewrite(b *testing.B) {
 	state := setupTestNetworkState()
 
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled: true,
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {

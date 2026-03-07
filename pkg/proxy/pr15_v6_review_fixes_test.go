@@ -570,22 +570,22 @@ func TestMergeTreeReadTaskResponseResumesStreaming(t *testing.T) {
 
 func TestAuthTokenKeysMap(t *testing.T) {
 	t.Run("x_auth_token 在 map 中", func(t *testing.T) {
-		if !authTokenKeys["x_auth_token"] {
-			t.Error("x_auth_token should be in authTokenKeys")
+		if !proxySettingKeys["x_auth_token"] {
+			t.Error("x_auth_token should be in proxySettingKeys")
 		}
 	})
 
 	t.Run("SQL_x_auth_token 在 map 中", func(t *testing.T) {
-		if !authTokenKeys["SQL_x_auth_token"] {
-			t.Error("SQL_x_auth_token should be in authTokenKeys")
+		if !proxySettingKeys["SQL_x_auth_token"] {
+			t.Error("SQL_x_auth_token should be in proxySettingKeys")
 		}
 	})
 
 	t.Run("普通 setting 不在 map 中", func(t *testing.T) {
 		ordinaryKeys := []string{"max_threads", "database", "max_memory_usage", "use_uncompressed_cache"}
 		for _, key := range ordinaryKeys {
-			if authTokenKeys[key] {
-				t.Errorf("%q should not be in authTokenKeys", key)
+			if proxySettingKeys[key] {
+				t.Errorf("%q should not be in proxySettingKeys", key)
 			}
 		}
 	})
