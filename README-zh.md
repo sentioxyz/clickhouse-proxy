@@ -406,6 +406,22 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 }
 ```
 
+### 按查询跳过重写
+
+当 SQL 重写全局开启时，客户端可以通过 ClickHouse 自定义设置 `SQL_skip_rewrite` 在 **单条查询** 级别跳过重写。这对于 `INSERT` 等不需要重写的语句尤其有用。
+
+设置 `SQL_skip_rewrite=1` 后，该查询将直接透传到上游 ClickHouse，不进行任何表名重写。
+
+```go
+// Go 客户端示例：INSERT 时跳过重写
+ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
+    "SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
+}))
+conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
+```
+
+> **注意**：`SQL_skip_rewrite` 是 Proxy 自定义设置，会在转发前自动剥离，不会发送到 ClickHouse Server。
+
 ---
 
 ## 测试

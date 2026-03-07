@@ -405,7 +405,19 @@ The proxy supports **Sentio Network SQL rewriting**, transforming virtual table 
 }
 ```
 
----
+### Per-Query Skip Rewrite
+
+When SQL rewriting is globally enabled, clients can skip rewriting on a **per-query basis** by setting the custom ClickHouse setting `SQL_skip_rewrite=1`. This is especially useful for `INSERT` statements that should not be rewritten.
+
+```go
+// Go client example: skip rewriting for INSERT
+ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
+    "SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
+}))
+conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
+```
+
+> **Note**: `SQL_skip_rewrite` is a proxy-only custom setting. It is automatically stripped before forwarding to the upstream ClickHouse server.
 
 ## Testing
 

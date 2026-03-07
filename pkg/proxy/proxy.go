@@ -1535,8 +1535,14 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			eq.Settings = stripAuthTokenSettings(eq.Settings)
 			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
 
-			// SQL rewriting (skip for __route__ connections — they are server-to-server passthrough)
-			if p.rewriter != nil && p.cfg.RewriterEnabled && !isRoute {
+			// Check per-query skip_rewrite flag from client settings
+			skipRewrite := hasSkipRewriteFlag(eq.Settings, eq.OldSettings)
+			if skipRewrite {
+				log.Infof("[conn %d] streaming: skip_rewrite flag detected, skipping SQL rewrite", id)
+			}
+
+			// SQL rewriting (skip for __route__ connections and per-query skip_rewrite flag)
+			if p.rewriter != nil && p.cfg.RewriterEnabled && !isRoute && !skipRewrite {
 				rewriteStart := time.Now()
 				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body, clientUser, clientPassword)
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
@@ -1939,10 +1945,17 @@ func isTimeout(err error) bool {
 	return false
 }
 
-// authTokenKeys is the list of auth token setting keys to strip in streaming mode.
-var authTokenKeys = map[string]bool{
-	"x_auth_token":     true,
-	"SQL_x_auth_token": true,
+// SkipRewriteSettingKey is the setting key used to skip SQL rewrite for a specific query.
+// When a client sets this to "1" in query settings, the proxy will bypass SQL rewriting for that query.
+const SkipRewriteSettingKey = "SQL_skip_rewrite"
+
+// proxySettingKeys is the list of proxy-specific setting keys to strip in streaming mode.
+// These settings are consumed by the proxy and must not be forwarded to ClickHouse Server.
+var proxySettingKeys = map[string]bool{
+	"x_auth_token":        true,
+	"SQL_x_auth_token":    true,
+	SkipRewriteSettingKey: true,
+	"skip_rewrite":        true,
 }
 
 // stripAuthTokenSettings removes auth token related settings from new-format Settings.
@@ -1950,7 +1963,7 @@ var authTokenKeys = map[string]bool{
 func stripAuthTokenSettings(settings []proto.Setting) []proto.Setting {
 	n := 0
 	for _, s := range settings {
-		if !authTokenKeys[s.Key] {
+		if !proxySettingKeys[s.Key] {
 			settings[n] = s
 			n++
 		}
@@ -1962,12 +1975,29 @@ func stripAuthTokenSettings(settings []proto.Setting) []proto.Setting {
 func stripAuthTokenOldSettings(settings []OldSetting) []OldSetting {
 	n := 0
 	for _, s := range settings {
-		if !authTokenKeys[s.Key] {
+		if !proxySettingKeys[s.Key] {
 			settings[n] = s
 			n++
 		}
 	}
 	return settings[:n]
+}
+
+// hasSkipRewriteFlag checks if the skip_rewrite flag is set in query settings.
+// Supports both new-format (string) and old-format (uint64) settings.
+// Returns true if "SQL_skip_rewrite" or "skip_rewrite" is set to "1" (or uint64 value 1).
+func hasSkipRewriteFlag(settings []proto.Setting, oldSettings []OldSetting) bool {
+	for _, s := range settings {
+		if (s.Key == SkipRewriteSettingKey || s.Key == "skip_rewrite") && s.Value == "1" {
+			return true
+		}
+	}
+	for _, s := range oldSettings {
+		if (s.Key == SkipRewriteSettingKey || s.Key == "skip_rewrite") && s.Value == 1 {
+			return true
+		}
+	}
+	return false
 }
 
 // replaceToken replaces all occurrences of a length-prefixed key with another key,
