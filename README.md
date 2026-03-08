@@ -19,9 +19,6 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 - [Authentication](#authentication)
   - [Relay Token Propagation](#relay-token-propagation)
 - [SQL Rewriter](#sql-rewriter)
-- [Architecture](#architecture)
-  - [Dynamic Upstream Routing](#dynamic-upstream-routing)
-  - [Chunked Protocol Support](#chunked-protocol-support)
 - [Testing](#testing)
 - [Metrics](#metrics)
 
@@ -378,36 +375,7 @@ conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
 
 > **Note**: `SQL_skip_rewrite` is a proxy-only custom setting. It is automatically stripped before forwarding to the upstream ClickHouse server.
 
----
 
-## Architecture
-
-### Dynamic Upstream Routing
-
-The proxy supports **dynamic upstream routing** via `__route__` encoded user parameters, enabling ClickHouse distributed queries across a multi-proxy cluster.
-
-When ClickHouse generates `remote()` function calls during SQL rewriting, the user parameter is encoded as:
-
-```
-__route__<target_proxy_addr>__<real_user>
-```
-
-**Flow:**
-1. ClickHouse resolves `remote()` and connects to the local proxy.
-2. The proxy detects the `__route__` prefix in the Hello packet's user field.
-3. The proxy extracts the target proxy address and real user name.
-4. The proxy dials the target proxy directly, rewrites the Hello packet to replace the user field with the real user, and transparently forwards the connection.
-
-**Security:** Only connections from `localhost` (127.0.0.1 or ::1) are allowed to use `__route__` routing, preventing SSRF attacks.
-
-### Chunked Protocol Support
-
-The proxy transparently handles ClickHouse's **chunked transport protocol** (introduced in newer ClickHouse versions). Chunked framing is automatically detected during handshake negotiation:
-
-- **ChunkedReader**: Strips chunk frame headers and end markers, exposing raw protocol data to the parser.
-- **ChunkedWriter**: Wraps outgoing data in chunked frames with automatic fragmentation for payloads exceeding 64KB.
-
-This is handled automatically and requires no configuration.
 
 ---
 

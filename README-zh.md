@@ -19,9 +19,6 @@
 - [认证配置](#认证配置)
   - [Relay Token 传播](#relay-token-传播)
 - [SQL 重写配置](#sql-重写配置)
-- [架构说明](#架构说明)
-  - [动态上游路由](#动态上游路由)
-  - [Chunked 协议支持](#chunked-协议支持)
 - [测试](#测试)
 - [监控指标](#监控指标)
 
@@ -378,36 +375,7 @@ conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
 
 > **注意**：`SQL_skip_rewrite` 是 Proxy 自定义设置，会在转发前自动剥离，不会发送到 ClickHouse Server。
 
----
 
-## 架构说明
-
-### 动态上游路由
-
-proxy 通过 `__route__` 编码用户参数支持 **动态上游路由**，实现多 proxy 集群下的 ClickHouse 分布式查询。
-
-当 SQL 重写生成 `remote()` 函数调用时，user 参数会被编码为：
-
-```
-__route__<target_proxy_addr>__<real_user>
-```
-
-**工作流程：**
-1. ClickHouse 解析 `remote()` 并连接到本地 proxy。
-2. Proxy 检测到 Hello 包中 user 字段包含 `__route__` 前缀。
-3. Proxy 提取目标 proxy 地址和真实用户名。
-4. Proxy 直连目标 proxy，重写 Hello 包中的 user 字段为真实用户名，透明转发连接。
-
-**安全性：** 仅允许来自 `localhost`（127.0.0.1 或 ::1）的连接使用 `__route__` 路由，防止 SSRF 攻击。
-
-### Chunked 协议支持
-
-proxy 透明处理 ClickHouse 的 **Chunked 传输协议**（新版 ClickHouse 引入）。Chunked 帧格式会在握手协商阶段自动检测：
-
-- **ChunkedReader**：剥离 chunk 帧头和结束标记，向解析器暴露原始协议数据。
-- **ChunkedWriter**：将输出数据包装为 chunked 帧，超过 64KB 的负载自动分片。
-
-此功能自动处理，无需任何配置。
 
 ---
 
