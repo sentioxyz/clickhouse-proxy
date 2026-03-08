@@ -20,7 +20,6 @@
   - [Relay Token 传播](#relay-token-传播)
 - [SQL 重写配置](#sql-重写配置)
 - [测试](#测试)
-- [监控指标](#监控指标)
 
 ---
 
@@ -418,38 +417,4 @@ make test-stream-replay POD=<pod-name> SINCE="30 day" N=0
 - Failures 计数为 0
 - proxy 日志中无 panic
 
----
 
-## 监控指标
-
-proxy 通过 `metrics_listen` 端口（默认 `:9091`）暴露 Prometheus 指标。
-
-### 关键指标
-
-| 指标名 | 类型 | 说明 |
-|--------|------|------|
-| `clickhouse_proxy_active_connections` | Gauge | 当前活跃连接数 |
-| `clickhouse_proxy_packets_total` | Counter | 客户端→服务器方向的包总数（按类型分） |
-| `clickhouse_proxy_server_packets_total` | Counter | 服务器→客户端方向的包总数（按类型分） |
-| `clickhouse_proxy_bytes_transferred_total` | Counter | 传输字节总数（按方向分） |
-| `clickhouse_proxy_queries_forwarded_total` | Counter | 成功转发的查询总数 |
-| `clickhouse_proxy_errors_total` | Counter | 错误总数（按阶段和错误类型分） |
-| `clickhouse_proxy_upstream_health` | Gauge | 上游 ClickHouse 健康状态（1=健康, 0=不可达） |
-| `clickhouse_proxy_query_decode_duration_seconds` | Histogram | Query 包解码耗时 |
-| `clickhouse_proxy_rewrite_duration_seconds` | Histogram | SQL 重写耗时 |
-| `clickhouse_proxy_handshake_duration_seconds` | Histogram | TCP 握手耗时 |
-| `clickhouse_proxy_fallback_total` | Counter | 降级到原始拷贝模式的次数 |
-| `clickhouse_proxy_streaming_data_blocks_total` | Counter | 流式模式处理的数据块数 |
-
-### 接入 Prometheus
-
-```yaml
-scrape_configs:
-  - job_name: 'clickhouse-proxy'
-    static_configs:
-      - targets: ['localhost:9091']
-```
-
-### 接入 Grafana
-
-项目中的 `configs/dashboard.json` 提供了预配置的 Grafana 仪表板，可直接导入使用。

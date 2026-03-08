@@ -20,7 +20,6 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
   - [Relay Token Propagation](#relay-token-propagation)
 - [SQL Rewriter](#sql-rewriter)
 - [Testing](#testing)
-- [Metrics](#metrics)
 
 ---
 
@@ -418,38 +417,4 @@ Success criteria:
 - Failures count is 0
 - No panics in the proxy log summary
 
----
 
-## Metrics
-
-The proxy exposes Prometheus metrics on the `metrics_listen` port (default `:9091`).
-
-### Key Metrics
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `clickhouse_proxy_active_connections` | Gauge | Current number of active connections |
-| `clickhouse_proxy_packets_total` | Counter | Total client→server packets (by type) |
-| `clickhouse_proxy_server_packets_total` | Counter | Total server→client packets (by type) |
-| `clickhouse_proxy_bytes_transferred_total` | Counter | Total bytes transferred (by direction) |
-| `clickhouse_proxy_queries_forwarded_total` | Counter | Total queries successfully forwarded |
-| `clickhouse_proxy_errors_total` | Counter | Total errors (by phase and error type) |
-| `clickhouse_proxy_upstream_health` | Gauge | Upstream ClickHouse health (1=healthy, 0=unreachable) |
-| `clickhouse_proxy_query_decode_duration_seconds` | Histogram | Query packet decode latency |
-| `clickhouse_proxy_rewrite_duration_seconds` | Histogram | SQL rewrite latency |
-| `clickhouse_proxy_handshake_duration_seconds` | Histogram | TCP handshake latency |
-| `clickhouse_proxy_fallback_total` | Counter | Fallbacks to raw copy mode |
-| `clickhouse_proxy_streaming_data_blocks_total` | Counter | Data blocks processed in streaming mode |
-
-### Prometheus Scrape Config
-
-```yaml
-scrape_configs:
-  - job_name: 'clickhouse-proxy'
-    static_configs:
-      - targets: ['localhost:9091']
-```
-
-### Grafana Dashboard
-
-Import the pre-configured `configs/dashboard.json` included in this repository into Grafana for out-of-the-box monitoring.
