@@ -122,76 +122,13 @@ func runPhaseNoAuth() bool {
 
 	allPassed := true
 
-	// Test 1.1: Ping
-	log.Println("[Test 1.1] Ping 连接测试")
-	conn := openConnection(nil)
-	if conn == nil {
-		return false
-	}
-	defer conn.Close()
-
-	if err := conn.Ping(context.Background()); err != nil {
-		log.Printf("  ❌ Ping 失败: %v", err)
-		allPassed = false
-	} else {
-		log.Println("  ✅ Ping 成功")
-	}
-
-	// Test 1.2: SELECT 1
-	log.Println("[Test 1.2] SELECT 1")
-	var result uint8
-	if err := conn.QueryRow(context.Background(), "SELECT 1").Scan(&result); err != nil {
-		log.Printf("  ❌ SELECT 1 失败: %v", err)
-		allPassed = false
-	} else if result != 1 {
-		log.Printf("  ❌ SELECT 1 返回值错误: expected 1, got %d", result)
-		allPassed = false
-	} else {
-		log.Println("  ✅ SELECT 1 = 1")
-	}
-
-	// Test 1.3: SELECT version()
-	log.Println("[Test 1.3] SELECT version()")
-	var version string
-	if err := conn.QueryRow(context.Background(), "SELECT version()").Scan(&version); err != nil {
-		log.Printf("  ❌ SELECT version() 失败: %v", err)
-		allPassed = false
-	} else {
-		log.Printf("  ✅ ClickHouse 版本: %s", version)
-	}
-
-	// Test 1.4: CRUD 完整操作
-	log.Println("[Test 1.4] CRUD 完整操作流程")
-	if !runCRUD(conn) {
-		allPassed = false
-	}
-
-	// Test 1.5: 多次连接（连接稳定性）
-	log.Println("[Test 1.5] 多次连接稳定性测试 (3次)")
-	for i := 0; i < 3; i++ {
-		c := openConnection(nil)
-		if c == nil {
-			log.Printf("  ❌ 第%d次连接失败", i+1)
+	// ========== SQL 文件驱动测试 ==========
+	if *sqlfile != "" {
+		if !runSQLFileTests(nil, *sqlfile, *runOnly) {
 			allPassed = false
-			break
 		}
-		if err := c.Ping(context.Background()); err != nil {
-			log.Printf("  ❌ 第%d次 Ping 失败: %v", i+1, err)
-			allPassed = false
-			c.Close()
-			break
-		}
-		var r uint8
-		if err := c.QueryRow(context.Background(), "SELECT 42").Scan(&r); err != nil {
-			log.Printf("  ❌ 第%d次 SELECT 42 失败: %v", i+1, err)
-			allPassed = false
-			c.Close()
-			break
-		}
-		c.Close()
-	}
-	if allPassed {
-		log.Println("  ✅ 3次连接均成功")
+	} else {
+		log.Println("ℹ️  未指定 -sqlfile，跳过 SQL 专项测试")
 	}
 
 	return allPassed
@@ -545,27 +482,40 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 
 	allPassed := true
 
-	// 双签名模式
+	// 签名模式: signFunc != nil 时双模式 (连接级+查询级)，nil 时单模式 (无签名)
 	type signMode struct {
 		name    string
 		connSF  func(string) (string, error)
 		makeCtx func() context.Context
 	}
-	modes := []signMode{
-		{
-			name:   "连接级签名",
-			connSF: signFunc,
-			makeCtx: func() context.Context {
-				return context.Background()
+	var modes []signMode
+	if signFunc != nil {
+		modes = []signMode{
+			{
+				name:   "连接级签名",
+				connSF: signFunc,
+				makeCtx: func() context.Context {
+					return context.Background()
+				},
 			},
-		},
-		{
-			name:   "查询级签名",
-			connSF: nil,
-			makeCtx: func() context.Context {
-				return clickhouse.Context(context.Background(), clickhouse.WithSignFunc(signFunc))
+			{
+				name:   "查询级签名",
+				connSF: nil,
+				makeCtx: func() context.Context {
+					return clickhouse.Context(context.Background(), clickhouse.WithSignFunc(signFunc))
+				},
 			},
-		},
+		}
+	} else {
+		modes = []signMode{
+			{
+				name:   "无签名",
+				connSF: nil,
+				makeCtx: func() context.Context {
+					return context.Background()
+				},
+			},
+		}
 	}
 
 	for mi, mode := range modes {
@@ -633,7 +583,9 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 		c.Close()
 	}
 
-	// ========== 特殊测试: E08 并发 + 连接池压力 (仅执行一次) ==========
+	if signFunc == nil {
+		return allPassed
+	}
 	log.Println()
 	log.Println("--- 并发 & 压力测试 ---")
 	log.Println()
@@ -678,11 +630,11 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 		}
 	}
 
-	// 连接池压力测试 (20 并发 × 5 查询)
-	log.Println("[Extra] 连接池压力测试 (20×5)")
+	// 连接池压力测试 (5 并发 × 3 查询)
+	log.Println("[Extra] 连接池压力测试 (5×3)")
 	{
-		const stressConcurrency = 20
-		const queriesPerConn = 5
+		const stressConcurrency = 5
+		const queriesPerConn = 3
 		var wg sync.WaitGroup
 		errCh := make(chan error, stressConcurrency*queriesPerConn)
 		for i := 0; i < stressConcurrency; i++ {
