@@ -15,7 +15,6 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
   - [Full Parameter Reference](#full-parameter-reference)
 - [Running](#running)
 - [Deployment](#deployment)
-  - [Docker Deployment](#docker-deployment)
   - [Bare-metal Deployment](#bare-metal-deployment)
   - [Kubernetes Deployment](#kubernetes-deployment)
 - [Authentication](#authentication)
@@ -236,59 +235,7 @@ Press `Ctrl+C` for a graceful shutdown; final statistics are printed before exit
 
 ## Deployment
 
-### Docker Deployment
 
-#### Build the Image
-
-```bash
-# Local build
-docker build -f deploy/Dockerfile -t clickhouse-proxy:latest .
-
-# Build and push to the private registry
-make docker push
-
-# Build and push auth-enabled version (tagged auth-<commit>)
-make auth_proxy
-```
-
-#### Run a Container
-
-```bash
-# Basic run (uses the default config path /app/config.json inside the container)
-docker run -d \
-  --name clickhouse-proxy \
-  -p 9001:9001 \
-  -p 9091:9091 \
-  clickhouse-proxy:latest
-
-# Mount an external config file
-docker run -d \
-  --name clickhouse-proxy \
-  -p 9001:9001 \
-  -p 9091:9091 \
-  -v /path/to/config.json:/app/config.json \
-  clickhouse-proxy:latest
-
-# Use environment variables (no config file needed)
-docker run -d \
-  --name clickhouse-proxy \
-  -p 9001:9001 \
-  -e CK_LISTEN=":9001" \
-  -e CK_UPSTREAM="clickhouse-server:9000" \
-  clickhouse-proxy:latest
-```
-
-> **Note**: The Docker image uses a multi-stage build based on `alpine:latest`, resulting in a very small image. The Dockerfile is located at `deploy/Dockerfile`.
-
-#### Image Details
-
-| Item | Value |
-|------|-------|
-| Build stage base image | `golang:1.25-alpine` |
-| Runtime base image | `alpine:latest` |
-| Working directory | `/app` |
-| Default config path | `/app/config.json` |
-| Runtime dependencies | `ca-certificates`, `tzdata` |
 
 ### Bare-metal Deployment
 

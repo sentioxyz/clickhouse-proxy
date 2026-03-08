@@ -15,7 +15,6 @@
   - [完整参数表](#完整参数表)
 - [运行](#运行)
 - [部署](#部署)
-  - [Docker 部署](#docker-部署)
   - [裸机部署](#裸机部署)
   - [Kubernetes 部署](#kubernetes-部署)
 - [认证配置](#认证配置)
@@ -236,59 +235,7 @@ metrics listening on :9091
 
 ## 部署
 
-### Docker 部署
 
-#### 构建镜像
-
-```bash
-# 本地构建
-docker build -f deploy/Dockerfile -t clickhouse-proxy:latest .
-
-# 构建并推送到私有仓库
-make docker push
-
-# 构建并推送认证版本（标签格式：auth-<commit>）
-make auth_proxy
-```
-
-#### 运行容器
-
-```bash
-# 最简运行（使用容器内默认配置路径 /app/config.json）
-docker run -d \
-  --name clickhouse-proxy \
-  -p 9001:9001 \
-  -p 9091:9091 \
-  clickhouse-proxy:latest
-
-# 挂载配置文件运行
-docker run -d \
-  --name clickhouse-proxy \
-  -p 9001:9001 \
-  -p 9091:9091 \
-  -v /path/to/config.json:/app/config.json \
-  clickhouse-proxy:latest
-
-# 使用环境变量运行（不需要配置文件）
-docker run -d \
-  --name clickhouse-proxy \
-  -p 9001:9001 \
-  -e CK_LISTEN=":9001" \
-  -e CK_UPSTREAM="clickhouse-server:9000" \
-  clickhouse-proxy:latest
-```
-
-> **说明**：Docker 镜像使用多阶段构建，基于 `alpine:latest`，体积很小。Dockerfile 位于 `deploy/Dockerfile`。
-
-#### 镜像信息
-
-| 项目 | 说明 |
-|------|------|
-| 构建阶段基础镜像 | `golang:1.25-alpine` |
-| 运行时基础镜像 | `alpine:latest` |
-| 工作目录 | `/app` |
-| 默认配置路径 | `/app/config.json` |
-| 运行时依赖 | `ca-certificates`、`tzdata` |
 
 ### 裸机部署
 
