@@ -129,81 +129,81 @@ Example configuration (`config.example.json`):
 
 The following config options can be overridden via environment variables (lower priority than config file):
 
-| Variable | Config Field | Default |
-|----------|-------------|---------|
-| `CK_LISTEN` | `listen` | `:9001` |
-| `CK_UPSTREAM` | `upstream` | `clickhouse:9000` |
-| `CK_METRICS_LISTEN` | `metrics_listen` | `:9091` |
-| `CK_CONFIG` | Config file path | (none) |
-| `CK_REWRITER_ADDR` | `rewriter_service_addr` | `localhost:50051` |
-| `CK_NETWORK_STATE_SOURCE` | `network_state_source` | `file` |
-| `CK_NETWORK_STATE_FILE` | `network_state_file` | (none) |
-| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | (none) |
-| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | (none) |
+| Variable | Config Field | Required | Default |
+|----------|-------------|----------|---------|
+| `CK_LISTEN` | `listen` | No | `:9001` |
+| `CK_UPSTREAM` | `upstream` | No | `clickhouse:9000` |
+| `CK_METRICS_LISTEN` | `metrics_listen` | No | `:9091` |
+| `CK_CONFIG` | Config file path | No | (none) |
+| `CK_REWRITER_ADDR` | `rewriter_service_addr` | No | `localhost:50051` |
+| `CK_NETWORK_STATE_SOURCE` | `network_state_source` | No | `file` |
+| `CK_NETWORK_STATE_FILE` | `network_state_file` | No | (none) |
+| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | No (Yes if source=redis) | (none) |
+| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | No | (none) |
 
 ### Full Parameter Reference
 
 #### Core Settings
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `listen` | string | `:9001` | Proxy listen address and port |
-| `upstream` | string | `clickhouse:9000` | Upstream ClickHouse server address |
-| `dial_timeout` | duration | `5s` | Timeout for connecting to the upstream |
-| `idle_timeout` | duration | `5m` | Idle connection timeout; connections are closed after this period |
-| `max_connection_lifetime` | duration | `24h` | Maximum lifetime of a single connection, prevents slow clients from holding resources indefinitely |
-| `shutdown_timeout` | duration | `30s` | Maximum time to wait for in-flight connections to drain during graceful shutdown |
-| `stats_interval` | duration | `10s` | Interval for printing packet statistics to the log |
-| `metrics_listen` | string | `:9091` | Prometheus metrics HTTP endpoint listen address |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `listen` | string | No | `:9001` | Proxy listen address and port |
+| `upstream` | string | No | `clickhouse:9000` | Upstream ClickHouse server address |
+| `dial_timeout` | duration | No | `5s` | Timeout for connecting to the upstream |
+| `idle_timeout` | duration | No | `5m` | Idle connection timeout; connections are closed after this period |
+| `max_connection_lifetime` | duration | No | `24h` | Maximum lifetime of a single connection, prevents slow clients from holding resources indefinitely |
+| `shutdown_timeout` | duration | No | `30s` | Maximum time to wait for in-flight connections to drain during graceful shutdown |
+| `stats_interval` | duration | No | `10s` | Interval for printing packet statistics to the log |
+| `metrics_listen` | string | No | `:9091` | Prometheus metrics HTTP endpoint listen address |
 
 #### Logging
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `log_queries` | bool | `true` | Log SQL query content |
-| `log_data` | bool | `false` | Log Data packet content (usually off, for debugging only) |
-| `max_query_log_bytes` | int | `300` | Maximum query log truncation length (bytes) |
-| `max_data_log_bytes` | int | `200` | Maximum Data packet log truncation length (bytes) |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `log_queries` | bool | No | `true` | Log SQL query content |
+| `log_data` | bool | No | `false` | Log Data packet content (usually off, for debugging only) |
+| `max_query_log_bytes` | int | No | `300` | Maximum query log truncation length (bytes) |
+| `max_data_log_bytes` | int | No | `200` | Maximum Data packet log truncation length (bytes) |
 
 #### Authentication
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `auth_enabled` | bool | `false` | Enable JWS / Ethereum signature authentication |
-| `auth_allowed_addresses` | []string | `[]` | List of Ethereum addresses allowed to execute queries |
-| `auth_max_token_age` | duration | `1m` | Maximum age of JWS tokens |
-| `auth_allow_no_auth` | bool | `false` | Allow requests without an auth token to pass through |
-| `relay_private_key_hex` | string | (empty) | Ethereum private key for signing relay JWS tokens in proxy-to-proxy (`__route__`) connections. All proxies in a cluster should share the same key. The corresponding address must be in `auth_allowed_addresses` |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `auth_enabled` | bool | No | `false` | Enable JWS / Ethereum signature authentication |
+| `auth_allowed_addresses` | []string | No | `[]` | List of Ethereum addresses allowed to execute queries |
+| `auth_max_token_age` | duration | No | `1m` | Maximum age of JWS tokens |
+| `auth_allow_no_auth` | bool | No | `false` | Allow requests without an auth token to pass through |
+| `relay_private_key_hex` | string | No | (empty) | Ethereum private key for signing relay JWS tokens in proxy-to-proxy (`__route__`) connections. All proxies in a cluster should share the same key. The corresponding address must be in `auth_allowed_addresses` |
 
 #### SQL Rewriter
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC service address |
-| `rewriter_timeout` | duration | `5s` | SQL rewrite request timeout |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `rewriter_service_addr` | string | No | `localhost:50051` | sql-rewriter gRPC service address |
+| `rewriter_timeout` | duration | No | `5s` | SQL rewrite request timeout |
 
 #### Network State
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `network_state_source` | string | `file` | Network state data source; supports `file` and `redis` |
-| `network_state_file` | string | (empty) | Path to the network state YAML file (for `file` source) |
-| `network_state_redis` | string | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
-| `network_state_postgres` | string | (empty) | PostgreSQL connection string (reserved) |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `network_state_source` | string | No | `file` | Network state data source; supports `file` and `redis` |
+| `network_state_file` | string | No | (empty) | Path to the network state YAML file (for `file` source) |
+| `network_state_redis` | string | No (Yes if source=redis) | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
+| `network_state_postgres` | string | No | (empty) | PostgreSQL connection string (reserved) |
 
 #### CKH Manager (Table Resolution)
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `ckh_manager_config` | string | (empty) | Path to CKH Manager YAML/JSON config file for SDK-based physical table name resolution |
-| `private_key_hex` | string | (empty) | Private key hex for ClickHouse request signing (optional) |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `ckh_manager_config` | string | No | (empty) | Path to CKH Manager YAML/JSON config file for SDK-based physical table name resolution |
+| `private_key_hex` | string | No | (empty) | Private key hex for ClickHouse request signing (optional) |
 
 #### Advanced
 
-| Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `streaming_buf_size` | int | `131072` | Bufio buffer size for streaming protocol parsing (bytes), default 128 KB |
-| `validate_checksum` | bool | `false` | Enable CityHash128 checksum validation for compressed data blocks |
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `streaming_buf_size` | int | No | `131072` | Bufio buffer size for streaming protocol parsing (bytes), default 128 KB |
+| `validate_checksum` | bool | No | `false` | Enable CityHash128 checksum validation for compressed data blocks |
 
 > **Tip**: All `duration` parameters accept human-readable formats such as `"5s"`, `"1m"`, `"24h"`. Raw nanosecond numbers are also accepted.
 

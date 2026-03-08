@@ -129,81 +129,81 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 
 以下配置项支持通过环境变量覆盖（优先级低于配置文件）：
 
-| 环境变量 | 对应配置项 | 默认值 |
-|---------|-----------|-------|
-| `CK_LISTEN` | `listen` | `:9001` |
-| `CK_UPSTREAM` | `upstream` | `clickhouse:9000` |
-| `CK_METRICS_LISTEN` | `metrics_listen` | `:9091` |
-| `CK_CONFIG` | 配置文件路径 | （无） |
-| `CK_REWRITER_ADDR` | `rewriter_service_addr` | `localhost:50051` |
-| `CK_NETWORK_STATE_SOURCE` | `network_state_source` | `file` |
-| `CK_NETWORK_STATE_FILE` | `network_state_file` | （无） |
-| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | （无） |
-| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | （无） |
+| 环境变量 | 对应配置项 | 是否必填 | 默认值 |
+|---------|-----------|---------|-------|
+| `CK_LISTEN` | `listen` | 否 | `:9001` |
+| `CK_UPSTREAM` | `upstream` | 否 | `clickhouse:9000` |
+| `CK_METRICS_LISTEN` | `metrics_listen` | 否 | `:9091` |
+| `CK_CONFIG` | 配置文件路径 | 否 | （无） |
+| `CK_REWRITER_ADDR` | `rewriter_service_addr` | 否 | `localhost:50051` |
+| `CK_NETWORK_STATE_SOURCE` | `network_state_source` | 否 | `file` |
+| `CK_NETWORK_STATE_FILE` | `network_state_file` | 否 | （无） |
+| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | 否 (选 redis 时必填) | （无） |
+| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | 否 | （无） |
 
 ### 完整参数表
 
 #### 基础配置
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `listen` | string | `:9001` | proxy 监听地址和端口 |
-| `upstream` | string | `clickhouse:9000` | 上游 ClickHouse 服务器地址 |
-| `dial_timeout` | duration | `5s` | 连接上游的超时时间 |
-| `idle_timeout` | duration | `5m` | 空闲连接超时时间，超时后断开 |
-| `max_connection_lifetime` | duration | `24h` | 单个连接的最大存活时间，防止慢客户端无限占用资源 |
-| `shutdown_timeout` | duration | `30s` | 优雅关闭时等待在途连接排水的最大时间 |
-| `stats_interval` | duration | `10s` | 统计信息打印间隔 |
-| `metrics_listen` | string | `:9091` | Prometheus metrics HTTP 端点监听地址 |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `listen` | string | 否 | `:9001` | proxy 监听地址和端口 |
+| `upstream` | string | 否 | `clickhouse:9000` | 上游 ClickHouse 服务器地址 |
+| `dial_timeout` | duration | 否 | `5s` | 连接上游的超时时间 |
+| `idle_timeout` | duration | 否 | `5m` | 空闲连接超时时间，超时后断开 |
+| `max_connection_lifetime` | duration | 否 | `24h` | 单个连接的最大存活时间，防止慢客户端无限占用资源 |
+| `shutdown_timeout` | duration | 否 | `30s` | 优雅关闭时等待在途连接排水的最大时间 |
+| `stats_interval` | duration | 否 | `10s` | 统计信息打印间隔 |
+| `metrics_listen` | string | 否 | `:9091` | Prometheus metrics HTTP 端点监听地址 |
 
 #### 日志配置
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `log_queries` | bool | `true` | 是否在日志中记录 SQL 查询内容 |
-| `log_data` | bool | `false` | 是否在日志中记录 Data 包内容（通常关闭，仅调试用） |
-| `max_query_log_bytes` | int | `300` | 查询日志最大截断长度（字节） |
-| `max_data_log_bytes` | int | `200` | Data 包日志最大截断长度（字节） |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `log_queries` | bool | 否 | `true` | 是否在日志中记录 SQL 查询内容 |
+| `log_data` | bool | 否 | `false` | 是否在日志中记录 Data 包内容（通常关闭，仅调试用） |
+| `max_query_log_bytes` | int | 否 | `300` | 查询日志最大截断长度（字节） |
+| `max_data_log_bytes` | int | 否 | `200` | Data 包日志最大截断长度（字节） |
 
 #### 认证配置
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `auth_enabled` | bool | `false` | 是否启用 JWS/以太坊签名认证 |
-| `auth_allowed_addresses` | []string | `[]` | 允许执行查询的以太坊地址列表 |
-| `auth_max_token_age` | duration | `1m` | JWS token 最大有效期 |
-| `auth_allow_no_auth` | bool | `false` | 是否允许不携带 token 的请求通过 |
-| `relay_private_key_hex` | string | （空） | 用于签发 relay JWS token 的以太坊私钥，在 proxy 间 `__route__` 连接中使用。集群内所有 proxy 应使用相同的私钥，对应地址须在 `auth_allowed_addresses` 中 |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `auth_enabled` | bool | 否 | `false` | 是否启用 JWS/以太坊签名认证 |
+| `auth_allowed_addresses` | []string | 否 | `[]` | 允许执行查询的以太坊地址列表 |
+| `auth_max_token_age` | duration | 否 | `1m` | JWS token 最大有效期 |
+| `auth_allow_no_auth` | bool | 否 | `false` | 是否允许不携带 token 的请求通过 |
+| `relay_private_key_hex` | string | 否 | （空） | 用于签发 relay JWS token 的以太坊私钥，在 proxy 间 `__route__` 连接中使用。集群内所有 proxy 应使用相同的私钥，对应地址须在 `auth_allowed_addresses` 中 |
 
 #### SQL 重写配置
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC 服务地址 |
-| `rewriter_timeout` | duration | `5s` | SQL 重写请求超时时间 |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `rewriter_service_addr` | string | 否 | `localhost:50051` | sql-rewriter gRPC 服务地址 |
+| `rewriter_timeout` | duration | 否 | `5s` | SQL 重写请求超时时间 |
 
 #### 网络状态配置
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `network_state_source` | string | `file` | 网络状态数据来源，支持 `file` 和 `redis` |
-| `network_state_file` | string | （空） | 网络状态 YAML 文件路径（`file` 模式使用） |
-| `network_state_redis` | string | （空） | Redis statemirror 地址（如 `localhost:6379`） |
-| `network_state_postgres` | string | （空） | PostgreSQL 连接串（预留） |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `network_state_source` | string | 否 | `file` | 网络状态数据来源，支持 `file` 和 `redis` |
+| `network_state_file` | string | 否 | （空） | 网络状态 YAML 文件路径（`file` 模式使用） |
+| `network_state_redis` | string | 否 (选 redis 时必填) | （空） | Redis statemirror 地址（如 `localhost:6379`） |
+| `network_state_postgres` | string | 否 | （空） | PostgreSQL 连接串（预留） |
 
 #### CKH Manager（表名解析）
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `ckh_manager_config` | string | （空） | CKH Manager 配置文件路径（YAML/JSON），用于基于 SDK 的物理表名解析 |
-| `private_key_hex` | string | （空） | ClickHouse 请求签名的私钥（可选） |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `ckh_manager_config` | string | 否 | （空） | CKH Manager 配置文件路径（YAML/JSON），用于基于 SDK 的物理表名解析 |
+| `private_key_hex` | string | 否 | （空） | ClickHouse 请求签名的私钥（可选） |
 
 #### 高级配置
 
-| 参数 | 类型 | 默认值 | 说明 |
-|------|------|-------|------|
-| `streaming_buf_size` | int | `131072` | 流式协议解析的 bufio 缓冲区大小（字节），默认 128KB |
-| `validate_checksum` | bool | `false` | 是否启用压缩数据块的 CityHash128 校验 |
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `streaming_buf_size` | int | 否 | `131072` | 流式协议解析的 bufio 缓冲区大小（字节），默认 128KB |
+| `validate_checksum` | bool | 否 | `false` | 是否启用压缩数据块的 CityHash128 校验 |
 
 > **提示**：所有 `duration` 类型参数支持人类可读格式，如 `"5s"`、`"1m"`、`"24h"`。也支持纳秒数字。
 
