@@ -101,21 +101,59 @@ The proxy uses JSON configuration files. The loading order is:
 3. `config.json` in the current directory (auto-detected)
 4. Built-in defaults if none of the above are found
 
-Example configuration (`config.example.json`):
+Example configuration (`config.example.json`) without authentication:
 
 ```json
 {
     "listen": ":9001",
     "upstream": "127.0.0.1:9000",
-    "stats_interval": "30s",
     "dial_timeout": "5s",
     "idle_timeout": "5m",
+    "max_connection_lifetime": "24h",
+    "shutdown_timeout": "30s",
+    "stats_interval": "30s",
+    "metrics_listen": ":9091",
     "log_queries": true,
     "log_data": false,
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
+    "auth_enabled": false,
+    "rewriter_service_addr": "localhost:50051",
+    "rewriter_timeout": "5s",
+    "network_state_redis": "localhost:6379",
+    "streaming_buf_size": 131072,
+    "validate_checksum": false
+}
+```
+
+Example configuration with authentication enabled:
+
+```json
+{
+    "listen": ":9001",
+    "upstream": "127.0.0.1:9000",
+    "dial_timeout": "5s",
+    "idle_timeout": "5m",
+    "max_connection_lifetime": "24h",
+    "shutdown_timeout": "30s",
+    "stats_interval": "30s",
     "metrics_listen": ":9091",
-    "auth_enabled": false
+    "log_queries": true,
+    "log_data": false,
+    "max_query_log_bytes": 300,
+    "max_data_log_bytes": 200,
+    "auth_enabled": true,
+    "auth_allowed_addresses": [
+      "0x1234567890123456789012345678901234567890"
+    ],
+    "auth_max_token_age": "1m",
+    "auth_allow_no_auth": false,
+    "relay_private_key_hex": "0x1234567890123456789012345678901234567890123456789012345678901234",
+    "rewriter_service_addr": "localhost:50051",
+    "rewriter_timeout": "5s",
+    "network_state_redis": "localhost:6379",
+    "streaming_buf_size": 131072,
+    "validate_checksum": false
 }
 ```
 
