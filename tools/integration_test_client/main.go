@@ -399,8 +399,9 @@ func runPhaseAuthValid() bool {
 
 // SQLTestCase represents a single test case parsed from a SQL file.
 type SQLTestCase struct {
-	Name  string
-	Query string
+	Name     string
+	Query    string
+	Settings map[string]string // per-test settings (e.g. SQL_skip_rewrite=1)
 }
 
 // parseSQLFile reads a SQL file and splits it into test cases by -- [TEST: name] markers.
@@ -414,6 +415,7 @@ func parseSQLFile(path string) ([]SQLTestCase, error) {
 	var cases []SQLTestCase
 	var currentName string
 	var currentLines []string
+	var currentSettings map[string]string
 
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
@@ -423,15 +425,27 @@ func parseSQLFile(path string) ([]SQLTestCase, error) {
 			if currentName != "" {
 				query := strings.TrimSpace(strings.Join(currentLines, "\n"))
 				if query != "" {
-					cases = append(cases, SQLTestCase{Name: currentName, Query: query})
+					cases = append(cases, SQLTestCase{Name: currentName, Query: query, Settings: currentSettings})
 				}
 			}
 			// 提取新用例名称
 			currentName = line[len("-- [TEST: ") : len(line)-1]
 			currentLines = nil
+			currentSettings = nil
 		} else {
-			// 跳过纯注释行 (非 SQL 的中文说明)
 			trimmed := strings.TrimSpace(line)
+			// 解析 SETTINGS 注解 (e.g. -- SETTINGS: SQL_skip_rewrite=1)
+			if strings.HasPrefix(trimmed, "-- SETTINGS:") {
+				parts := strings.SplitN(strings.TrimPrefix(trimmed, "-- SETTINGS:"), "=", 2)
+				if len(parts) == 2 {
+					if currentSettings == nil {
+						currentSettings = make(map[string]string)
+					}
+					currentSettings[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+				}
+				continue
+			}
+			// 跳过纯注释行 (非 SQL 的中文说明)
 			if strings.HasPrefix(trimmed, "--") && !strings.HasPrefix(trimmed, "-- FROM") {
 				continue
 			}
@@ -442,7 +456,7 @@ func parseSQLFile(path string) ([]SQLTestCase, error) {
 	if currentName != "" {
 		query := strings.TrimSpace(strings.Join(currentLines, "\n"))
 		if query != "" {
-			cases = append(cases, SQLTestCase{Name: currentName, Query: query})
+			cases = append(cases, SQLTestCase{Name: currentName, Query: query, Settings: currentSettings})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -571,6 +585,16 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 		for _, tc := range testCases {
 			log.Printf("%s [%s]", prefix, tc.Name)
 
+			// 构建 per-test context (合并签名模式 + 用例级 SETTINGS)
+			testCtx := ctx
+			if len(tc.Settings) > 0 {
+				chSettings := clickhouse.Settings{}
+				for k, v := range tc.Settings {
+					chSettings[k] = clickhouse.CustomSetting{Value: v}
+				}
+				testCtx = clickhouse.Context(testCtx, clickhouse.WithSettings(chSettings))
+			}
+
 			if strings.HasPrefix(tc.Name, "E") {
 				// E* 类错误用例
 				switch {
@@ -579,23 +603,28 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 					log.Printf("  ⏭️  跳过 (需要特殊并发执行)")
 				case tc.Name == "E06_string_literal" || tc.Name == "E07_comment":
 					// E06/E07 预期成功
-					if !runExpectSuccess(c, ctx, tc.Name, tc.Query) {
+					if !runExpectSuccess(c, testCtx, tc.Name, tc.Query) {
 						allPassed = false
 					}
 				default:
 					// E01-E05 等预期错误
-					if !runExpectError(c, ctx, tc.Name, tc.Query) {
+					if !runExpectError(c, testCtx, tc.Name, tc.Query) {
 						allPassed = false
 					}
 				}
+			} else if isDDLOrDML(tc.Query) {
+				// DDL/DML: 使用 Exec 执行 (INSERT/CREATE/ALTER/DROP)
+				if !runExecCtx(c, testCtx, tc.Name, tc.Query) {
+					allPassed = false
+				}
 			} else if expected, ok := expectedResults[tc.Name]; ok && expected != "" {
 				// 有预期结果 → 对比输出
-				if !runQueryCompareResultCtx(c, ctx, tc.Name, tc.Query, expected) {
+				if !runQueryCompareResultCtx(c, testCtx, tc.Name, tc.Query, expected) {
 					allPassed = false
 				}
 			} else {
 				// 无预期结果 → 仅检查执行成功
-				if !runExpectSuccess(c, ctx, tc.Name, tc.Query) {
+				if !runExpectSuccess(c, testCtx, tc.Name, tc.Query) {
 					allPassed = false
 				}
 			}
@@ -1249,6 +1278,15 @@ func runExecCtx(conn clickhouse.Conn, ctx context.Context, testName, query strin
 	}
 	log.Printf("  ✅ %s 执行成功", testName)
 	return true
+}
+
+// isDDLOrDML returns true if the query is a DDL/DML statement (INSERT/CREATE/ALTER/DROP).
+func isDDLOrDML(query string) bool {
+	upper := strings.ToUpper(strings.TrimSpace(query))
+	return strings.HasPrefix(upper, "INSERT") ||
+		strings.HasPrefix(upper, "CREATE") ||
+		strings.HasPrefix(upper, "ALTER") ||
+		strings.HasPrefix(upper, "DROP")
 }
 
 // runExpectError executes a query and expects it to fail.
