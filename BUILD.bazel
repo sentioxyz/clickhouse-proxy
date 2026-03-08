@@ -1,8 +1,13 @@
 # Root BUILD.bazel - aliases to cmd/proxy targets
 # Use `bazel build //cmd/proxy:clickhouse-proxy` to build.
 
+load("@gazelle//:def.bzl", "gazelle")
+
 alias(
     name = "clickhouse-proxy",
     actual = "//cmd/proxy:clickhouse-proxy",
     visibility = ["//visibility:public"],
 )
+
+# gazelle:prefix ck_remote_proxy
+gazelle(name = "gazelle")

@@ -1,0 +1,15 @@
+load("@rules_go//go:def.bzl", "go_binary", "go_library")
+
+go_library(
+    name = "load_client_lib",
+    srcs = ["main.go"],
+    importpath = "ck_remote_proxy/tools/load_client",
+    visibility = ["//visibility:private"],
+    deps = ["@com_github_clickhouse_clickhouse_go_v2//:clickhouse-go"],
+)
+
+go_binary(
+    name = "load_client",
+    embed = [":load_client_lib"],
+    visibility = ["//visibility:public"],
+)
