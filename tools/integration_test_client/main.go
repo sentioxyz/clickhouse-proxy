@@ -583,7 +583,13 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 		c.Close()
 	}
 
-	// ========== 特殊测试: E08 并发 + 连接池压力 (仅执行一次) ==========
+	// ========== 特殊测试: E08 并发 + 连接池压力 (仅签名模式执行) ==========
+	if signFunc == nil {
+		log.Println()
+		log.Println("--- 并发 & 压力测试: ⏭️ 无签名模式跳过 ---")
+		log.Println()
+		return allPassed
+	}
 	log.Println()
 	log.Println("--- 并发 & 压力测试 ---")
 	log.Println()
