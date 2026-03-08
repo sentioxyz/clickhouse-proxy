@@ -276,6 +276,115 @@ func runPhaseAuthValid() bool {
 		}
 	}
 
+	// Test 2.3: SQL_skip_rewrite 反向用例 — 不带 skip 时，system.numbers 应被 Rewriter 拦截报错
+	log.Println("[Test 2.3] SQL_skip_rewrite 反向用例 (不带 skip，预期报错)")
+	{
+		rows, err := conn.Query(context.Background(), "SELECT number FROM system.numbers LIMIT 5")
+		if err != nil {
+			log.Printf("  ✅ 不带 skip_rewrite 正确被拒绝: %v", err)
+		} else {
+			// 如果没有报错，消费结果并报告失败
+			count := 0
+			for rows.Next() {
+				count++
+			}
+			rows.Close()
+			log.Printf("  ❌ 不带 skip_rewrite 竟然成功了 (返回 %d 行)！Rewriter 应该拦截此查询", count)
+			allPassed = false
+		}
+	}
+
+	// Test 2.4: INSERT/UPDATE/DELETE 操作 sentio.local_data + 数据恢复 (SQL_skip_rewrite)
+	log.Println("[Test 2.4] INSERT/UPDATE/DELETE 操作 sentio.local_data (SQL_skip_rewrite)")
+	{
+		crudOK := true
+		skipCtx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
+			"SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
+		}))
+
+		// Step 1: INSERT 新行
+		log.Println("  [2.4.1] INSERT 新行 (id=99)")
+		if err := conn.Exec(skipCtx, "INSERT INTO sentio.local_data VALUES (99, 'test_insert', 99.9)"); err != nil {
+			log.Printf("    ❌ INSERT 失败: %v", err)
+			crudOK = false
+		} else {
+			log.Println("    ✅ INSERT 成功")
+		}
+
+		// Step 2: 验证 INSERT
+		if crudOK {
+			log.Println("  [2.4.2] 验证 INSERT")
+			var cnt uint64
+			if err := conn.QueryRow(skipCtx, "SELECT count() FROM sentio.local_data WHERE id = 99").Scan(&cnt); err != nil {
+				log.Printf("    ❌ 验证查询失败: %v", err)
+				crudOK = false
+			} else if cnt == 0 {
+				log.Println("    ❌ INSERT 后查不到 id=99")
+				crudOK = false
+			} else {
+				log.Printf("    ✅ INSERT 验证成功 (count=%d)", cnt)
+			}
+		}
+
+		// Step 3: ALTER TABLE UPDATE
+		if crudOK {
+			log.Println("  [2.4.3] ALTER TABLE UPDATE (id=99 name → 'test_updated')")
+			if err := conn.Exec(skipCtx, "ALTER TABLE sentio.local_data UPDATE name = 'test_updated' WHERE id = 99"); err != nil {
+				log.Printf("    ❌ UPDATE 失败: %v", err)
+				crudOK = false
+			} else {
+				log.Println("    ✅ UPDATE 执行成功")
+				// 等待 mutation 完成
+				time.Sleep(2 * time.Second)
+			}
+		}
+
+		// Step 4: 验证 UPDATE
+		if crudOK {
+			log.Println("  [2.4.4] 验证 UPDATE")
+			var name string
+			if err := conn.QueryRow(skipCtx, "SELECT name FROM sentio.local_data WHERE id = 99").Scan(&name); err != nil {
+				log.Printf("    ❌ 验证查询失败: %v", err)
+				crudOK = false
+			} else if name != "test_updated" {
+				log.Printf("    ❌ UPDATE 验证失败: name='%s', expected 'test_updated'", name)
+				crudOK = false
+			} else {
+				log.Printf("    ✅ UPDATE 验证成功 (name='%s')", name)
+			}
+		}
+
+		// Step 5: ALTER TABLE DELETE (清理测试数据)
+		log.Println("  [2.4.5] ALTER TABLE DELETE (id=99)")
+		if err := conn.Exec(skipCtx, "ALTER TABLE sentio.local_data DELETE WHERE id = 99"); err != nil {
+			log.Printf("    ❌ DELETE 失败: %v", err)
+			crudOK = false
+		} else {
+			log.Println("    ✅ DELETE 执行成功")
+			// 等待 mutation 完成
+			time.Sleep(2 * time.Second)
+		}
+
+		// Step 6: 验证 DELETE + 数据恢复
+		log.Println("  [2.4.6] 验证数据恢复 (应回到原始 3 行)")
+		{
+			var cnt uint64
+			if err := conn.QueryRow(skipCtx, "SELECT count() FROM sentio.local_data").Scan(&cnt); err != nil {
+				log.Printf("    ❌ 验证查询失败: %v", err)
+				crudOK = false
+			} else if cnt != 3 {
+				log.Printf("    ❌ 数据恢复失败: 预期 3 行，实际 %d 行", cnt)
+				crudOK = false
+			} else {
+				log.Printf("    ✅ 数据恢复成功 (count=%d)", cnt)
+			}
+		}
+
+		if !crudOK {
+			allPassed = false
+		}
+	}
+
 	// ========== SQL 文件驱动测试 ==========
 	if *sqlfile != "" {
 		if !runSQLFileTests(signFunc, *sqlfile, *runOnly) {
