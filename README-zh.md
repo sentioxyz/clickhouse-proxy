@@ -59,6 +59,28 @@ clickhouse-client --host localhost --port 9001
 
 ## 编译指南
 
+本项目同时支持原生 Go 编译和 Bazel 构建（与 `sentio-core` 保持一致，推荐使用）。
+
+### 使用 Bazel 编译 (推荐)
+
+本项目使用 Bazel `8.5.1` 和 Bzlmod 进行依赖管理，包括对预编译版的 `protoc` 及交叉编译 C 工具链的支持：
+
+```bash
+# 编译 proxy 二进制文件
+bazel build //cmd/proxy:clickhouse-proxy
+
+# 编译并运行所有测试
+bazel test //...
+
+# 如果需要更新第三方 CGO 依赖（如需调整 patch）：
+bazel mod tidy
+bazel run //:gazelle
+```
+
+编译完成后，二进制文件会生成在 `bazel-bin/cmd/proxy/clickhouse-proxy_/%workspace%/cmd/proxy/clickhouse-proxy` 路径下，你也可以通过 `bazel run //cmd/proxy:clickhouse-proxy` 直接执行。
+
+### 使用 Go 原生编译
+
 ```bash
 # 标准编译
 go build -o clickhouse-proxy ./cmd/proxy/
@@ -99,8 +121,7 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
     "metrics_listen": ":9091",
-    "auth_enabled": false,
-    "rewriter_enabled": false
+    "auth_enabled": false
 }
 ```
 
@@ -158,7 +179,6 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 
 | 参数 | 类型 | 默认值 | 说明 |
 |------|------|-------|------|
-| `rewriter_enabled` | bool | `false` | 是否启用 SQL 重写功能 |
 | `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC 服务地址 |
 | `rewriter_timeout` | duration | `5s` | SQL 重写请求超时时间 |
 
@@ -395,7 +415,6 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 
 ```json
 {
-    "rewriter_enabled": true,
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
     "network_state_source": "file",
@@ -409,7 +428,6 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 
 ```json
 {
-    "rewriter_enabled": true,
     "rewriter_service_addr": "localhost:50051",
     "network_state_source": "redis",
     "network_state_redis": "localhost:6379"
@@ -422,7 +440,6 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 
 ```json
 {
-    "rewriter_enabled": true,
     "ckh_manager_config": "/path/to/ckhmanager.yaml",
     "private_key_hex": "optional-signing-key"
 }

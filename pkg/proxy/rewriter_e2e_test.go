@@ -214,6 +214,7 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 	// 创建 rewriter
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -288,6 +289,7 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -352,6 +354,7 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -393,6 +396,7 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -449,6 +453,7 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -504,6 +509,7 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -602,6 +608,7 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -644,6 +651,7 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -691,35 +699,6 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 	}
 }
 
-// TestEndToEnd_ConfigDisabled 测试禁用重写器
-func TestEndToEnd_ConfigDisabled(t *testing.T) {
-	// 创建一个禁用的 proxy 配置
-	cfg := Config{
-		RewriterEnabled: false,
-	}
-
-	// 验证配置正确
-	if cfg.RewriterEnabled {
-		t.Error("RewriterEnabled should be false")
-	}
-
-	// 当 RewriterEnabled=false 时，proxy 应使用 NoopRewriter
-	var rewriter Rewriter
-	if !cfg.RewriterEnabled {
-		rewriter = NoopRewriter{}
-	}
-
-	ctx := context.Background()
-	sql := "SELECT * FROM sentio_coinbase.transfer"
-	result, err := rewriter.Rewrite(ctx, sql, "default", "test123")
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if result != sql {
-		t.Error("disabled rewriter should return original SQL")
-	}
-}
-
 // TestEndToEnd_NetworkStateUpdates 测试网络状态更新
 func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	state := NewInMemoryNetworkState()
@@ -727,6 +706,7 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	// 初始状态为空
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -771,6 +751,7 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -805,6 +786,7 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -862,6 +844,7 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {
@@ -1012,6 +995,7 @@ func BenchmarkRewrite(b *testing.B) {
 
 	config := RewriterConfig{
 		Enabled: true,
+		ServiceAddr: "localhost:50051",
 	}
 	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
 	if err != nil {

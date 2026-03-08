@@ -36,7 +36,6 @@ type Config struct {
 	RelayPrivateKeyHex string `json:"relay_private_key_hex"`
 
 	// SQL Rewriter configuration
-	RewriterEnabled     bool     `json:"rewriter_enabled"`      // Whether to enable SQL rewriting
 	RewriterServiceAddr string   `json:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
 	RewriterTimeout     Duration `json:"rewriter_timeout"`      // Rewrite timeout
 
@@ -118,8 +117,7 @@ func DefaultConfig() Config {
 		AuthAllowedAddresses: nil,
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
 		AuthAllowNoAuth:      false,
-		// Rewriter defaults: disabled by default
-		RewriterEnabled:     false,
+		// Rewriter defaults
 		RewriterServiceAddr: envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
 		RewriterTimeout:     Duration{5 * time.Second},
 		// Network state defaults

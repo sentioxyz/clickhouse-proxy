@@ -59,6 +59,28 @@ clickhouse-client --host localhost --port 9001
 
 ## Build
 
+This project supports both native Go compilation and Bazel build (consistent with `sentio-core`, recommended).
+
+### Using Bazel (Recommended)
+
+This project uses Bazel `8.5.1` and Bzlmod for dependency management, including support for precompiled `protoc` and cross-compilation C toolchains:
+
+```bash
+# Build the proxy binary
+bazel build //cmd/proxy:clickhouse-proxy
+
+# Build and run all tests
+bazel test //...
+
+# If you need to update third-party CGO dependencies (e.g., adjusting patches):
+bazel mod tidy
+bazel run //:gazelle
+```
+
+Once built, the binary will be generated under the `bazel-bin/cmd/proxy/clickhouse-proxy_/%workspace%/cmd/proxy/clickhouse-proxy` path. You can also run it directly using `bazel run //cmd/proxy:clickhouse-proxy`.
+
+### Using Native Go
+
 ```bash
 # Standard build
 go build -o clickhouse-proxy ./cmd/proxy/
@@ -99,8 +121,7 @@ Example configuration (`config.example.json`):
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
     "metrics_listen": ":9091",
-    "auth_enabled": false,
-    "rewriter_enabled": false
+    "auth_enabled": false
 }
 ```
 
@@ -158,7 +179,6 @@ The following config options can be overridden via environment variables (lower 
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `rewriter_enabled` | bool | `false` | Enable SQL rewriting |
 | `rewriter_service_addr` | string | `localhost:50051` | sql-rewriter gRPC service address |
 | `rewriter_timeout` | duration | `5s` | SQL rewrite request timeout |
 
@@ -395,7 +415,6 @@ The proxy supports **Sentio Network SQL rewriting**, transforming virtual table 
 
 ```json
 {
-    "rewriter_enabled": true,
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
     "network_state_source": "file",
@@ -409,7 +428,6 @@ For production environments, the proxy supports Redis statemirror as a real-time
 
 ```json
 {
-    "rewriter_enabled": true,
     "rewriter_service_addr": "localhost:50051",
     "network_state_source": "redis",
     "network_state_redis": "localhost:6379"
@@ -422,7 +440,6 @@ For production table name resolution (virtual → physical), configure the CKH M
 
 ```json
 {
-    "rewriter_enabled": true,
     "ckh_manager_config": "/path/to/ckhmanager.yaml",
     "private_key_hex": "optional-signing-key"
 }
