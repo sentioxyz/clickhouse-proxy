@@ -16,7 +16,6 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 - [Running](#running)
 - [Deployment](#deployment)
   - [Bare-metal Deployment](#bare-metal-deployment)
-  - [Kubernetes Deployment](#kubernetes-deployment)
 - [Authentication](#authentication)
   - [Relay Token Propagation](#relay-token-propagation)
 - [SQL Rewriter](#sql-rewriter)
@@ -275,15 +274,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### Kubernetes Deployment
 
-The repository includes `configs/auth_ck.yaml` with a complete Kubernetes deployment example using ConfigMap + Sidecar pattern:
-
-```bash
-kubectl apply -f configs/auth_ck.yaml
-```
-
-For production, **ConfigMap** is the recommended way to manage the configuration file.
 
 ---
 

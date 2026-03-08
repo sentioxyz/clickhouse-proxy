@@ -16,7 +16,6 @@
 - [运行](#运行)
 - [部署](#部署)
   - [裸机部署](#裸机部署)
-  - [Kubernetes 部署](#kubernetes-部署)
 - [认证配置](#认证配置)
   - [Relay Token 传播](#relay-token-传播)
 - [SQL 重写配置](#sql-重写配置)
@@ -275,15 +274,7 @@ RestartSec=5
 WantedBy=multi-user.target
 ```
 
-### Kubernetes 部署
 
-项目中的 `configs/auth_ck.yaml` 提供了完整的 Kubernetes 部署示例，包含 ConfigMap + Sidecar 模式：
-
-```bash
-kubectl apply -f configs/auth_ck.yaml
-```
-
-生产环境推荐使用 **ConfigMap** 管理配置文件。
 
 ---
 
