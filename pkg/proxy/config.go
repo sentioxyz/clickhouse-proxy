@@ -36,19 +36,11 @@ type Config struct {
 	RelayPrivateKeyHex string `json:"relay_private_key_hex"`
 
 	// SQL Rewriter configuration
-	RewriterEnabled     bool     `json:"rewriter_enabled"`      // Whether to enable SQL rewriting
 	RewriterServiceAddr string   `json:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
 	RewriterTimeout     Duration `json:"rewriter_timeout"`      // Rewrite timeout
 
 	// Network State configuration
-	NetworkStateSource   string `json:"network_state_source"`   // State source: "file", "redis"
-	NetworkStateFile     string `json:"network_state_file"`     // YAML file path (for "file" source)
-	NetworkStateRedis    string `json:"network_state_redis"`    // Redis address (for "redis" source, e.g. "localhost:6379")
-	NetworkStatePostgres string `json:"network_state_postgres"` // PostgreSQL connection string
-
-	// CKHManager configuration (for SDK TableMapper - physical table name resolution)
-	CKHManagerConfigPath string `json:"ckh_manager_config"` // Path to ckhmanager YAML/JSON config file
-	PrivateKeyHex        string `json:"private_key_hex"`    // Private key hex for ClickHouse request signing (optional)
+	NetworkStateRedis string `json:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
 
 	// Streaming bufio size (bytes). Default: 131072 (128KB).
 	StreamingBufSize int `json:"streaming_buf_size"`
@@ -118,15 +110,11 @@ func DefaultConfig() Config {
 		AuthAllowedAddresses: nil,
 		AuthMaxTokenAge:      Duration{1 * time.Minute},
 		AuthAllowNoAuth:      false,
-		// Rewriter defaults: disabled by default
-		RewriterEnabled:     false,
+		// Rewriter defaults
 		RewriterServiceAddr: envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
 		RewriterTimeout:     Duration{5 * time.Second},
 		// Network state defaults
-		NetworkStateSource:   envOrDefault("CK_NETWORK_STATE_SOURCE", "file"),
-		NetworkStateFile:     envOrDefault("CK_NETWORK_STATE_FILE", ""),
-		NetworkStateRedis:    envOrDefault("CK_NETWORK_STATE_REDIS", ""),
-		NetworkStatePostgres: envOrDefault("CK_NETWORK_STATE_POSTGRES", ""),
+		NetworkStateRedis: envOrDefault("CK_NETWORK_STATE_REDIS", ""),
 		// Streaming buffer size
 		StreamingBufSize:      131072, // 128KB
 		ValidateChecksum:      false,

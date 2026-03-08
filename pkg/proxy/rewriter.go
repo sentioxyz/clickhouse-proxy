@@ -10,9 +10,7 @@ import (
 	"sync"
 	"time"
 
-	ckhmanager "sentioxyz/sentio-core/common/clickhousemanager"
 	log "sentioxyz/sentio-core/common/log"
-	"sentioxyz/sentio-core/network/sqlrewriter"
 	"sentioxyz/sentio-core/network/state"
 
 	pb "ck_remote_proxy/protos"
@@ -373,25 +371,8 @@ func (r *SentioNetworkRewriter) parseSentioNetworkTables(sql string) []ParsedTab
 	return tables
 }
 
-// SDKTableRewriterFactory creates a factory that uses sentio-core's sqlrewriter.NewTableMapper
-// to perform accurate logical-to-physical table name mapping.
-// ckhManager manages ClickHouse connections for metadata queries.
-// privateKeyHex is for request signing (can be empty to skip signing).
-func SDKTableRewriterFactory(ckhManager ckhmanager.Manager, privateKeyHex string) SentioNetworkTableRewriterFactory {
-	return func(ctx context.Context, processorId string,
-		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
-		// sentio-core's TableMapper interface is identical to SentioNetworkTableRewriter
-		return sqlrewriter.NewTableMapper(
-			privateKeyHex, processorId,
-			ckhManager,
-			indexerInfo,
-			processorInfo,
-		)
-	}
-}
-
-// DefaultTableRewriterFactory returns a fallback factory for testing without a real ckhmanager.
-// In production, use SDKTableRewriterFactory instead.
+// DefaultTableRewriterFactory returns a default factory that maps logical to physical tables.
+// Without CKHManager, this implementation passes the table name through directly.
 func DefaultTableRewriterFactory(database string) SentioNetworkTableRewriterFactory {
 	return func(ctx context.Context, processorId string,
 		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
@@ -403,8 +384,8 @@ func DefaultTableRewriterFactory(database string) SentioNetworkTableRewriterFact
 	}
 }
 
-// simpleTableRewriter is a fallback implementation for testing only.
-// In production, SDKTableRewriterFactory creates sentio-core TableMapper instances.
+// simpleTableRewriter is the default TableRewriter implementation.
+// It directly returns the table name without any physical mapping.
 type simpleTableRewriter struct {
 	database      string
 	processorId   string
@@ -419,13 +400,7 @@ func (s *simpleTableRewriter) Database() string {
 }
 
 func (s *simpleTableRewriter) RawTable(table string) (string, bool, error) {
-	if s.processorInfo.EntitySchemaVersion > 0 {
-		prefix := s.processorId
-		if len(prefix) > 8 {
-			prefix = prefix[:8]
-		}
-		return fmt.Sprintf("%s_%s", prefix, table), true, nil
-	}
+	// Without CKHManager, we assume the provided table name is already the physical table name.
 	return table, true, nil
 }
 

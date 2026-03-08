@@ -1559,7 +1559,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
 
 			// SQL rewriting (skip for __route__ connections and per-query skip_rewrite flag)
-			if p.rewriter != nil && p.cfg.RewriterEnabled && !isRoute && !skipRewrite {
+			if p.rewriter != nil && !isRoute && !skipRewrite {
 				rewriteStart := time.Now()
 				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body, clientUser, clientPassword)
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())

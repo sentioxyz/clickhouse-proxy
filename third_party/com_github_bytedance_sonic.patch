@@ -1,0 +1,11 @@
+--- a/internal/rt/map_nosiwss_go124.go
++++ b/internal/rt/map_nosiwss_go124.go
+@@ -1,6 +1,6 @@
+-//go:build go1.24 && !go1.26 && !goexperiment.swissmap
+-// +build go1.24,!go1.26,!goexperiment.swissmap
++//go:build go1.24 && !go1.26
++// +build go1.24,!go1.26
+
+ package rt
+
+ import (
