@@ -11,7 +11,7 @@
 - [编译指南](#编译指南)
 - [配置详解](#配置详解)
   - [配置文件](#配置文件)
-  - [环境变量](#环境变量)
+
   - [完整参数表](#完整参数表)
 - [运行](#运行)
 - [部署](#部署)
@@ -55,7 +55,7 @@ clickhouse-client --host localhost --port 9001
 
 本项目同时支持原生 Go 编译和 Bazel 构建（与 `sentio-core` 保持一致，推荐使用）。
 
-### 使用 Bazel 编译 (推荐)
+### 使用 Bazel 编译
 
 本项目使用 Bazel `8.5.1` 和 Bzlmod 进行依赖管理，包括对预编译版的 `protoc` 及交叉编译 C 工具链的支持：
 
@@ -118,19 +118,6 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
     "auth_enabled": false
 }
 ```
-
-### 环境变量
-
-以下配置项支持通过环境变量覆盖（优先级低于配置文件）：
-
-| 环境变量 | 对应配置项 | 是否必填 | 默认值 |
-|---------|-----------|---------|-------|
-| `CK_LISTEN` | `listen` | 否 | `:9001` |
-| `CK_UPSTREAM` | `upstream` | 否 | `clickhouse:9000` |
-| `CK_METRICS_LISTEN` | `metrics_listen` | 否 | `:9091` |
-| `CK_CONFIG` | 配置文件路径 | 否 | （无） |
-| `CK_REWRITER_ADDR` | `rewriter_service_addr` | 否 | `localhost:50051` |
-| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | 是 | （无） |
 
 ### 完整参数表
 
@@ -199,11 +186,7 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 ./clickhouse-proxy -config config.json
 ```
 
-### 使用环境变量
 
-```bash
-CK_LISTEN=":9001" CK_UPSTREAM="10.0.0.5:9000" ./clickhouse-proxy
-```
 
 ### 使用 go run（开发模式）
 
@@ -222,11 +205,7 @@ metrics listening on :9091
 
 ---
 
-## 部署
 
-
-
-### 裸机部署
 
 在没有 Docker 的环境下，直接编译并运行二进制文件：
 

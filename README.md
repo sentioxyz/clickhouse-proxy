@@ -11,7 +11,7 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 - [Build](#build)
 - [Configuration](#configuration)
   - [Config File](#config-file)
-  - [Environment Variables](#environment-variables)
+
   - [Full Parameter Reference](#full-parameter-reference)
 - [Running](#running)
 - [Deployment](#deployment)
@@ -119,18 +119,7 @@ Example configuration (`config.example.json`):
 }
 ```
 
-### Environment Variables
 
-The following config options can be overridden via environment variables (lower priority than config file):
-
-| Variable | Config Field | Required | Default |
-|----------|-------------|----------|---------|
-| `CK_LISTEN` | `listen` | No | `:9001` |
-| `CK_UPSTREAM` | `upstream` | No | `clickhouse:9000` |
-| `CK_METRICS_LISTEN` | `metrics_listen` | No | `:9091` |
-| `CK_CONFIG` | Config file path | No | (none) |
-| `CK_REWRITER_ADDR` | `rewriter_service_addr` | No | `localhost:50051` |
-| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | Yes | (none) |
 
 ### Full Parameter Reference
 
@@ -199,11 +188,7 @@ The following config options can be overridden via environment variables (lower 
 ./clickhouse-proxy -config config.json
 ```
 
-### With Environment Variables
 
-```bash
-CK_LISTEN=":9001" CK_UPSTREAM="10.0.0.5:9000" ./clickhouse-proxy
-```
 
 ### With go run (Development)
 
@@ -222,11 +207,7 @@ Press `Ctrl+C` for a graceful shutdown; final statistics are printed before exit
 
 ---
 
-## Deployment
 
-
-
-### Bare-metal Deployment
 
 For environments without Docker, build and run the binary directly:
 
