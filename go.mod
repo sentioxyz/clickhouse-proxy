@@ -92,7 +92,7 @@ require (
 
 replace github.com/ClickHouse/ch-go => github.com/sentioxyz/ch-go v0.71.0-sentioxyz-20260225
 
-replace github.com/ClickHouse/clickhouse-go/v2 => github.com/sentioxyz/clickhouse-go/v2 v2.40.3-sentioxyz-20260225
+replace github.com/ClickHouse/clickhouse-go/v2 => github.com/sentioxyz/clickhouse-go/v2 v2.41.0-sentioxyz
 
 // sentio-core declares module path as "sentioxyz/sentio-core" (without github.com/ prefix),
 // so we must use replace to map the import path. Use local path for development.
