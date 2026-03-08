@@ -1566,7 +1566,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				if err != nil {
 					log.Warnf("[conn %d] streaming: SQL rewrite failed: %v", id, err)
 					// Send Exception to client and stop processing
-					sendExceptionToClient(clientConn, 62, "UNKNOWN_TABLE", fmt.Sprintf("SQL rewrite failed: %v", err))
+					sendExceptionToClient(clientConn, 60, "UNKNOWN_TABLE", fmt.Sprintf("SQL rewrite failed: %v", err))
 					return
 				} else if rewrittenSQL != eq.Body {
 					log.Infof("[conn %d] streaming rewrite: %q -> %q", id, eq.Body, rewrittenSQL)
