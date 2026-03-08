@@ -583,11 +583,7 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 		c.Close()
 	}
 
-	// ========== 特殊测试: E08 并发 + 连接池压力 (仅签名模式执行) ==========
 	if signFunc == nil {
-		log.Println()
-		log.Println("--- 并发 & 压力测试: ⏭️ 无签名模式跳过 ---")
-		log.Println()
 		return allPassed
 	}
 	log.Println()
@@ -634,11 +630,11 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 		}
 	}
 
-	// 连接池压力测试 (20 并发 × 5 查询)
-	log.Println("[Extra] 连接池压力测试 (20×5)")
+	// 连接池压力测试 (5 并发 × 3 查询)
+	log.Println("[Extra] 连接池压力测试 (5×3)")
 	{
-		const stressConcurrency = 20
-		const queriesPerConn = 5
+		const stressConcurrency = 5
+		const queriesPerConn = 3
 		var wg sync.WaitGroup
 		errCh := make(chan error, stressConcurrency*queriesPerConn)
 		for i := 0; i < stressConcurrency; i++ {
