@@ -179,12 +179,6 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 |------|------|---------|-------|------|
 | `network_state_redis` | string | 是 | （空） | Redis statemirror 地址（如 `localhost:6379`） |
 
-#### CKH Manager（表名解析）
-
-| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
-|------|------|---------|-------|------|
-| `ckh_manager_config` | string | 否 | （空） | CKH Manager 配置文件路径（YAML/JSON），用于基于 SDK 的物理表名解析 |
-| `private_key_hex` | string | 否 | （空） | ClickHouse 请求签名的私钥（可选） |
 
 #### 高级配置
 
@@ -346,17 +340,6 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
     "network_state_redis": "localhost:6379"
-}
-```
-
-#### 使用 CKH Manager 进行表名解析
-
-在生产环境中，可通过 CKH Manager 进行物理表名解析（虚拟表名 → 物理表名）：
-
-```json
-{
-    "ckh_manager_config": "/path/to/ckhmanager.yaml",
-    "private_key_hex": "optional-signing-key"
 }
 ```
 

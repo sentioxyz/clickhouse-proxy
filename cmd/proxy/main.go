@@ -62,17 +62,7 @@ func main() {
 	}
 
 	// Create table rewriter factory
-	// If CKHManagerConfigPath is set, use the SDK factory with real ckhmanager
-	// Otherwise, fall back to simpleTableRewriter for testing
-	var tableRewriterFactory proxy.SentioNetworkTableRewriterFactory
-	if cfg.CKHManagerConfigPath != "" {
-		ckhManager := proxy.LoadCKHManager(cfg.CKHManagerConfigPath)
-		tableRewriterFactory = proxy.SDKTableRewriterFactory(ckhManager, cfg.PrivateKeyHex)
-		log.Infof("using SDK TableRewriterFactory with ckhmanager config=%s", cfg.CKHManagerConfigPath)
-	} else {
-		log.Warnf("ckh_manager_config not set, using fallback simpleTableRewriter (not suitable for production)")
-		tableRewriterFactory = proxy.DefaultTableRewriterFactory("sentio")
-	}
+	tableRewriterFactory := proxy.DefaultTableRewriterFactory("sentio")
 
 	// Create rewriter
 	rwConfig := proxy.RewriterConfig{

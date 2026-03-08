@@ -42,10 +42,6 @@ type Config struct {
 	// Network State configuration
 	NetworkStateRedis string `json:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
 
-	// CKHManager configuration (for SDK TableMapper - physical table name resolution)
-	CKHManagerConfigPath string `json:"ckh_manager_config"` // Path to ckhmanager YAML/JSON config file
-	PrivateKeyHex        string `json:"private_key_hex"`    // Private key hex for ClickHouse request signing (optional)
-
 	// Streaming bufio size (bytes). Default: 131072 (128KB).
 	StreamingBufSize int `json:"streaming_buf_size"`
 

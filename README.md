@@ -179,12 +179,6 @@ The following config options can be overridden via environment variables (lower 
 |-----------|------|----------|---------|-------------|
 | `network_state_redis` | string | Yes | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
 
-#### CKH Manager (Table Resolution)
-
-| Parameter | Type | Required | Default | Description |
-|-----------|------|----------|---------|-------------|
-| `ckh_manager_config` | string | No | (empty) | Path to CKH Manager YAML/JSON config file for SDK-based physical table name resolution |
-| `private_key_hex` | string | No | (empty) | Private key hex for ClickHouse request signing (optional) |
 
 #### Advanced
 
@@ -346,17 +340,6 @@ The proxy supports **Sentio Network SQL rewriting**, transforming virtual table 
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
     "network_state_redis": "localhost:6379"
-}
-```
-
-#### Using CKH Manager for Table Resolution
-
-For production table name resolution (virtual → physical), configure the CKH Manager:
-
-```json
-{
-    "ckh_manager_config": "/path/to/ckhmanager.yaml",
-    "private_key_hex": "optional-signing-key"
 }
 ```
 
