@@ -11,15 +11,8 @@
 - [编译指南](#编译指南)
 - [配置详解](#配置详解)
   - [配置文件](#配置文件)
-
   - [完整参数表](#完整参数表)
 - [运行](#运行)
-- [部署](#部署)
-  - [裸机部署](#裸机部署)
-- [认证配置](#认证配置)
-  - [Relay Token 传播](#relay-token-传播)
-- [SQL 重写配置](#sql-重写配置)
-- [测试](#测试)
 
 ---
 
@@ -101,10 +94,11 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 3. 当前目录下的 `config.json`（自动检测）
 4. 以上都没有时，使用内置默认值
 
-示例示例配置文件（不开启认证）：
+示例配置文件（不开启认证）：
 
 ```json
 {
+    // === 基础配置 ===
     "listen": ":9001",
     "upstream": "127.0.0.1:9000",
     "dial_timeout": "5s",
@@ -113,14 +107,24 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
     "shutdown_timeout": "30s",
     "stats_interval": "30s",
     "metrics_listen": ":9091",
+
+    // === 日志配置 ===
     "log_queries": true,
     "log_data": false,
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
+
+    // === 认证配置 ===
     "auth_enabled": false,
+
+    // === SQL 重写配置 ===
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
+
+    // === 网络状态配置 ===
     "network_state_redis": "localhost:6379",
+
+    // === 高级配置 ===
     "streaming_buf_size": 131072,
     "validate_checksum": false
 }
@@ -130,6 +134,7 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 
 ```json
 {
+    // === 基础配置 ===
     "listen": ":9001",
     "upstream": "127.0.0.1:9000",
     "dial_timeout": "5s",
@@ -138,20 +143,31 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
     "shutdown_timeout": "30s",
     "stats_interval": "30s",
     "metrics_listen": ":9091",
+
+    // === 日志配置 ===
     "log_queries": true,
     "log_data": false,
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
+
+    // === 认证配置 ===
     "auth_enabled": true,
     "auth_allowed_addresses": [
-      "0x1234567890123456789012345678901234567890"
+      "0x12345678901234567890123456...",
+      "YOUR_NEW_ADDRESS_HERE"
     ],
     "auth_max_token_age": "1m",
     "auth_allow_no_auth": false,
-    "relay_private_key_hex": "0x1234567890123456789012345678901234567890123456789012345678901234",
+    "relay_private_key_hex": "0x12345678901234567890123456...",
+
+    // === SQL 重写配置 ===
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
+
+    // === 网络状态配置 ===
     "network_state_redis": "localhost:6379",
+
+    // === 高级配置 ===
     "streaming_buf_size": 131072,
     "validate_checksum": false
 }
@@ -240,181 +256,3 @@ metrics listening on :9091
 ```
 
 按 `Ctrl+C` 优雅关闭，关闭前会打印最终统计信息。
-
----
-
-
-
-在没有 Docker 的环境下，直接编译并运行二进制文件：
-
-```bash
-# 1. 静态编译（推荐，适用于目标机器没有 Go 环境的情况）
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy ./cmd/proxy/
-
-# 2. 将二进制文件和配置拷贝到目标机器
-scp clickhouse-proxy config.json user@target-host:/opt/clickhouse-proxy/
-
-# 3. 在目标机器上运行
-ssh user@target-host
-cd /opt/clickhouse-proxy
-./clickhouse-proxy -config config.json
-
-# 4. (可选) 使用 systemd 管理服务
-```
-
-systemd 服务文件示例：
-
-```ini
-[Unit]
-Description=ClickHouse Proxy
-After=network.target
-
-[Service]
-Type=simple
-User=clickhouse-proxy
-WorkingDirectory=/opt/clickhouse-proxy
-ExecStart=/opt/clickhouse-proxy/clickhouse-proxy -config /opt/clickhouse-proxy/config.json
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-
-
----
-
-## 认证配置
-
-proxy 支持基于 **以太坊 secp256k1 签名的 JWS 认证**。启用后，客户端必须通过 ClickHouse 自定义设置 `SQL_x_auth_token` 传递 JWS token。
-
-### 启用认证
-
-```json
-{
-    "auth_enabled": true,
-    "auth_allowed_addresses": [
-        "0x1111111111111111111111111111111111111111"
-    ],
-    "auth_max_token_age": "1m",
-    "auth_allow_no_auth": false
-}
-```
-
-### 客户端使用示例
-
-```go
-// 使用 clickhouse-go SDK
-ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
-    "SQL_x_auth_token": clickhouse.CustomSetting{Value: jwsToken},
-}))
-rows, err := conn.Query(ctx, "SELECT 1")
-```
-
-### JWS Token 格式
-
-**Payload** 包含两个字段：
-- `iat`：Unix 时间戳（签发时间）
-- `qhash`：SQL 查询的 Keccak256 哈希（带 `0x` 前缀）
-
-支持 JWS Compact 序列化（单签名）和 JWS JSON 序列化（多签名）两种格式。
-
-### Relay Token 传播
-
-在多 proxy 集群中，当 ClickHouse 通过 `__route__` 连接发起 `remote()` 子查询时（Proxy1 → ClickHouse → Proxy2），Proxy1 会自动签发 relay JWS token 并注入到查询设置中，然后转发到 Proxy2。
-
-**工作流程：**
-1. Proxy1 收到来自本地 ClickHouse 的 `__route__` 连接。
-2. Proxy1 拦截第一个 Query 包，使用共享的以太坊私钥签发 relay JWS token。
-3. Proxy1 通过 `SQL_x_auth_token` 设置注入 token，转发到 Proxy2。
-4. Proxy2 通过普通的 JWS 验证流程校验 relay token。
-
-**配置：**
-
-```json
-{
-    "auth_enabled": true,
-    "relay_private_key_hex": "shared-ethereum-private-key-hex",
-    "auth_allowed_addresses": [
-        "0x<relay-private-key-对应的以太坊地址>"
-    ]
-}
-```
-
-> **重要**：集群内所有 proxy 必须共享相同的 `relay_private_key_hex`，且对应的以太坊地址必须在 `auth_allowed_addresses` 中。
-
----
-
-## SQL 重写配置
-
-proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_name>` 格式的虚拟表名重写为实际的 ClickHouse `remote()` 表达式。该功能需要外部 gRPC 重写服务和网络状态数据源。
-
-### 启用 SQL 重写
-
-```json
-{
-    "rewriter_service_addr": "localhost:50051",
-    "rewriter_timeout": "5s",
-    "network_state_redis": "localhost:6379"
-}
-```
-
-### 按查询跳过重写
-
-当 SQL 重写全局开启时，客户端可以通过 ClickHouse 自定义设置 `SQL_skip_rewrite` 在 **单条查询** 级别跳过重写。这对于 `INSERT` 等不需要重写的语句尤其有用。
-
-```go
-// Go 客户端示例：INSERT 时跳过重写
-ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
-    "SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
-}))
-conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
-```
-
-> **注意**：`SQL_skip_rewrite` 是 Proxy 自定义设置，会在转发前自动剥离，不会发送到 ClickHouse Server。
-
-
-
----
-
-## 测试
-
-### 单元测试
-
-```bash
-# Go 原生
-go test ./...
-```
-
-### 本地集成测试
-
-验证 proxy 能正确转发查询和数据：
-
-```bash
-make test-forwarding
-```
-
-### 流式回放测试（生产级验证）
-
-从运行中的 ClickHouse Pod 流式回放真实查询日志，验证 proxy 的正确性：
-
-```bash
-# 前提：需要配置好 kubectl 和 ClickHouse 集群访问权限
-
-# 回放最近 1 小时的查询
-make test-stream-replay POD=<pod-name>
-
-# 只回放最近 100 条查询
-make test-stream-replay POD=<pod-name> N=100
-
-# 回放最近 30 天全部查询（压力测试）
-make test-stream-replay POD=<pod-name> SINCE="30 day" N=0
-```
-
-成功标志：
-- 测试结束时显示 `✅ All queries forwarded!`
-- Failures 计数为 0
-- proxy 日志中无 panic
-
-

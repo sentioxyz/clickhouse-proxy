@@ -11,15 +11,8 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 - [Build](#build)
 - [Configuration](#configuration)
   - [Config File](#config-file)
-
   - [Full Parameter Reference](#full-parameter-reference)
 - [Running](#running)
-- [Deployment](#deployment)
-  - [Bare-metal Deployment](#bare-metal-deployment)
-- [Authentication](#authentication)
-  - [Relay Token Propagation](#relay-token-propagation)
-- [SQL Rewriter](#sql-rewriter)
-- [Testing](#testing)
 
 ---
 
@@ -105,6 +98,7 @@ Example configuration (`config.example.json`) without authentication:
 
 ```json
 {
+    // === Core Settings ===
     "listen": ":9001",
     "upstream": "127.0.0.1:9000",
     "dial_timeout": "5s",
@@ -113,14 +107,24 @@ Example configuration (`config.example.json`) without authentication:
     "shutdown_timeout": "30s",
     "stats_interval": "30s",
     "metrics_listen": ":9091",
+
+    // === Logging ===
     "log_queries": true,
     "log_data": false,
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
+
+    // === Authentication ===
     "auth_enabled": false,
+
+    // === SQL Rewriter ===
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
+
+    // === Network State ===
     "network_state_redis": "localhost:6379",
+
+    // === Advanced ===
     "streaming_buf_size": 131072,
     "validate_checksum": false
 }
@@ -130,6 +134,7 @@ Example configuration with authentication enabled:
 
 ```json
 {
+    // === Core Settings ===
     "listen": ":9001",
     "upstream": "127.0.0.1:9000",
     "dial_timeout": "5s",
@@ -138,20 +143,31 @@ Example configuration with authentication enabled:
     "shutdown_timeout": "30s",
     "stats_interval": "30s",
     "metrics_listen": ":9091",
+
+    // === Logging ===
     "log_queries": true,
     "log_data": false,
     "max_query_log_bytes": 300,
     "max_data_log_bytes": 200,
+
+    // === Authentication ===
     "auth_enabled": true,
     "auth_allowed_addresses": [
-      "0x1234567890123456789012345678901234567890"
+      "0x12345678901234567890123456...",
+      "YOUR_NEW_ADDRESS_HERE"
     ],
     "auth_max_token_age": "1m",
     "auth_allow_no_auth": false,
-    "relay_private_key_hex": "0x1234567890123456789012345678901234567890123456789012345678901234",
+    "relay_private_key_hex": "0x12345678901234567890123456...",
+
+    // === SQL Rewriter ===
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
+
+    // === Network State ===
     "network_state_redis": "localhost:6379",
+
+    // === Advanced ===
     "streaming_buf_size": 131072,
     "validate_checksum": false
 }
@@ -242,181 +258,3 @@ metrics listening on :9091
 ```
 
 Press `Ctrl+C` for a graceful shutdown; final statistics are printed before exit.
-
----
-
-
-
-For environments without Docker, build and run the binary directly:
-
-```bash
-# 1. Static cross-compile (recommended when deploying to a machine without Go)
-CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy ./cmd/proxy/
-
-# 2. Copy the binary and config to the target host
-scp clickhouse-proxy config.json user@target-host:/opt/clickhouse-proxy/
-
-# 3. Run on the target host
-ssh user@target-host
-cd /opt/clickhouse-proxy
-./clickhouse-proxy -config config.json
-
-# 4. (Optional) Manage as a systemd service
-```
-
-Example systemd unit file:
-
-```ini
-[Unit]
-Description=ClickHouse Proxy
-After=network.target
-
-[Service]
-Type=simple
-User=clickhouse-proxy
-WorkingDirectory=/opt/clickhouse-proxy
-ExecStart=/opt/clickhouse-proxy/clickhouse-proxy -config /opt/clickhouse-proxy/config.json
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-```
-
-
-
----
-
-## Authentication
-
-The proxy supports **JWS authentication with Ethereum secp256k1 signatures**. When enabled, clients must pass a JWS token via the ClickHouse custom setting `SQL_x_auth_token`.
-
-### Enable Authentication
-
-```json
-{
-    "auth_enabled": true,
-    "auth_allowed_addresses": [
-        "0x1111111111111111111111111111111111111111"
-    ],
-    "auth_max_token_age": "1m",
-    "auth_allow_no_auth": false
-}
-```
-
-### Client Example
-
-```go
-// Using clickhouse-go SDK
-ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
-    "SQL_x_auth_token": clickhouse.CustomSetting{Value: jwsToken},
-}))
-rows, err := conn.Query(ctx, "SELECT 1")
-```
-
-### JWS Token Format
-
-The **payload** contains two fields:
-- `iat` — Unix timestamp (issued at)
-- `qhash` — Keccak256 hash of the SQL query (hex with `0x` prefix)
-
-Both JWS Compact Serialization (single signature) and JWS JSON Serialization (multi-signature) formats are supported.
-
-### Relay Token Propagation
-
-In a multi-proxy cluster, when ClickHouse initiates a `remote()` sub-query via `__route__` connections (Proxy1 → ClickHouse → Proxy2), Proxy1 automatically signs a relay JWS token and injects it into the query settings before forwarding to Proxy2.
-
-**How it works:**
-1. Proxy1 receives a `__route__` connection from the local ClickHouse.
-2. Proxy1 intercepts the first Query packet and signs a relay JWS token using the shared Ethereum private key.
-3. Proxy1 injects the token via `SQL_x_auth_token` setting and forwards to Proxy2.
-4. Proxy2 validates the relay token through its normal JWS validation flow.
-
-**Configuration:**
-
-```json
-{
-    "auth_enabled": true,
-    "relay_private_key_hex": "your-shared-ethereum-private-key-hex",
-    "auth_allowed_addresses": [
-        "0x<address-derived-from-relay-private-key>"
-    ]
-}
-```
-
-> **Important**: All proxies in the cluster must share the same `relay_private_key_hex`, and the corresponding Ethereum address must be in `auth_allowed_addresses`.
-
----
-
-## SQL Rewriter
-
-The proxy supports **Sentio Network SQL rewriting**, transforming virtual table names in the format `sentio_<processor_id>.<table_name>` into actual ClickHouse `remote()` expressions. This feature requires an external gRPC rewriter service and a network state provider.
-
-### Enable SQL Rewriting
-
-```json
-{
-    "rewriter_service_addr": "localhost:50051",
-    "rewriter_timeout": "5s",
-    "network_state_redis": "localhost:6379"
-}
-```
-
-### Per-Query Skip Rewrite
-
-When SQL rewriting is globally enabled, clients can skip rewriting on a **per-query basis** by setting the custom ClickHouse setting `SQL_skip_rewrite=1`. This is especially useful for `INSERT` statements that should not be rewritten.
-
-```go
-// Go client example: skip rewriting for INSERT
-ctx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
-    "SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
-}))
-conn.Exec(ctx, "INSERT INTO sentio_eth.transfer ...")
-```
-
-> **Note**: `SQL_skip_rewrite` is a proxy-only custom setting. It is automatically stripped before forwarding to the upstream ClickHouse server.
-
-
-
----
-
-## Testing
-
-### Unit Tests
-
-```bash
-# Go native
-go test ./...
-```
-
-### Local Integration Tests
-
-Verify that the proxy correctly forwards queries and data:
-
-```bash
-make test-forwarding
-```
-
-### Stream Replay Tests (Production-grade Verification)
-
-Stream real query logs from a running ClickHouse pod and replay them against the local proxy:
-
-```bash
-# Prerequisites: kubectl configured with ClickHouse cluster access
-
-# Replay the last hour of queries
-make test-stream-replay POD=<pod-name>
-
-# Replay only the last 100 queries
-make test-stream-replay POD=<pod-name> N=100
-
-# Replay all queries from the last 30 days (stress test)
-make test-stream-replay POD=<pod-name> SINCE="30 day" N=0
-```
-
-Success criteria:
-- Test ends with `✅ All queries forwarded!`
-- Failures count is 0
-- No panics in the proxy log summary
-
-
