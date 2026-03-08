@@ -136,10 +136,7 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 | `CK_METRICS_LISTEN` | `metrics_listen` | 否 | `:9091` |
 | `CK_CONFIG` | 配置文件路径 | 否 | （无） |
 | `CK_REWRITER_ADDR` | `rewriter_service_addr` | 否 | `localhost:50051` |
-| `CK_NETWORK_STATE_SOURCE` | `network_state_source` | 否 | `file` |
-| `CK_NETWORK_STATE_FILE` | `network_state_file` | 否 | （无） |
-| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | 否 (选 redis 时必填) | （无） |
-| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | 否 | （无） |
+| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | 是 | （无） |
 
 ### 完整参数表
 
@@ -186,10 +183,7 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 
 | 参数 | 类型 | 是否必填 | 默认值 | 说明 |
 |------|------|---------|-------|------|
-| `network_state_source` | string | 否 | `file` | 网络状态数据来源，支持 `file` 和 `redis` |
-| `network_state_file` | string | 否 | （空） | 网络状态 YAML 文件路径（`file` 模式使用） |
-| `network_state_redis` | string | 否 (选 redis 时必填) | （空） | Redis statemirror 地址（如 `localhost:6379`） |
-| `network_state_postgres` | string | 否 | （空） | PostgreSQL 连接串（预留） |
+| `network_state_redis` | string | 是 | （空） | Redis statemirror 地址（如 `localhost:6379`） |
 
 #### CKH Manager（表名解析）
 
@@ -417,19 +411,6 @@ proxy 支持 **Sentio Network SQL 重写**，将 `sentio_<processor_id>.<table_n
 {
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
-    "network_state_source": "file",
-    "network_state_file": "./network_state.yaml"
-}
-```
-
-#### 使用 Redis 作为网络状态源
-
-在生产环境中，proxy 支持 Redis statemirror 作为实时网络状态源：
-
-```json
-{
-    "rewriter_service_addr": "localhost:50051",
-    "network_state_source": "redis",
     "network_state_redis": "localhost:6379"
 }
 ```

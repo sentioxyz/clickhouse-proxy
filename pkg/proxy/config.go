@@ -40,10 +40,7 @@ type Config struct {
 	RewriterTimeout     Duration `json:"rewriter_timeout"`      // Rewrite timeout
 
 	// Network State configuration
-	NetworkStateSource   string `json:"network_state_source"`   // State source: "file", "redis"
-	NetworkStateFile     string `json:"network_state_file"`     // YAML file path (for "file" source)
-	NetworkStateRedis    string `json:"network_state_redis"`    // Redis address (for "redis" source, e.g. "localhost:6379")
-	NetworkStatePostgres string `json:"network_state_postgres"` // PostgreSQL connection string
+	NetworkStateRedis string `json:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
 
 	// CKHManager configuration (for SDK TableMapper - physical table name resolution)
 	CKHManagerConfigPath string `json:"ckh_manager_config"` // Path to ckhmanager YAML/JSON config file
@@ -121,10 +118,7 @@ func DefaultConfig() Config {
 		RewriterServiceAddr: envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
 		RewriterTimeout:     Duration{5 * time.Second},
 		// Network state defaults
-		NetworkStateSource:   envOrDefault("CK_NETWORK_STATE_SOURCE", "file"),
-		NetworkStateFile:     envOrDefault("CK_NETWORK_STATE_FILE", ""),
-		NetworkStateRedis:    envOrDefault("CK_NETWORK_STATE_REDIS", ""),
-		NetworkStatePostgres: envOrDefault("CK_NETWORK_STATE_POSTGRES", ""),
+		NetworkStateRedis: envOrDefault("CK_NETWORK_STATE_REDIS", ""),
 		// Streaming buffer size
 		StreamingBufSize:      131072, // 128KB
 		ValidateChecksum:      false,

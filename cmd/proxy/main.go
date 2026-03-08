@@ -50,32 +50,15 @@ func main() {
 	var rewriter proxy.Rewriter
 	// Load network state
 	var networkState proxy.NetworkState
-	switch cfg.NetworkStateSource {
-	case "file":
-		if cfg.NetworkStateFile != "" {
-			state, err := proxy.LoadNetworkStateFromYAML(cfg.NetworkStateFile)
-			if err != nil {
-				log.Fatalf("failed to load network state from file: %v", err)
-			}
-			networkState = state
-		} else {
-			log.Warnf("rewriter enabled but no network state file configured, using empty state")
-			networkState = proxy.NewInMemoryNetworkState()
+	if cfg.NetworkStateRedis != "" {
+		state, err := proxy.NewRedisNetworkState(cfg.NetworkStateRedis)
+		if err != nil {
+			log.Fatalf("failed to connect to Redis network state: %v", err)
 		}
-	case "redis":
-		if cfg.NetworkStateRedis != "" {
-			state, err := proxy.NewRedisNetworkState(cfg.NetworkStateRedis)
-			if err != nil {
-				log.Fatalf("failed to connect to Redis network state: %v", err)
-			}
-			defer state.Close()
-			networkState = state
-		} else {
-			log.Fatalf("network_state_source is 'redis' but network_state_redis address is not configured")
-		}
-	default:
-		log.Warnf("unknown network state source %q, using empty state", cfg.NetworkStateSource)
-		networkState = proxy.NewInMemoryNetworkState()
+		defer state.Close()
+		networkState = state
+	} else {
+		log.Fatalf("network_state_redis is required for network state")
 	}
 
 	// Create table rewriter factory

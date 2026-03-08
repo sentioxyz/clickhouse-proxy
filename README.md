@@ -136,10 +136,7 @@ The following config options can be overridden via environment variables (lower 
 | `CK_METRICS_LISTEN` | `metrics_listen` | No | `:9091` |
 | `CK_CONFIG` | Config file path | No | (none) |
 | `CK_REWRITER_ADDR` | `rewriter_service_addr` | No | `localhost:50051` |
-| `CK_NETWORK_STATE_SOURCE` | `network_state_source` | No | `file` |
-| `CK_NETWORK_STATE_FILE` | `network_state_file` | No | (none) |
-| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | No (Yes if source=redis) | (none) |
-| `CK_NETWORK_STATE_POSTGRES` | `network_state_postgres` | No | (none) |
+| `CK_NETWORK_STATE_REDIS` | `network_state_redis` | Yes | (none) |
 
 ### Full Parameter Reference
 
@@ -186,10 +183,7 @@ The following config options can be overridden via environment variables (lower 
 
 | Parameter | Type | Required | Default | Description |
 |-----------|------|----------|---------|-------------|
-| `network_state_source` | string | No | `file` | Network state data source; supports `file` and `redis` |
-| `network_state_file` | string | No | (empty) | Path to the network state YAML file (for `file` source) |
-| `network_state_redis` | string | No (Yes if source=redis) | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
-| `network_state_postgres` | string | No | (empty) | PostgreSQL connection string (reserved) |
+| `network_state_redis` | string | Yes | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
 
 #### CKH Manager (Table Resolution)
 
@@ -417,19 +411,6 @@ The proxy supports **Sentio Network SQL rewriting**, transforming virtual table 
 {
     "rewriter_service_addr": "localhost:50051",
     "rewriter_timeout": "5s",
-    "network_state_source": "file",
-    "network_state_file": "./network_state.yaml"
-}
-```
-
-#### Using Redis for Network State
-
-For production environments, the proxy supports Redis statemirror as a real-time network state source:
-
-```json
-{
-    "rewriter_service_addr": "localhost:50051",
-    "network_state_source": "redis",
     "network_state_redis": "localhost:6379"
 }
 ```
