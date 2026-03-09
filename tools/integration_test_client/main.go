@@ -322,6 +322,218 @@ func runPhaseAuthValid() bool {
 		}
 	}
 
+	// ========== SDK API 签名测试 (2.5–2.8) — 双签名模式 ==========
+	// 每个测试执行两次: ① 连接级签名 ② 查询级签名 (WithSignFunc)
+	{
+		type sdkSignMode struct {
+			name    string
+			connSF  func(string) (string, error)
+			makeCtx func() context.Context // 返回含 SQL_skip_rewrite + 可能含 WithSignFunc 的 ctx
+		}
+		sdkModes := []sdkSignMode{
+			{
+				name:   "连接级签名",
+				connSF: signFunc,
+				makeCtx: func() context.Context {
+					return clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
+						"SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
+					}))
+				},
+			},
+			{
+				name:   "查询级签名",
+				connSF: nil, // 连接无签名
+				makeCtx: func() context.Context {
+					return clickhouse.Context(context.Background(),
+						clickhouse.WithSignFunc(signFunc),
+						clickhouse.WithSettings(clickhouse.Settings{
+							"SQL_skip_rewrite": clickhouse.CustomSetting{Value: "1"},
+						}),
+					)
+				},
+			},
+		}
+
+		for mi, mode := range sdkModes {
+			log.Println()
+			log.Printf("========== SDK API 签名测试 - 模式 %d: %s ==========", mi+1, mode.name)
+			log.Println()
+
+			sc := openConnection(mode.connSF)
+			if sc == nil {
+				log.Printf("  ❌ 模式 [%s] 打开连接失败", mode.name)
+				allPassed = false
+				continue
+			}
+
+			skipCtx := mode.makeCtx()
+			prefix := fmt.Sprintf("[%s]", mode.name)
+
+			// Test 2.5: 普通查询与参数化查询
+			log.Printf("%s [Test 2.5] 普通查询与参数化查询", prefix)
+			{
+				// 2.5a: 普通 SELECT count(*)
+				log.Printf("%s   [2.5a] 普通 SELECT count(*)", prefix)
+				var count uint64
+				if err := sc.QueryRow(skipCtx, "SELECT count(*) FROM sentio.orders").Scan(&count); err != nil {
+					log.Printf("%s     ❌ SELECT count(*) 失败: %v", prefix, err)
+					allPassed = false
+				} else {
+					log.Printf("%s     ✅ SELECT count(*) = %d", prefix, count)
+				}
+
+				// 2.5b: 参数化查询
+				log.Printf("%s   [2.5b] 参数化查询 WHERE order_id > @id", prefix)
+				rows, err := sc.Query(skipCtx,
+					"SELECT order_id, customer FROM sentio.orders WHERE order_id > @id ORDER BY order_id",
+					clickhouse.Named("id", 1003),
+				)
+				if err != nil {
+					log.Printf("%s     ❌ 参数化查询失败: %v", prefix, err)
+					allPassed = false
+				} else {
+					paramCount := 0
+					for rows.Next() {
+						var orderID uint32
+						var customer string
+						if err := rows.Scan(&orderID, &customer); err != nil {
+							log.Printf("%s     ❌ 扫描行失败: %v", prefix, err)
+							allPassed = false
+							break
+						}
+						paramCount++
+					}
+					rows.Close()
+					if paramCount == 2 {
+						log.Printf("%s     ✅ 参数化查询成功，返回 %d 行 (order_id > 1003)", prefix, paramCount)
+					} else {
+						log.Printf("%s     ❌ 预期 2 行 (order_id > 1003)，实际 %d 行", prefix, paramCount)
+						allPassed = false
+					}
+				}
+			}
+
+			// Test 2.6: 批量插入 Batch Insert
+			log.Printf("%s [Test 2.6] 批量插入 Batch Insert (PrepareBatch)", prefix)
+			{
+				const batchSize = 1000
+				const batchStartID = 900000
+
+				batch, err := sc.PrepareBatch(skipCtx, "INSERT INTO sentio.orders (order_id, customer, product_id, quantity, amount, order_date)")
+				if err != nil {
+					log.Printf("%s   ❌ PrepareBatch 失败: %v", prefix, err)
+					allPassed = false
+				} else {
+					appendOK := true
+					for i := 0; i < batchSize; i++ {
+						if err := batch.Append(
+							uint32(batchStartID+i),
+							fmt.Sprintf("test-user-%d", i),
+							uint32(101),
+							uint32(1),
+							float64(9.99),
+							time.Now(),
+						); err != nil {
+							log.Printf("%s   ❌ Append 第 %d 行失败: %v", prefix, i, err)
+							appendOK = false
+							allPassed = false
+							break
+						}
+					}
+
+					if appendOK {
+						if err := batch.Send(); err != nil {
+							log.Printf("%s   ❌ Batch Send 失败: %v", prefix, err)
+							allPassed = false
+						} else {
+							var insertedCount uint64
+							if err := sc.QueryRow(skipCtx,
+								"SELECT count(*) FROM sentio.orders WHERE order_id >= @start_id",
+								clickhouse.Named("start_id", batchStartID),
+							).Scan(&insertedCount); err != nil {
+								log.Printf("%s   ❌ 验证行数失败: %v", prefix, err)
+								allPassed = false
+							} else if insertedCount != batchSize {
+								log.Printf("%s   ❌ 预期 %d 行，实际 %d 行", prefix, batchSize, insertedCount)
+								allPassed = false
+							} else {
+								log.Printf("%s   ✅ Batch Insert 成功: %d 行已插入并验证", prefix, insertedCount)
+							}
+						}
+					}
+				}
+
+				// 清理
+				log.Printf("%s   [清理] 删除批量插入的测试数据", prefix)
+				if err := sc.Exec(skipCtx,
+					fmt.Sprintf("ALTER TABLE sentio.orders DELETE WHERE order_id >= %d SETTINGS mutations_sync = 2", batchStartID)); err != nil {
+					log.Printf("%s   ⚠️  清理测试数据失败: %v", prefix, err)
+				} else {
+					log.Printf("%s   ✅ 批量插入测试数据已清理", prefix)
+				}
+			}
+
+			// Test 2.7: Select struct 扫描
+			log.Printf("%s [Test 2.7] Select struct 扫描", prefix)
+			{
+				type Order struct {
+					OrderID   uint32  `ch:"order_id"`
+					Customer  string  `ch:"customer"`
+					ProductID uint32  `ch:"product_id"`
+					Quantity  uint32  `ch:"quantity"`
+					Amount    float64 `ch:"amount"`
+				}
+
+				var orders []Order
+				if err := sc.Select(skipCtx, &orders,
+					"SELECT order_id, customer, product_id, quantity, amount FROM sentio.orders ORDER BY order_id"); err != nil {
+					log.Printf("%s   ❌ Select 失败: %v", prefix, err)
+					allPassed = false
+				} else if len(orders) < 5 {
+					log.Printf("%s   ❌ 预期至少 5 行，实际 %d 行", prefix, len(orders))
+					allPassed = false
+				} else {
+					log.Printf("%s   ✅ Select 成功: %d 行 (首行: order_id=%d, customer=%s)",
+						prefix, len(orders), orders[0].OrderID, orders[0].Customer)
+				}
+			}
+
+			// Test 2.8: AsyncInsert 异步插入
+			log.Printf("%s [Test 2.8] AsyncInsert 异步插入", prefix)
+			{
+				const asyncTestID = 899999
+
+				err := sc.AsyncInsert(skipCtx,
+					fmt.Sprintf("INSERT INTO sentio.orders (order_id, customer, product_id, quantity, amount, order_date) VALUES (%d, 'async-test', 101, 1, 1.00, '2025-01-01')", asyncTestID),
+					true,
+				)
+				if err != nil {
+					log.Printf("%s   ❌ AsyncInsert 失败: %v", prefix, err)
+					allPassed = false
+				} else {
+					var cnt uint64
+					if err := sc.QueryRow(skipCtx,
+						"SELECT count(*) FROM sentio.orders WHERE order_id = @id",
+						clickhouse.Named("id", asyncTestID),
+					).Scan(&cnt); err != nil {
+						log.Printf("%s   ❌ 验证 AsyncInsert 失败: %v", prefix, err)
+						allPassed = false
+					} else if cnt == 1 {
+						log.Printf("%s   ✅ AsyncInsert 成功: order_id=%d 已插入", prefix, asyncTestID)
+					} else {
+						log.Printf("%s   ❌ AsyncInsert 验证异常: 预期 1 行, 实际 %d 行", prefix, cnt)
+						allPassed = false
+					}
+				}
+
+				// 清理
+				sc.Exec(skipCtx, fmt.Sprintf("ALTER TABLE sentio.orders DELETE WHERE order_id = %d SETTINGS mutations_sync = 2", asyncTestID))
+			}
+
+			sc.Close()
+		} // end dual-mode loop
+	}
+
 	// ========== SQL 文件驱动测试 ==========
 	if *sqlfile != "" {
 		if !runSQLFileTests(signFunc, *sqlfile, *runOnly) {
