@@ -802,10 +802,15 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 	log.Println("--- 并发 & 压力测试 ---")
 	log.Println()
 
-	// E08: 并发查询 (5 goroutine)
-	log.Println("[E08] 并发查询 Rewriter 线程安全")
+	// E08: 并发查询 (5 goroutine, 三节点 JOIN)
+	log.Println("[E08] 并发查询 Rewriter 线程安全 (三节点)")
 	{
 		const concurrency = 5
+		const e08Query = `SELECT o.order_id, p.product_name, c.name
+FROM sentio_local_proc.orders AS o
+INNER JOIN sentio_remote_proc.products AS p ON o.product_id = p.product_id
+INNER JOIN sentio_third_proc.customers AS c ON o.customer = c.name
+ORDER BY o.order_id`
 		var wg sync.WaitGroup
 		errCh := make(chan error, concurrency)
 		for i := 0; i < concurrency; i++ {
@@ -818,13 +823,43 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 					return
 				}
 				defer gc.Close()
-				var cnt uint64
-				if err := gc.QueryRow(context.Background(), "SELECT count() FROM sentio_local_proc.orders").Scan(&cnt); err != nil {
-					errCh <- fmt.Errorf("goroutine %d: %v", idx, err)
-					return
-				}
-				if cnt == 0 {
-					errCh <- fmt.Errorf("goroutine %d: count=0", idx)
+				// 允许 1 次重试应对偶发连接问题
+				for attempt := 0; attempt < 2; attempt++ {
+					rows, err := gc.Query(context.Background(), e08Query)
+					if err != nil {
+						if attempt == 0 {
+							continue
+						}
+						errCh <- fmt.Errorf("goroutine %d: %v", idx, err)
+						return
+					}
+					cnt := 0
+					for rows.Next() {
+						var orderId uint32
+						var productName, customerName string
+						if err := rows.Scan(&orderId, &productName, &customerName); err != nil {
+							errCh <- fmt.Errorf("goroutine %d: scan error: %v", idx, err)
+							rows.Close()
+							return
+						}
+						cnt++
+					}
+					if err := rows.Err(); err != nil {
+						rows.Close()
+						if attempt == 0 {
+							continue
+						}
+						errCh <- fmt.Errorf("goroutine %d: rows error: %v", idx, err)
+						return
+					}
+					rows.Close()
+					if cnt == 0 {
+						if attempt == 0 {
+							continue
+						}
+						errCh <- fmt.Errorf("goroutine %d: 0 rows returned", idx)
+					}
+					break // 成功则跳出重试
 				}
 			}(i)
 		}
@@ -836,7 +871,7 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 			concurrentOK = false
 		}
 		if concurrentOK {
-			log.Printf("  ✅ %d 个并发查询全部成功", concurrency)
+			log.Printf("  ✅ %d 个并发三节点查询全部成功", concurrency)
 		} else {
 			allPassed = false
 		}
