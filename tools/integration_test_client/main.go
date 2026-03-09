@@ -823,18 +823,43 @@ ORDER BY o.order_id`
 					return
 				}
 				defer gc.Close()
-				rows, err := gc.Query(context.Background(), e08Query)
-				if err != nil {
-					errCh <- fmt.Errorf("goroutine %d: %v", idx, err)
-					return
-				}
-				cnt := 0
-				for rows.Next() {
-					cnt++
-				}
-				rows.Close()
-				if cnt == 0 {
-					errCh <- fmt.Errorf("goroutine %d: 0 rows returned", idx)
+				// 允许 1 次重试应对偶发连接问题
+				for attempt := 0; attempt < 2; attempt++ {
+					rows, err := gc.Query(context.Background(), e08Query)
+					if err != nil {
+						if attempt == 0 {
+							continue
+						}
+						errCh <- fmt.Errorf("goroutine %d: %v", idx, err)
+						return
+					}
+					cnt := 0
+					for rows.Next() {
+						var orderId uint32
+						var productName, customerName string
+						if err := rows.Scan(&orderId, &productName, &customerName); err != nil {
+							errCh <- fmt.Errorf("goroutine %d: scan error: %v", idx, err)
+							rows.Close()
+							return
+						}
+						cnt++
+					}
+					if err := rows.Err(); err != nil {
+						rows.Close()
+						if attempt == 0 {
+							continue
+						}
+						errCh <- fmt.Errorf("goroutine %d: rows error: %v", idx, err)
+						return
+					}
+					rows.Close()
+					if cnt == 0 {
+						if attempt == 0 {
+							continue
+						}
+						errCh <- fmt.Errorf("goroutine %d: 0 rows returned", idx)
+					}
+					break // 成功则跳出重试
 				}
 			}(i)
 		}
