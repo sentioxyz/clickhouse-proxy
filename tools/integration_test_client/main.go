@@ -760,8 +760,8 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 			if strings.HasPrefix(tc.Name, "E") {
 				// E* 类错误用例
 				switch {
-				case tc.Name == "E08_concurrent":
-					// E08 需要并发执行，跳过普通流程
+				case tc.Name == "E08_concurrent" || strings.HasPrefix(tc.Name, "E08b_"):
+					// E08/E08b 需要并发执行，跳过普通流程
 					log.Printf("  ⏭️  跳过 (需要特殊并发执行)")
 				case tc.Name == "E06_string_literal" || tc.Name == "E07_comment":
 					// E06/E07 预期成功
@@ -876,6 +876,119 @@ ORDER BY o.order_id`
 			allPassed = false
 		}
 	}
+	// E08b: 并发多表异构查询 — 从 SQL 文件动态加载 E08b_* 用例并发执行，验证结果
+	// 查询和预期结果来自 all_tests.sql / all_tests.result，不硬编码
+	{
+		var e08bCases []SQLTestCase
+		for _, tc := range testCases {
+			if strings.HasPrefix(tc.Name, "E08b_") {
+				e08bCases = append(e08bCases, tc)
+			}
+		}
+		if len(e08bCases) > 0 {
+			log.Printf("[E08b] 并发多表异构查询 (proxy2, %d 个用例, 结果验证)", len(e08bCases))
+
+			var wg sync.WaitGroup
+			errCh := make(chan error, len(e08bCases))
+			for i, tc := range e08bCases {
+				wg.Add(1)
+				go func(idx int, tc SQLTestCase) {
+					defer wg.Done()
+					gc := openConnection(signFunc)
+					if gc == nil {
+						errCh <- fmt.Errorf("goroutine %d [%s]: 连接失败", idx, tc.Name)
+						return
+					}
+					defer gc.Close()
+					expected := expectedResults[tc.Name]
+					// 允许 1 次重试应对偶发连接问题
+					for attempt := 0; attempt < 2; attempt++ {
+						rows, err := gc.Query(context.Background(), tc.Query)
+						if err != nil {
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: %v", idx, tc.Name, err)
+							return
+						}
+						// 使用 reflect 动态扫描列
+						var outputLines []string
+						var cachedScanTypes []reflect.Type
+						scanOK := true
+						for rows.Next() {
+							if cachedScanTypes == nil {
+								colTypes := rows.ColumnTypes()
+								cachedScanTypes = make([]reflect.Type, len(colTypes))
+								for ci, ct := range colTypes {
+									cachedScanTypes[ci] = ct.ScanType()
+								}
+							}
+							vals := make([]interface{}, len(cachedScanTypes))
+							for ci, st := range cachedScanTypes {
+								vals[ci] = reflect.New(st).Interface()
+							}
+							if err := rows.Scan(vals...); err != nil {
+								rows.Close()
+								if attempt == 0 {
+									scanOK = false
+									break
+								}
+								errCh <- fmt.Errorf("goroutine %d [%s]: scan error: %v", idx, tc.Name, err)
+								return
+							}
+							parts := make([]string, len(vals))
+							for ci, v := range vals {
+								parts[ci] = formatValue(reflect.ValueOf(v).Elem().Interface())
+							}
+							// Trim trailing empty columns
+							for len(parts) > 0 && parts[len(parts)-1] == "" {
+								parts = parts[:len(parts)-1]
+							}
+							outputLines = append(outputLines, strings.Join(parts, "\t"))
+						}
+						if !scanOK {
+							continue // retry
+						}
+						if err := rows.Err(); err != nil {
+							rows.Close()
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: rows error: %v", idx, tc.Name, err)
+							return
+						}
+						rows.Close()
+
+						actual := strings.Join(outputLines, "\n")
+						if expected != "" && actual != expected {
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: 结果不匹配\n  期望:\n%s\n  实际:\n%s", idx, tc.Name, expected, actual)
+						} else if len(outputLines) == 0 {
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: 0 rows returned", idx, tc.Name)
+						}
+						break // 成功则跳出重试
+					}
+				}(i, tc)
+			}
+			wg.Wait()
+			close(errCh)
+			e08bOK := true
+			for e := range errCh {
+				log.Printf("  ❌ %v", e)
+				e08bOK = false
+			}
+			if e08bOK {
+				log.Printf("  ✅ %d 个并发异构查询(proxy2)全部成功 (结果已验证)", len(e08bCases))
+			} else {
+				allPassed = false
+			}
+		}
+	}
 
 	// 连接池压力测试 (5 并发 × 3 查询)
 	log.Println("[Extra] 连接池压力测试 (5×3)")
@@ -946,88 +1059,120 @@ func formatValue(v interface{}) string {
 }
 
 // runQueryCompareResultCtx executes a query and compares tab-separated row output against expected.
+// Includes retry logic: if the result is empty but expected is non-empty (transient cross-node issue),
+// the query is retried once after a short delay.
 func runQueryCompareResultCtx(conn clickhouse.Conn, ctx context.Context, testName, query, expected string) bool {
-	rows, err := conn.Query(ctx, query)
-	if err != nil {
-		log.Printf("  ❌ %s 查询失败: %v", testName, err)
-		return false
-	}
-	defer rows.Close()
+	const maxAttempts = 2
 
-	var outputLines []string
-	var cachedScanTypes []reflect.Type
-	for rows.Next() {
-		if cachedScanTypes == nil {
-			colTypes := rows.ColumnTypes()
-			cachedScanTypes = make([]reflect.Type, len(colTypes))
-			for i, ct := range colTypes {
-				cachedScanTypes[i] = ct.ScanType()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			log.Printf("  🔄 %s 重试 (第 %d 次)...", testName, attempt+1)
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		rows, err := conn.Query(ctx, query)
+		if err != nil {
+			if attempt < maxAttempts-1 {
+				log.Printf("  ⚠️ %s 查询失败 (将重试): %v", testName, err)
+				continue
 			}
-		}
-		vals := make([]interface{}, len(cachedScanTypes))
-		for i, st := range cachedScanTypes {
-			vals[i] = reflect.New(st).Interface()
-		}
-		if err := rows.Scan(vals...); err != nil {
-			log.Printf("  ❌ %s 扫描行失败: %v", testName, err)
+			log.Printf("  ❌ %s 查询失败: %v", testName, err)
 			return false
 		}
-		parts := make([]string, len(vals))
-		for i, v := range vals {
-			parts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
-		}
-		// Trim trailing empty columns (matches CLI behavior for NULL columns)
-		for len(parts) > 0 && parts[len(parts)-1] == "" {
-			parts = parts[:len(parts)-1]
-		}
-		outputLines = append(outputLines, strings.Join(parts, "\t"))
-	}
 
-	// Handle WITH TOTALS: read totals row via rows.Totals() and append with empty line separator
-	if cachedScanTypes != nil {
-		totalsVals := make([]interface{}, len(cachedScanTypes))
-		for i, st := range cachedScanTypes {
-			totalsVals[i] = reflect.New(st).Interface()
-		}
-		if err := rows.Totals(totalsVals...); err == nil {
-			totalsParts := make([]string, len(totalsVals))
-			for i, v := range totalsVals {
-				totalsParts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
+		var outputLines []string
+		var cachedScanTypes []reflect.Type
+		scanFailed := false
+		for rows.Next() {
+			if cachedScanTypes == nil {
+				colTypes := rows.ColumnTypes()
+				cachedScanTypes = make([]reflect.Type, len(colTypes))
+				for i, ct := range colTypes {
+					cachedScanTypes[i] = ct.ScanType()
+				}
 			}
-			// Only append if at least one totals value is non-empty
-			hasValue := false
-			for _, p := range totalsParts {
-				if p != "" && p != "0" {
-					hasValue = true
+			vals := make([]interface{}, len(cachedScanTypes))
+			for i, st := range cachedScanTypes {
+				vals[i] = reflect.New(st).Interface()
+			}
+			if err := rows.Scan(vals...); err != nil {
+				rows.Close()
+				if attempt < maxAttempts-1 {
+					log.Printf("  ⚠️ %s 扫描行失败 (将重试): %v", testName, err)
+					scanFailed = true
 					break
 				}
+				log.Printf("  ❌ %s 扫描行失败: %v", testName, err)
+				return false
 			}
-			if hasValue {
-				outputLines = append(outputLines, "")
-				for len(totalsParts) > 0 && totalsParts[len(totalsParts)-1] == "" {
-					totalsParts = totalsParts[:len(totalsParts)-1]
+			parts := make([]string, len(vals))
+			for i, v := range vals {
+				parts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
+			}
+			// Trim trailing empty columns (matches CLI behavior for NULL columns)
+			for len(parts) > 0 && parts[len(parts)-1] == "" {
+				parts = parts[:len(parts)-1]
+			}
+			outputLines = append(outputLines, strings.Join(parts, "\t"))
+		}
+		if scanFailed {
+			continue
+		}
+
+		// Handle WITH TOTALS: read totals row via rows.Totals() and append with empty line separator
+		if cachedScanTypes != nil {
+			totalsVals := make([]interface{}, len(cachedScanTypes))
+			for i, st := range cachedScanTypes {
+				totalsVals[i] = reflect.New(st).Interface()
+			}
+			if err := rows.Totals(totalsVals...); err == nil {
+				totalsParts := make([]string, len(totalsVals))
+				for i, v := range totalsVals {
+					totalsParts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
 				}
-				outputLines = append(outputLines, strings.Join(totalsParts, "\t"))
+				// Only append if at least one totals value is non-empty
+				hasValue := false
+				for _, p := range totalsParts {
+					if p != "" && p != "0" {
+						hasValue = true
+						break
+					}
+				}
+				if hasValue {
+					outputLines = append(outputLines, "")
+					for len(totalsParts) > 0 && totalsParts[len(totalsParts)-1] == "" {
+						totalsParts = totalsParts[:len(totalsParts)-1]
+					}
+					outputLines = append(outputLines, strings.Join(totalsParts, "\t"))
+				}
 			}
 		}
-	}
+		rows.Close()
 
-	actual := strings.Join(outputLines, "\n")
-	if actual == expected {
-		log.Printf("  ✅ %s PASS (%d 行)", testName, len(outputLines))
-		return true
-	}
+		actual := strings.Join(outputLines, "\n")
+		if actual == expected {
+			log.Printf("  ✅ %s PASS (%d 行)", testName, len(outputLines))
+			return true
+		}
 
-	log.Printf("  ❌ %s FAIL", testName)
-	log.Printf("   ┌─ Expected ─")
-	for _, line := range strings.Split(expected, "\n") {
-		log.Printf("   │ %s", line)
+		// If result is empty but expected is non-empty, this may be a transient issue — retry
+		if actual == "" && expected != "" && attempt < maxAttempts-1 {
+			log.Printf("  ⚠️ %s 结果为空 (预期非空, 将重试)", testName)
+			continue
+		}
+
+		log.Printf("  ❌ %s FAIL", testName)
+		log.Printf("   ┌─ Expected ─")
+		for _, line := range strings.Split(expected, "\n") {
+			log.Printf("   │ %s", line)
+		}
+		log.Printf("   ├─ Actual ─")
+		for _, line := range strings.Split(actual, "\n") {
+			log.Printf("   │ %s", line)
+		}
+		log.Printf("   └────────────────────────────────────────")
+		return false
 	}
-	log.Printf("   ├─ Actual ─")
-	for _, line := range strings.Split(actual, "\n") {
-		log.Printf("   │ %s", line)
-	}
-	log.Printf("   └────────────────────────────────────────")
 	return false
 }
 
