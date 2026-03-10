@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math/rand"
 	"net"
 	"regexp"
 	log "sentioxyz/sentio-core/common/log"
@@ -130,12 +131,13 @@ func (s *packetStats) snapshot() map[string]int64 {
 }
 
 type Proxy struct {
-	cfg         Config
-	stats       *packetStats
-	validator   Validator
-	rewriter    Rewriter
-	observer    *MetricsObserver
-	relaySigner *RelaySigner // Signs relay JWS tokens for __route__ connections
+	cfg          Config
+	stats        *packetStats
+	validator    Validator
+	rewriter     Rewriter
+	observer     *MetricsObserver
+	relaySigner  *RelaySigner // Signs relay JWS tokens for __route__ connections
+	networkState NetworkState // Used by forwarding-only mode to discover bound proxy targets
 	// compressedBufPool removed: proto.Reader.ReadRaw always returns a newly allocated slice,
 	// so data cannot be read into a pool-obtained buffer, making the pool ineffective.
 	bufferPool sync.Pool // Reuse proto.Buffer to reduce allocations in the packet loop
@@ -160,6 +162,11 @@ func NewProxy(cfg Config, v Validator, r Rewriter) *Proxy {
 // SetRelaySigner sets the relay JWS signer for proxy-to-proxy token propagation.
 func (p *Proxy) SetRelaySigner(s *RelaySigner) {
 	p.relaySigner = s
+}
+
+// SetNetworkState sets the network state for forwarding-only mode.
+func (p *Proxy) SetNetworkState(ns NetworkState) {
+	p.networkState = ns
 }
 
 // getBuffer retrieves a proto.Buffer from bufferPool and resets its content.
@@ -521,8 +528,10 @@ func (p *Proxy) Serve(ctx context.Context) error {
 		go p.runStatsPrinter(ctx)
 	}
 
-	// Start background health check
-	go p.runHealthCheck(ctx)
+	// Start background health check (skip in forwarding-only mode — no local upstream)
+	if !p.cfg.ForwardingOnly {
+		go p.runHealthCheck(ctx)
+	}
 
 	go func() {
 		<-ctx.Done()
@@ -636,6 +645,12 @@ func (p *Proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
 		tc.SetNoDelay(true) // P2-12: Disable Nagle algorithm to reduce small packet latency
+	}
+
+	// Forwarding-only mode: pure TCP forwarding without protocol parsing
+	if p.cfg.ForwardingOnly {
+		p.handleForwardingOnly(ctx, id, clientConn)
+		return
 	}
 
 	// Always use streaming mode for all connections:
@@ -1934,6 +1949,78 @@ func (p *Proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn,
 			return
 		}
 	}
+}
+
+// handleForwardingOnly handles connections in forwarding-only mode.
+// It acts as a pure TCP proxy: picks a random bound proxy from NetworkState,
+// dials it, and does bidirectional raw copy without parsing ClickHouse protocol.
+func (p *Proxy) handleForwardingOnly(ctx context.Context, id int64, clientConn net.Conn) {
+	target, err := p.pickRandomBoundProxy()
+	if err != nil {
+		log.Errorf("[conn %d] forwarding-only: %v", id, err)
+		sendExceptionToClient(clientConn, 999, "PROXY_ERROR",
+			"No bound ClickHouse proxy available for forwarding")
+		return
+	}
+	log.Infof("[conn %d] forwarding-only: forwarding to %s", id, target)
+
+	dialer := &net.Dialer{Timeout: p.cfg.DialTimeout.Duration, KeepAlive: 30 * time.Second}
+	upstreamConn, err := dialer.DialContext(ctx, "tcp", target)
+	if err != nil {
+		log.Errorf("[conn %d] forwarding-only: dial %s error: %v", id, target, err)
+		p.observer.Error("dial", err)
+		return
+	}
+	defer upstreamConn.Close()
+	if tc, ok := upstreamConn.(*net.TCPConn); ok {
+		tc.SetKeepAlive(true)
+		tc.SetKeepAlivePeriod(30 * time.Second)
+		tc.SetNoDelay(true)
+	}
+
+	// Bidirectional raw copy
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		io.Copy(upstreamConn, clientConn)
+		// Close write side to signal EOF to upstream
+		if tc, ok := upstreamConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		io.Copy(clientConn, upstreamConn)
+		// Close write side to signal EOF to client
+		if tc, ok := clientConn.(*net.TCPConn); ok {
+			tc.CloseWrite()
+		}
+	}()
+	wg.Wait()
+}
+
+// pickRandomBoundProxy selects a random bound proxy address from NetworkState.
+func (p *Proxy) pickRandomBoundProxy() (string, error) {
+	if p.networkState == nil {
+		return "", fmt.Errorf("network state not configured")
+	}
+	allInfos := p.networkState.GetAllIndexerInfos()
+	if len(allInfos) == 0 {
+		return "", fmt.Errorf("no indexer infos found in network state")
+	}
+	// Collect addresses of proxies with valid ClickhouseProxyPort
+	addrs := make([]string, 0, len(allInfos))
+	for _, info := range allInfos {
+		if info.ClickhouseProxyPort > 0 {
+			addr := fmt.Sprintf("%s:%d", info.IndexerUrl, info.ClickhouseProxyPort)
+			addrs = append(addrs, addr)
+		}
+	}
+	if len(addrs) == 0 {
+		return "", fmt.Errorf("no bound proxies found (all indexers have ClickhouseProxyPort=0)")
+	}
+	return addrs[rand.Intn(len(addrs))], nil
 }
 
 // handleRouteWithRelay handles __route__ connections with relay JWS token injection.

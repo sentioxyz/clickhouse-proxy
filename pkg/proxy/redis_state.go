@@ -105,6 +105,36 @@ func (r *RedisNetworkState) GetProcessorInfo(processorId string) (ProcessorInfo,
 	}, true
 }
 
+func (r *RedisNetworkState) GetAllIndexerInfos() map[uint64]IndexerInfo {
+	ctx := context.Background()
+	all, err := r.mirror.GetAll(ctx, statemirror.MappingIndexerInfos)
+	if err != nil {
+		log.Warnf("Redis: failed to get all indexer infos: %v", err)
+		return nil
+	}
+	result := make(map[uint64]IndexerInfo, len(all))
+	for field, value := range all {
+		id, err := ParseIndexerId(field)
+		if err != nil {
+			log.Warnf("Redis: failed to parse indexer id %q: %v", field, err)
+			continue
+		}
+		var info state.IndexerInfo
+		if err := decodeJSON(value, &info); err != nil {
+			log.Warnf("Redis: failed to decode IndexerInfo for %s: %v", field, err)
+			continue
+		}
+		result[id] = IndexerInfo{
+			IndexerId:           info.IndexerId,
+			IndexerUrl:          info.IndexerUrl,
+			ComputeNodeRpcPort:  info.ComputeNodeRpcPort,
+			StorageNodeRpcPort:  info.StorageNodeRpcPort,
+			ClickhouseProxyPort: info.ClickhouseProxyPort,
+		}
+	}
+	return result
+}
+
 // Close closes the Redis connection.
 func (r *RedisNetworkState) Close() error {
 	return r.redisClient.Close()
