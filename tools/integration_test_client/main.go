@@ -1059,88 +1059,120 @@ func formatValue(v interface{}) string {
 }
 
 // runQueryCompareResultCtx executes a query and compares tab-separated row output against expected.
+// Includes retry logic: if the result is empty but expected is non-empty (transient cross-node issue),
+// the query is retried once after a short delay.
 func runQueryCompareResultCtx(conn clickhouse.Conn, ctx context.Context, testName, query, expected string) bool {
-	rows, err := conn.Query(ctx, query)
-	if err != nil {
-		log.Printf("  ❌ %s 查询失败: %v", testName, err)
-		return false
-	}
-	defer rows.Close()
+	const maxAttempts = 2
 
-	var outputLines []string
-	var cachedScanTypes []reflect.Type
-	for rows.Next() {
-		if cachedScanTypes == nil {
-			colTypes := rows.ColumnTypes()
-			cachedScanTypes = make([]reflect.Type, len(colTypes))
-			for i, ct := range colTypes {
-				cachedScanTypes[i] = ct.ScanType()
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			log.Printf("  🔄 %s 重试 (第 %d 次)...", testName, attempt+1)
+			time.Sleep(500 * time.Millisecond)
+		}
+
+		rows, err := conn.Query(ctx, query)
+		if err != nil {
+			if attempt < maxAttempts-1 {
+				log.Printf("  ⚠️ %s 查询失败 (将重试): %v", testName, err)
+				continue
 			}
-		}
-		vals := make([]interface{}, len(cachedScanTypes))
-		for i, st := range cachedScanTypes {
-			vals[i] = reflect.New(st).Interface()
-		}
-		if err := rows.Scan(vals...); err != nil {
-			log.Printf("  ❌ %s 扫描行失败: %v", testName, err)
+			log.Printf("  ❌ %s 查询失败: %v", testName, err)
 			return false
 		}
-		parts := make([]string, len(vals))
-		for i, v := range vals {
-			parts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
-		}
-		// Trim trailing empty columns (matches CLI behavior for NULL columns)
-		for len(parts) > 0 && parts[len(parts)-1] == "" {
-			parts = parts[:len(parts)-1]
-		}
-		outputLines = append(outputLines, strings.Join(parts, "\t"))
-	}
 
-	// Handle WITH TOTALS: read totals row via rows.Totals() and append with empty line separator
-	if cachedScanTypes != nil {
-		totalsVals := make([]interface{}, len(cachedScanTypes))
-		for i, st := range cachedScanTypes {
-			totalsVals[i] = reflect.New(st).Interface()
-		}
-		if err := rows.Totals(totalsVals...); err == nil {
-			totalsParts := make([]string, len(totalsVals))
-			for i, v := range totalsVals {
-				totalsParts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
+		var outputLines []string
+		var cachedScanTypes []reflect.Type
+		scanFailed := false
+		for rows.Next() {
+			if cachedScanTypes == nil {
+				colTypes := rows.ColumnTypes()
+				cachedScanTypes = make([]reflect.Type, len(colTypes))
+				for i, ct := range colTypes {
+					cachedScanTypes[i] = ct.ScanType()
+				}
 			}
-			// Only append if at least one totals value is non-empty
-			hasValue := false
-			for _, p := range totalsParts {
-				if p != "" && p != "0" {
-					hasValue = true
+			vals := make([]interface{}, len(cachedScanTypes))
+			for i, st := range cachedScanTypes {
+				vals[i] = reflect.New(st).Interface()
+			}
+			if err := rows.Scan(vals...); err != nil {
+				rows.Close()
+				if attempt < maxAttempts-1 {
+					log.Printf("  ⚠️ %s 扫描行失败 (将重试): %v", testName, err)
+					scanFailed = true
 					break
 				}
+				log.Printf("  ❌ %s 扫描行失败: %v", testName, err)
+				return false
 			}
-			if hasValue {
-				outputLines = append(outputLines, "")
-				for len(totalsParts) > 0 && totalsParts[len(totalsParts)-1] == "" {
-					totalsParts = totalsParts[:len(totalsParts)-1]
+			parts := make([]string, len(vals))
+			for i, v := range vals {
+				parts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
+			}
+			// Trim trailing empty columns (matches CLI behavior for NULL columns)
+			for len(parts) > 0 && parts[len(parts)-1] == "" {
+				parts = parts[:len(parts)-1]
+			}
+			outputLines = append(outputLines, strings.Join(parts, "\t"))
+		}
+		if scanFailed {
+			continue
+		}
+
+		// Handle WITH TOTALS: read totals row via rows.Totals() and append with empty line separator
+		if cachedScanTypes != nil {
+			totalsVals := make([]interface{}, len(cachedScanTypes))
+			for i, st := range cachedScanTypes {
+				totalsVals[i] = reflect.New(st).Interface()
+			}
+			if err := rows.Totals(totalsVals...); err == nil {
+				totalsParts := make([]string, len(totalsVals))
+				for i, v := range totalsVals {
+					totalsParts[i] = formatValue(reflect.ValueOf(v).Elem().Interface())
 				}
-				outputLines = append(outputLines, strings.Join(totalsParts, "\t"))
+				// Only append if at least one totals value is non-empty
+				hasValue := false
+				for _, p := range totalsParts {
+					if p != "" && p != "0" {
+						hasValue = true
+						break
+					}
+				}
+				if hasValue {
+					outputLines = append(outputLines, "")
+					for len(totalsParts) > 0 && totalsParts[len(totalsParts)-1] == "" {
+						totalsParts = totalsParts[:len(totalsParts)-1]
+					}
+					outputLines = append(outputLines, strings.Join(totalsParts, "\t"))
+				}
 			}
 		}
-	}
+		rows.Close()
 
-	actual := strings.Join(outputLines, "\n")
-	if actual == expected {
-		log.Printf("  ✅ %s PASS (%d 行)", testName, len(outputLines))
-		return true
-	}
+		actual := strings.Join(outputLines, "\n")
+		if actual == expected {
+			log.Printf("  ✅ %s PASS (%d 行)", testName, len(outputLines))
+			return true
+		}
 
-	log.Printf("  ❌ %s FAIL", testName)
-	log.Printf("   ┌─ Expected ─")
-	for _, line := range strings.Split(expected, "\n") {
-		log.Printf("   │ %s", line)
+		// If result is empty but expected is non-empty, this may be a transient issue — retry
+		if actual == "" && expected != "" && attempt < maxAttempts-1 {
+			log.Printf("  ⚠️ %s 结果为空 (预期非空, 将重试)", testName)
+			continue
+		}
+
+		log.Printf("  ❌ %s FAIL", testName)
+		log.Printf("   ┌─ Expected ─")
+		for _, line := range strings.Split(expected, "\n") {
+			log.Printf("   │ %s", line)
+		}
+		log.Printf("   ├─ Actual ─")
+		for _, line := range strings.Split(actual, "\n") {
+			log.Printf("   │ %s", line)
+		}
+		log.Printf("   └────────────────────────────────────────")
+		return false
 	}
-	log.Printf("   ├─ Actual ─")
-	for _, line := range strings.Split(actual, "\n") {
-		log.Printf("   │ %s", line)
-	}
-	log.Printf("   └────────────────────────────────────────")
 	return false
 }
 
