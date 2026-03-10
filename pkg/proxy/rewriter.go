@@ -41,6 +41,9 @@ type NetworkState interface {
 	GetIndexerInfo(indexerId uint64) (IndexerInfo, bool)
 	// GetProcessorInfo retrieves Processor information
 	GetProcessorInfo(processorId string) (ProcessorInfo, bool)
+	// GetAllIndexerInfos returns all IndexerInfos in the network state.
+	// Used by forwarding-only proxies to discover available targets.
+	GetAllIndexerInfos() map[uint64]IndexerInfo
 }
 
 // Use sentio-core types directly (same field definitions)
@@ -665,6 +668,16 @@ func (s *InMemoryNetworkState) GetProcessorInfo(processorId string) (ProcessorIn
 	defer s.mu.RUnlock()
 	info, ok := s.ProcessorInfos[processorId]
 	return info, ok
+}
+
+func (s *InMemoryNetworkState) GetAllIndexerInfos() map[uint64]IndexerInfo {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cp := make(map[uint64]IndexerInfo, len(s.IndexerInfos))
+	for k, v := range s.IndexerInfos {
+		cp[k] = v
+	}
+	return cp
 }
 
 // networkStateYAML defines the YAML file structure for network state.

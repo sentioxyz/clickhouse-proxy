@@ -23,6 +23,12 @@ func main() {
 	log.Infof("clickhouse-proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t",
 		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled)
 
+	// Detect forwarding-only mode: no local ClickHouse instance bound
+	if cfg.Upstream == "" {
+		cfg.ForwardingOnly = true
+		log.Infof("forwarding-only mode: no upstream configured, requests will be forwarded to bound proxies via NetworkState")
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
@@ -61,27 +67,33 @@ func main() {
 		log.Fatalf("network_state_redis is required for network state")
 	}
 
-	// Create table rewriter factory
-	tableRewriterFactory := proxy.DefaultTableRewriterFactory("sentio")
+	// Create rewriter (optional in forwarding-only mode)
+	if !cfg.ForwardingOnly {
+		// Create table rewriter factory
+		tableRewriterFactory := proxy.DefaultTableRewriterFactory("sentio")
 
-	// Create rewriter
-	rwConfig := proxy.RewriterConfig{
-		Enabled:     true,
-		ServiceAddr: cfg.RewriterServiceAddr,
-		Upstream:    cfg.Upstream,
-		Listen:      cfg.Listen,
-		Timeout:     cfg.RewriterTimeout.Duration,
-	}
-	rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState, tableRewriterFactory)
-	if err != nil {
-		log.Warnf("failed to create rewriter: %v, rewriting disabled", err)
+		// Create rewriter
+		rwConfig := proxy.RewriterConfig{
+			Enabled:     true,
+			ServiceAddr: cfg.RewriterServiceAddr,
+			Upstream:    cfg.Upstream,
+			Listen:      cfg.Listen,
+			Timeout:     cfg.RewriterTimeout.Duration,
+		}
+		rw, err := proxy.NewSentioNetworkRewriter(rwConfig, networkState, tableRewriterFactory)
+		if err != nil {
+			log.Warnf("failed to create rewriter: %v, rewriting disabled", err)
+		} else {
+			rewriter = rw
+			defer rw.Close()
+			log.Infof("SQL rewriter enabled, service_addr=%s upstream=%s", cfg.RewriterServiceAddr, cfg.Upstream)
+		}
 	} else {
-		rewriter = rw
-		defer rw.Close()
-		log.Infof("SQL rewriter enabled, service_addr=%s upstream=%s", cfg.RewriterServiceAddr, cfg.Upstream)
+		log.Infof("forwarding-only mode: SQL rewriter disabled")
 	}
 
 	p := proxy.NewProxy(cfg, validator, rewriter)
+	p.SetNetworkState(networkState)
 
 	// Initialize relay JWS signer for proxy-to-proxy (__route__) token propagation
 	if cfg.RelayPrivateKeyHex != "" {

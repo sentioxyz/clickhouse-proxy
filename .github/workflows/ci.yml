@@ -81,11 +81,13 @@ jobs:
           scp integration_test_client deploy-target:${{ env.REMOTE_BASE }}/integration_test_client
 
           echo ">>> Stopping old proxy processes..."
-          ssh deploy-target "killall ck_proxy1 ck_proxy2 2>/dev/null || true; sleep 1"
+          ssh deploy-target "killall ck_proxy1 ck_proxy2 ck_proxy3 ck_proxy4 2>/dev/null || true; sleep 1"
 
-          echo ">>> Replacing proxy1 and proxy2 binaries..."
+          echo ">>> Replacing proxy binaries (proxy1-proxy4)..."
           ssh deploy-target "cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy1/ck_proxy1 && \
-                             cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy2/ck_proxy2"
+                             cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy2/ck_proxy2 && \
+                             cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy3/ck_proxy3 && \
+                             cp ${{ env.REMOTE_BASE }}/clickhouse-proxy-latest ${{ env.REMOTE_BASE }}/proxy4/ck_proxy4"
 
       - name: Run distributed tests
         run: |

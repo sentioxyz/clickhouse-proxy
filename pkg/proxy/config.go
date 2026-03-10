@@ -55,6 +55,11 @@ type Config struct {
 
 	// R1-16: ShutdownTimeout 优雅关闭时等待在途连接排水的最大时间，默认 30s。
 	ShutdownTimeout Duration `json:"shutdown_timeout"`
+
+	// ForwardingOnly 标记该 proxy 没有绑定 ClickHouse 实例，
+	// 所有请求将随机转发给 NetworkState 中的已绑定 proxy。
+	// 当 Upstream 为空时自动启用，不从 JSON 读取。
+	ForwardingOnly bool `json:"-"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -96,7 +101,7 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 func DefaultConfig() Config {
 	return Config{
 		Listen:           envOrDefault("CK_LISTEN", ":9001"),
-		Upstream:         envOrDefault("CK_UPSTREAM", "clickhouse:9000"),
+		Upstream:         os.Getenv("CK_UPSTREAM"), // empty by default; forwarding-only when unset
 		StatsInterval:    Duration{10 * time.Second},
 		DialTimeout:      Duration{5 * time.Second},
 		IdleTimeout:      Duration{5 * time.Minute},
