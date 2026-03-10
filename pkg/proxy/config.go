@@ -101,7 +101,7 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 func DefaultConfig() Config {
 	return Config{
 		Listen:           envOrDefault("CK_LISTEN", ":9001"),
-		Upstream:         envOrDefault("CK_UPSTREAM", "clickhouse:9000"),
+		Upstream:         os.Getenv("CK_UPSTREAM"), // empty by default; forwarding-only when unset
 		StatsInterval:    Duration{10 * time.Second},
 		DialTimeout:      Duration{5 * time.Second},
 		IdleTimeout:      Duration{5 * time.Minute},
