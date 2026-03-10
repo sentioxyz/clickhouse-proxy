@@ -760,8 +760,8 @@ func runSQLFileTests(signFunc func(string) (string, error), sqlFilePath, runFilt
 			if strings.HasPrefix(tc.Name, "E") {
 				// E* 类错误用例
 				switch {
-				case tc.Name == "E08_concurrent":
-					// E08 需要并发执行，跳过普通流程
+				case tc.Name == "E08_concurrent" || strings.HasPrefix(tc.Name, "E08b_"):
+					// E08/E08b 需要并发执行，跳过普通流程
 					log.Printf("  ⏭️  跳过 (需要特殊并发执行)")
 				case tc.Name == "E06_string_literal" || tc.Name == "E07_comment":
 					// E06/E07 预期成功
@@ -874,6 +874,119 @@ ORDER BY o.order_id`
 			log.Printf("  ✅ %d 个并发三节点查询全部成功", concurrency)
 		} else {
 			allPassed = false
+		}
+	}
+	// E08b: 并发多表异构查询 — 从 SQL 文件动态加载 E08b_* 用例并发执行，验证结果
+	// 查询和预期结果来自 all_tests.sql / all_tests.result，不硬编码
+	{
+		var e08bCases []SQLTestCase
+		for _, tc := range testCases {
+			if strings.HasPrefix(tc.Name, "E08b_") {
+				e08bCases = append(e08bCases, tc)
+			}
+		}
+		if len(e08bCases) > 0 {
+			log.Printf("[E08b] 并发多表异构查询 (proxy2, %d 个用例, 结果验证)", len(e08bCases))
+
+			var wg sync.WaitGroup
+			errCh := make(chan error, len(e08bCases))
+			for i, tc := range e08bCases {
+				wg.Add(1)
+				go func(idx int, tc SQLTestCase) {
+					defer wg.Done()
+					gc := openConnection(signFunc)
+					if gc == nil {
+						errCh <- fmt.Errorf("goroutine %d [%s]: 连接失败", idx, tc.Name)
+						return
+					}
+					defer gc.Close()
+					expected := expectedResults[tc.Name]
+					// 允许 1 次重试应对偶发连接问题
+					for attempt := 0; attempt < 2; attempt++ {
+						rows, err := gc.Query(context.Background(), tc.Query)
+						if err != nil {
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: %v", idx, tc.Name, err)
+							return
+						}
+						// 使用 reflect 动态扫描列
+						var outputLines []string
+						var cachedScanTypes []reflect.Type
+						scanOK := true
+						for rows.Next() {
+							if cachedScanTypes == nil {
+								colTypes := rows.ColumnTypes()
+								cachedScanTypes = make([]reflect.Type, len(colTypes))
+								for ci, ct := range colTypes {
+									cachedScanTypes[ci] = ct.ScanType()
+								}
+							}
+							vals := make([]interface{}, len(cachedScanTypes))
+							for ci, st := range cachedScanTypes {
+								vals[ci] = reflect.New(st).Interface()
+							}
+							if err := rows.Scan(vals...); err != nil {
+								rows.Close()
+								if attempt == 0 {
+									scanOK = false
+									break
+								}
+								errCh <- fmt.Errorf("goroutine %d [%s]: scan error: %v", idx, tc.Name, err)
+								return
+							}
+							parts := make([]string, len(vals))
+							for ci, v := range vals {
+								parts[ci] = formatValue(reflect.ValueOf(v).Elem().Interface())
+							}
+							// Trim trailing empty columns
+							for len(parts) > 0 && parts[len(parts)-1] == "" {
+								parts = parts[:len(parts)-1]
+							}
+							outputLines = append(outputLines, strings.Join(parts, "\t"))
+						}
+						if !scanOK {
+							continue // retry
+						}
+						if err := rows.Err(); err != nil {
+							rows.Close()
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: rows error: %v", idx, tc.Name, err)
+							return
+						}
+						rows.Close()
+
+						actual := strings.Join(outputLines, "\n")
+						if expected != "" && actual != expected {
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: 结果不匹配\n  期望:\n%s\n  实际:\n%s", idx, tc.Name, expected, actual)
+						} else if len(outputLines) == 0 {
+							if attempt == 0 {
+								continue
+							}
+							errCh <- fmt.Errorf("goroutine %d [%s]: 0 rows returned", idx, tc.Name)
+						}
+						break // 成功则跳出重试
+					}
+				}(i, tc)
+			}
+			wg.Wait()
+			close(errCh)
+			e08bOK := true
+			for e := range errCh {
+				log.Printf("  ❌ %v", e)
+				e08bOK = false
+			}
+			if e08bOK {
+				log.Printf("  ✅ %d 个并发异构查询(proxy2)全部成功 (结果已验证)", len(e08bCases))
+			} else {
+				allPassed = false
+			}
 		}
 	}
 
