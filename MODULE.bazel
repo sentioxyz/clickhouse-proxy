@@ -11,9 +11,12 @@ bazel_dep(name = "sentio-core", version = "0.0.0", repo_name = "sentioxyz_sentio
 # When clickhouse-proxy is used as root module (standalone build),
 # this git_override provides sentio-core.
 # When used as a dependency, the parent module's override takes precedence.
-local_path_override(
+git_override(
     module_name = "sentio-core",
-    path = "../sentio-core",
+    remote = "https://github.com/sentioxyz/sentio-core",
+    commit = "0385a824cfa51f4a8692e68f2cd13b9dfe450b7f",
+    patch_strip = 1,
+    patches = ["//third_party:sentio-core.patch"],
 )
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")
