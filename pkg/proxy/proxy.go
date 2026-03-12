@@ -971,14 +971,17 @@ func (p *Proxy) handleDataBlock(
 			p.putBuffer(fBuf)
 			totalFrameBytes += frameHeaderSize + remainingDataSize
 
-			// R1-4: Detect if there are subsequent compressed frames
-			// Fix: use chReader's underlying bufio.Reader for peek, ensuring consistency with ReadRaw's buffer layer.
-			// In chunked mode, br may be a new bufio.Reader on top of ChunkedReader,
-			// and chReader is also on the same bufio.Reader, so they are consistent.
-			// Note: chReader.ReadRaw ultimately reads from br.Read, so br.Peek is consistent with it.
+			// R1-4: Detect if there are subsequent compressed frames.
+			// IMPORTANT: bufio.Reader.Peek(n) may block if buffered bytes < n, which can add
+			// query-tail latency (waiting for unrelated next client packets). To keep the
+			// packet loop non-blocking here, only Peek when enough bytes are already buffered.
+			// This avoids stalling on small trailing Data blocks (common in interactive queries).
+			if br.Buffered() < frameHeaderSize {
+				break
+			}
+			// In chunked mode, br may wrap ChunkedReader; chReader and br share the same stream.
 			nextBytes, peekErr := br.Peek(frameHeaderSize) // 25 bytes
 			if peekErr != nil || len(nextBytes) < frameHeaderSize {
-				// Cannot peek complete frame header; current frame is the last one
 				break
 			}
 			methodByte := nextBytes[16]
