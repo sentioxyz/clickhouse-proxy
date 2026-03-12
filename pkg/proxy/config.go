@@ -12,54 +12,54 @@ import (
 // Config controls proxy behavior. All fields have sane defaults so the
 // binary can boot without a config file.
 type Config struct {
-	Listen           string   `json:"listen"`
-	Upstream         string   `json:"upstream"`
-	StatsInterval    Duration `json:"stats_interval"`
-	DialTimeout      Duration `json:"dial_timeout"`
-	IdleTimeout      Duration `json:"idle_timeout"`
-	LogQueries       bool     `json:"log_queries"`
-	LogData          bool     `json:"log_data"`
-	MaxQueryLogBytes int      `json:"max_query_log_bytes"`
-	MaxDataLogBytes  int      `json:"max_data_log_bytes"`
-	MetricsListen    string   `json:"metrics_listen"`
+	Listen           string   `json:"listen"             yaml:"listen"`
+	Upstream         string   `json:"upstream"           yaml:"upstream"`
+	StatsInterval    Duration `json:"stats_interval"     yaml:"stats_interval"`
+	DialTimeout      Duration `json:"dial_timeout"       yaml:"dial_timeout"`
+	IdleTimeout      Duration `json:"idle_timeout"       yaml:"idle_timeout"`
+	LogQueries       bool     `json:"log_queries"        yaml:"log_queries"`
+	LogData          bool     `json:"log_data"           yaml:"log_data"`
+	MaxQueryLogBytes int      `json:"max_query_log_bytes" yaml:"max_query_log_bytes"`
+	MaxDataLogBytes  int      `json:"max_data_log_bytes"  yaml:"max_data_log_bytes"`
+	MetricsListen    string   `json:"metrics_listen"     yaml:"metrics_listen"`
 
 	// Authentication configuration
-	AuthEnabled          bool     `json:"auth_enabled"`
-	AuthAllowedAddresses []string `json:"auth_allowed_addresses"`
-	AuthMaxTokenAge      Duration `json:"auth_max_token_age"`
-	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"` // If true, requests without auth token are allowed
+	AuthEnabled          bool     `json:"auth_enabled"           yaml:"auth_enabled"`
+	AuthAllowedAddresses []string `json:"auth_allowed_addresses" yaml:"auth_allowed_addresses"`
+	AuthMaxTokenAge      Duration `json:"auth_max_token_age"     yaml:"auth_max_token_age"`
+	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"     yaml:"auth_allow_no_auth"` // If true, requests without auth token are allowed
 
 	// RelayPrivateKeyHex is the Ethereum private key used by proxies to sign
 	// relay JWS tokens for proxy-to-proxy (__route__) connections.
 	// All proxies in the cluster should share the same key.
 	// The corresponding address must be in AuthAllowedAddresses.
-	RelayPrivateKeyHex string `json:"relay_private_key_hex"`
+	RelayPrivateKeyHex string `json:"relay_private_key_hex" yaml:"relay_private_key_hex"`
 
 	// SQL Rewriter configuration
-	RewriterServiceAddr string   `json:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
-	RewriterTimeout     Duration `json:"rewriter_timeout"`      // Rewrite timeout
+	RewriterServiceAddr string   `json:"rewriter_service_addr" yaml:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
+	RewriterTimeout     Duration `json:"rewriter_timeout"      yaml:"rewriter_timeout"`      // Rewrite timeout
 
 	// Network State configuration
-	NetworkStateRedis string `json:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
+	NetworkStateRedis string `json:"network_state_redis" yaml:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
 
 	// Streaming bufio size (bytes). Default: 131072 (128KB).
-	StreamingBufSize int `json:"streaming_buf_size"`
+	StreamingBufSize int `json:"streaming_buf_size" yaml:"streaming_buf_size"`
 
 	// ValidateChecksum 是否启用压缩数据的 checksum 校验（CityHash128）
-	ValidateChecksum bool `json:"validate_checksum"`
+	ValidateChecksum bool `json:"validate_checksum" yaml:"validate_checksum"`
 
 	// MaxConnectionLifetime 单个连接的最大存活时间。
 	// 超过此时间后连接将被关闭，防止慢速客户端无限占用资源。
 	// 参考 ClickHouse Server 的 TCP 连接管理行为，默认 24h。
-	MaxConnectionLifetime Duration `json:"max_connection_lifetime"`
+	MaxConnectionLifetime Duration `json:"max_connection_lifetime" yaml:"max_connection_lifetime"`
 
 	// R1-16: ShutdownTimeout 优雅关闭时等待在途连接排水的最大时间，默认 30s。
-	ShutdownTimeout Duration `json:"shutdown_timeout"`
+	ShutdownTimeout Duration `json:"shutdown_timeout" yaml:"shutdown_timeout"`
 
 	// ForwardingOnly 标记该 proxy 没有绑定 ClickHouse 实例，
 	// 所有请求将随机转发给 NetworkState 中的已绑定 proxy。
 	// 当 Upstream 为空时自动启用，不从 JSON 读取。
-	ForwardingOnly bool `json:"-"`
+	ForwardingOnly bool `json:"-" yaml:"-"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON
@@ -96,6 +96,32 @@ func (d *Duration) UnmarshalJSON(b []byte) error {
 
 func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.Duration.String())
+}
+
+func (d Duration) MarshalYAML() (interface{}, error) {
+	return d.Duration.String(), nil
+}
+
+func (d *Duration) UnmarshalYAML(unmarshal func(interface{}) error) error {
+	var s string
+	if err := unmarshal(&s); err == nil {
+		dur, err := time.ParseDuration(s)
+		if err != nil {
+			return fmt.Errorf("invalid duration %q: %w", s, err)
+		}
+		d.Duration = dur
+		return nil
+	}
+	var n int64
+	if err := unmarshal(&n); err == nil {
+		d.Duration = time.Duration(n)
+		if d.Duration > 0 && d.Duration < time.Second {
+			log.Warnf("[config] duration value %d is interpreted as %s (nanoseconds); did you mean %q?",
+				n, d.Duration, time.Duration(n)*time.Second)
+		}
+		return nil
+	}
+	return fmt.Errorf("duration must be a string (e.g. \"5s\") or number of nanoseconds")
 }
 
 func DefaultConfig() Config {

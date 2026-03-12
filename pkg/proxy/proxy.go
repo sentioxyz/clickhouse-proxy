@@ -930,20 +930,27 @@ func (p *Proxy) handleDataBlock(
 		totalFrameBytes := 0
 
 		for {
-			// Use chReader.ReadRaw to ensure reading from the same buffer layer
-			header, err := chReader.ReadRaw(frameHeaderSize)
+			// ReadRaw returns a slice from proto.Reader's shared internal buffer.
+			// The slice is invalidated by the next ReadRaw call, so we must copy
+			// the header bytes before reading compressed data.
+			headerRaw, err := chReader.ReadRaw(frameHeaderSize)
 			if err != nil {
 				return fmt.Errorf("compressed frame header: %w", err)
 			}
 
+			fBuf := p.getBuffer()
+			fBuf.Buf = append(fBuf.Buf[:0], headerRaw...) // copy before next ReadRaw
+
 			// Extract compressed_size from header[17:21] (little-endian uint32)
-			compressedSize := binary.LittleEndian.Uint32(header[17:21])
+			compressedSize := binary.LittleEndian.Uint32(fBuf.Buf[17:21])
 
 			// Sanity check: compressed_size must be >= 9 (sub-header size)
 			if compressedSize < 9 {
+				p.putBuffer(fBuf)
 				return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
 			}
 			if compressedSize > maxCompressedFrameSize {
+				p.putBuffer(fBuf)
 				return fmt.Errorf("compressed_size %d exceeds limit %d", compressedSize, maxCompressedFrameSize)
 			}
 
@@ -952,12 +959,10 @@ func (p *Proxy) handleDataBlock(
 
 			compressedData, err := chReader.ReadRaw(remainingDataSize)
 			if err != nil {
+				p.putBuffer(fBuf)
 				return fmt.Errorf("compressed frame data: %w", err)
 			}
 
-			// R6-1: Use bufferPool to reduce compressed frame memory allocations in high-frequency INSERT scenarios
-			fBuf := p.getBuffer()
-			fBuf.Buf = append(fBuf.Buf[:0], header...)
 			fBuf.Buf = append(fBuf.Buf, compressedData...)
 			if _, err := upstreamWriter.Write(fBuf.Buf); err != nil {
 				p.putBuffer(fBuf)
