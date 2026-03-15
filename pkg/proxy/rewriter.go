@@ -304,6 +304,11 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		database := tableRewriter.Database()
 
 		// Determine local/remote by comparing IndexerInfo address with proxy's upstream
+		// NOTE: This intentionally uses Upstream (CK backend addr like "127.0.0.1:19000")
+		// while indexerAddr is the proxy addr (like "10.15.0.103:19001"), so isLocal
+		// is always false. This is correct: all tables go through remote() + __route__,
+		// which prevents ClickHouse from pushing down JOINs to remote CK nodes that
+		// lack the local tables.
 		indexerAddr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
 		isLocal := indexerAddr == r.config.Upstream
 
@@ -328,7 +333,10 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 				// Remote table: rewrite addr to localhost (back to local Proxy1)
 				// and encode route info into user parameter for dynamic upstream routing.
 				// Format: __route__<target_proxy_addr>__<real_user>
-				localAddr := "localhost" + r.config.Listen // e.g. "localhost:9001"
+				localAddr := r.config.Listen
+				if strings.HasPrefix(localAddr, ":") {
+					localAddr = "localhost" + localAddr // e.g. "localhost:9001"
+				}
 				routeUser := fmt.Sprintf("__route__%s__%s", indexerAddr, user)
 				remoteTableMap[table.FullMatch] = RemoteTable{
 					Addr:     localAddr,

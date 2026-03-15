@@ -38,7 +38,8 @@ func parseRouteFromUser(user string) (targetAddr, realUser string, isRoute bool)
 	return targetAddr, realUser, true
 }
 
-// isLocalConnection checks if conn originates from localhost (127.0.0.1 or ::1).
+// isLocalConnection checks if conn originates from the local machine.
+// Allows loopback (127.0.0.1, ::1) and any IP assigned to local interfaces.
 // Only local connections are allowed to use __route__ routing to prevent SSRF attacks.
 func isLocalConnection(conn net.Conn) bool {
 	if conn == nil {
@@ -48,7 +49,20 @@ func isLocalConnection(conn net.Conn) bool {
 	if !ok {
 		return false
 	}
-	return addr.IP.IsLoopback() // 127.0.0.1 or ::1
+	if addr.IP.IsLoopback() {
+		return true
+	}
+	// Check if the IP belongs to a local network interface
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok && ipNet.IP.Equal(addr.IP) {
+			return true
+		}
+	}
+	return false
 }
 
 // rewriteHelloUser re-encodes a ClientHello packet, replacing the user field.

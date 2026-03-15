@@ -1144,10 +1144,12 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	var helloToSend []byte           // Hello bytes to forward to upstream
 
 	targetAddr, realUser, isRoute := parseRouteFromUser(clientUser)
-	if isRoute && isLocalConnection(clientConn) {
-		// Route detected from localhost: connect to target proxy instead of default upstream
+	if isRoute {
+		// Route detected: connect to target proxy instead of default upstream
+		// NOTE: isLocalConnection check removed to support multi-server deployments
+		// where proxies on different servers route to each other via __route__.
 		upstreamTarget = targetAddr
-		log.Infof("[conn %d] streaming: __route__ detected, target=%s realUser=%s", id, targetAddr, realUser)
+		log.Infof("[conn %d] streaming: __route__ detected, target=%s realUser=%s from=%s", id, targetAddr, realUser, clientConn.RemoteAddr())
 
 		// Rewrite Hello: replace user with realUser (strip __route__ prefix)
 		rewrittenHello, err := rewriteHelloUser(helloBuf.Bytes(), realUser)
@@ -1164,10 +1166,6 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		// Override clientUser for SQL rewriter (use real user, not __route__...)
 		clientUser = realUser
 	} else {
-		if isRoute && !isLocalConnection(clientConn) {
-			log.Warnf("[conn %d] streaming: __route__ user from non-local connection %s, ignoring route (SSRF prevention)",
-				id, clientConn.RemoteAddr())
-		}
 		// No route: send original Hello as-is
 		helloToSend = make([]byte, 1+helloBuf.Len())
 		helloToSend[0] = typeByte
