@@ -1961,21 +1961,37 @@ func (p *Proxy) fallbackRawCopy(id int64, br *bufio.Reader, clientConn net.Conn,
 // handleForwardingOnly handles connections in forwarding-only mode.
 // It acts as a pure TCP proxy: picks a random bound proxy from NetworkState,
 // dials it, and does bidirectional raw copy without parsing ClickHouse protocol.
+// Retries with a different target on dial failure (up to 3 attempts).
 func (p *Proxy) handleForwardingOnly(ctx context.Context, id int64, clientConn net.Conn) {
-	target, err := p.pickRandomBoundProxy()
-	if err != nil {
-		log.Errorf("[conn %d] forwarding-only: %v", id, err)
-		sendExceptionToClient(clientConn, 999, "PROXY_ERROR",
-			"No bound ClickHouse proxy available for forwarding")
-		return
-	}
-	log.Infof("[conn %d] forwarding-only: forwarding to %s", id, target)
+	const maxDialAttempts = 3
+	var upstreamConn net.Conn
+	var target string
 
-	dialer := &net.Dialer{Timeout: p.cfg.DialTimeout.Duration, KeepAlive: 30 * time.Second}
-	upstreamConn, err := dialer.DialContext(ctx, "tcp", target)
-	if err != nil {
-		log.Errorf("[conn %d] forwarding-only: dial %s error: %v", id, target, err)
-		p.observer.Error("dial", err)
+	for attempt := 0; attempt < maxDialAttempts; attempt++ {
+		var err error
+		target, err = p.pickRandomBoundProxy()
+		if err != nil {
+			log.Errorf("[conn %d] forwarding-only: %v", id, err)
+			sendExceptionToClient(clientConn, 999, "PROXY_ERROR",
+				"No bound ClickHouse proxy available for forwarding")
+			return
+		}
+		log.Infof("[conn %d] forwarding-only: forwarding to %s (attempt %d/%d)", id, target, attempt+1, maxDialAttempts)
+
+		dialer := &net.Dialer{Timeout: p.cfg.DialTimeout.Duration, KeepAlive: 30 * time.Second}
+		upstreamConn, err = dialer.DialContext(ctx, "tcp", target)
+		if err != nil {
+			log.Warnf("[conn %d] forwarding-only: dial %s error: %v, will retry", id, target, err)
+			p.observer.Error("dial", err)
+			continue
+		}
+		break
+	}
+
+	if upstreamConn == nil {
+		log.Errorf("[conn %d] forwarding-only: all %d dial attempts failed", id, maxDialAttempts)
+		sendExceptionToClient(clientConn, 210, "NETWORK_ERROR",
+			fmt.Sprintf("All forwarding attempts failed (last target: %s)", target))
 		return
 	}
 	defer upstreamConn.Close()
