@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strconv"
@@ -56,7 +57,7 @@ type RewriterConfig struct {
 	Enabled     bool   // Whether to enable rewriting
 	ServiceAddr string // sql-rewriter gRPC service address (required when enabled)
 	Upstream    string // Upstream ClickHouse address (used for local/remote detection)
-	Listen      string // Proxy listen address (e.g. ":9001"), used for remote() addr rewrite to localhost
+	Listen      string // Proxy listen address (e.g. ":9001"), used for remote() addr rewrite
 	Timeout     time.Duration
 }
 
@@ -67,6 +68,7 @@ type SentioNetworkRewriter struct {
 	grpcConn             *grpc.ClientConn
 	grpcClient           pb.RewriterServiceClient // cached gRPC client stub
 	tableRewriterFactory SentioNetworkTableRewriterFactory
+	callbackAddr         string // resolved address for remote() callback (e.g. "10.15.0.103:9001")
 }
 
 // sentioNetworkTableRegex matches Sentio-Network mode table names
@@ -115,6 +117,11 @@ func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState, factory
 		networkState:         state,
 		tableRewriterFactory: factory,
 	}
+
+	// Resolve callback address: detect the local IP that can reach the upstream ClickHouse,
+	// so that remote() calls use an address ClickHouse can connect back to.
+	rewriter.callbackAddr = resolveCallbackAddr(config.Upstream, config.Listen)
+	log.Infof("resolved remote() callback address: %s", rewriter.callbackAddr)
 
 	// Establish gRPC connection (blocking connect, ensures connection is ready before first RPC)
 	// Add keepalive to maintain long connection health
@@ -330,13 +337,10 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 				}
 				log.Debugf("local table rewrite: %s -> %s.%s", table.FullMatch, database, physicalTable)
 			} else {
-				// Remote table: rewrite addr to localhost (back to local Proxy1)
+				// Remote table: rewrite addr to point back to this proxy (Proxy1)
 				// and encode route info into user parameter for dynamic upstream routing.
 				// Format: __route__<target_proxy_addr>__<real_user>
-				localAddr := r.config.Listen
-				if strings.HasPrefix(localAddr, ":") {
-					localAddr = "localhost" + localAddr // e.g. "localhost:9001"
-				}
+				localAddr := r.callbackAddr
 				routeUser := fmt.Sprintf("__route__%s__%s", indexerAddr, user)
 				remoteTableMap[table.FullMatch] = RemoteTable{
 					Addr:     localAddr,
@@ -620,6 +624,44 @@ func (r *SentioNetworkRewriter) Close() error {
 		return r.grpcConn.Close()
 	}
 	return nil
+}
+
+// resolveCallbackAddr determines the address that ClickHouse should use to connect
+// back to this proxy when executing remote() calls.
+//
+// It works by UDP-dialing the upstream ClickHouse address to discover which local IP
+// the OS would use to reach it, then combines that IP with the proxy's listen port.
+// This handles cross-pod/cross-host deployments where "localhost" would not work.
+//
+// Falls back to "localhost" + listen port if detection fails (e.g., upstream not configured).
+func resolveCallbackAddr(upstream, listen string) string {
+	// Extract port from listen address (e.g. ":9001" → "9001")
+	port := listen
+	if strings.HasPrefix(port, ":") {
+		port = port[1:]
+	} else if _, p, err := net.SplitHostPort(port); err == nil {
+		port = p
+	}
+
+	if upstream == "" {
+		return "localhost:" + port
+	}
+
+	// UDP dial to upstream to discover the local outbound IP.
+	// No actual packets are sent; the OS just resolves the route.
+	conn, err := net.Dial("udp", upstream)
+	if err != nil {
+		log.Warnf("failed to detect local IP for upstream %s, falling back to localhost: %v", upstream, err)
+		return "localhost:" + port
+	}
+	defer conn.Close()
+
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	if !ok || localAddr.IP.IsUnspecified() {
+		return "localhost:" + port
+	}
+
+	return fmt.Sprintf("%s:%s", localAddr.IP.String(), port)
 }
 
 // maskPassword masks a password string for safe logging.

@@ -12,6 +12,7 @@ import (
 	"net"
 	"regexp"
 	log "sentioxyz/sentio-core/common/log"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -2007,6 +2008,7 @@ func (p *Proxy) handleForwardingOnly(ctx context.Context, id int64, clientConn n
 }
 
 // pickRandomBoundProxy selects a random bound proxy address from NetworkState.
+// It excludes the proxy's own listen address to prevent forwarding loops.
 func (p *Proxy) pickRandomBoundProxy() (string, error) {
 	if p.networkState == nil {
 		return "", fmt.Errorf("network state not configured")
@@ -2015,18 +2017,52 @@ func (p *Proxy) pickRandomBoundProxy() (string, error) {
 	if len(allInfos) == 0 {
 		return "", fmt.Errorf("no indexer infos found in network state")
 	}
-	// Collect addresses of proxies with valid ClickhouseProxyPort
+
+	// Extract own listen port for self-exclusion
+	selfPort := 0
+	if p.cfg.Listen != "" {
+		if _, portStr, err := net.SplitHostPort(p.cfg.Listen); err == nil {
+			selfPort, _ = strconv.Atoi(portStr)
+		}
+	}
+
+	// Collect addresses of proxies with valid ClickhouseProxyPort, excluding self
 	addrs := make([]string, 0, len(allInfos))
 	for _, info := range allInfos {
 		if info.ClickhouseProxyPort > 0 {
+			// Skip if port matches our own listen port and the URL resolves to a local address
+			if selfPort > 0 && int(info.ClickhouseProxyPort) == selfPort {
+				if isLocalAddress(info.IndexerUrl) {
+					continue
+				}
+			}
 			addr := fmt.Sprintf("%s:%d", info.IndexerUrl, info.ClickhouseProxyPort)
 			addrs = append(addrs, addr)
 		}
 	}
 	if len(addrs) == 0 {
-		return "", fmt.Errorf("no bound proxies found (all indexers have ClickhouseProxyPort=0)")
+		return "", fmt.Errorf("no bound proxies found (all indexers have ClickhouseProxyPort=0 or are self)")
 	}
 	return addrs[rand.Intn(len(addrs))], nil
+}
+
+// isLocalAddress checks if the given host string resolves to a local/loopback address.
+func isLocalAddress(host string) bool {
+	if host == "localhost" || host == "127.0.0.1" || host == "::1" {
+		return true
+	}
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return false
+	}
+	for _, a := range addrs {
+		if ipNet, ok := a.(*net.IPNet); ok {
+			if ipNet.IP.String() == host {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // handleRouteWithRelay handles __route__ connections with relay JWS token injection.
