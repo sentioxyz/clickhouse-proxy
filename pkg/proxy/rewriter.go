@@ -629,18 +629,26 @@ func (r *SentioNetworkRewriter) Close() error {
 // resolveCallbackAddr determines the address that ClickHouse should use to connect
 // back to this proxy when executing remote() calls.
 //
-// It works by UDP-dialing the upstream ClickHouse address to discover which local IP
-// the OS would use to reach it, then combines that IP with the proxy's listen port.
-// This handles cross-pod/cross-host deployments where "localhost" would not work.
-//
-// Falls back to "localhost" + listen port if detection fails (e.g., upstream not configured).
+// Strategy:
+//  1. If listen has an explicit non-wildcard host (e.g. "10.15.0.103:19001"), use that directly.
+//  2. Otherwise, UDP-dial the upstream to discover the local outbound IP.
+//     If the result is loopback (upstream is local), probe a public IP to get the real NIC address.
+//  3. Falls back to "localhost" + listen port if all detection fails.
 func resolveCallbackAddr(upstream, listen string) string {
-	// Extract port from listen address (e.g. ":9001" → "9001")
-	port := listen
-	if strings.HasPrefix(port, ":") {
-		port = port[1:]
-	} else if _, p, err := net.SplitHostPort(port); err == nil {
+	// Extract host and port from listen address
+	var listenHost, port string
+	if strings.HasPrefix(listen, ":") {
+		port = listen[1:]
+	} else if h, p, err := net.SplitHostPort(listen); err == nil {
+		listenHost = h
 		port = p
+	} else {
+		port = listen
+	}
+
+	// If listen has an explicit non-wildcard IP, use it directly
+	if listenHost != "" && listenHost != "0.0.0.0" && listenHost != "::" {
+		return listenHost + ":" + port
 	}
 
 	if upstream == "" {
@@ -654,10 +662,25 @@ func resolveCallbackAddr(upstream, listen string) string {
 		log.Warnf("failed to detect local IP for upstream %s, falling back to localhost: %v", upstream, err)
 		return "localhost:" + port
 	}
-	defer conn.Close()
-
 	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	conn.Close()
+
 	if !ok || localAddr.IP.IsUnspecified() {
+		return "localhost:" + port
+	}
+
+	// If upstream is on loopback, the detected IP will also be loopback.
+	// CK needs a routable IP to connect back, so probe a public address instead.
+	if localAddr.IP.IsLoopback() {
+		probe, err := net.Dial("udp", "8.8.8.8:53")
+		if err == nil {
+			if probeAddr, ok := probe.LocalAddr().(*net.UDPAddr); ok && !probeAddr.IP.IsUnspecified() && !probeAddr.IP.IsLoopback() {
+				probe.Close()
+				return fmt.Sprintf("%s:%s", probeAddr.IP.String(), port)
+			}
+			probe.Close()
+		}
+		// If public probe also fails, fall back to localhost
 		return "localhost:" + port
 	}
 
