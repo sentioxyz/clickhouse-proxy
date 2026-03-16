@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"regexp"
 	"strconv"
@@ -56,7 +57,7 @@ type RewriterConfig struct {
 	Enabled     bool   // Whether to enable rewriting
 	ServiceAddr string // sql-rewriter gRPC service address (required when enabled)
 	Upstream    string // Upstream ClickHouse address (used for local/remote detection)
-	Listen      string // Proxy listen address (e.g. ":9001"), used for remote() addr rewrite to localhost
+	Listen      string // Proxy listen address (e.g. ":9001"), used for remote() addr rewrite
 	Timeout     time.Duration
 }
 
@@ -67,6 +68,7 @@ type SentioNetworkRewriter struct {
 	grpcConn             *grpc.ClientConn
 	grpcClient           pb.RewriterServiceClient // cached gRPC client stub
 	tableRewriterFactory SentioNetworkTableRewriterFactory
+	callbackAddr         string // resolved address for remote() callback (e.g. "10.15.0.103:9001")
 }
 
 // sentioNetworkTableRegex matches Sentio-Network mode table names
@@ -115,6 +117,11 @@ func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState, factory
 		networkState:         state,
 		tableRewriterFactory: factory,
 	}
+
+	// Resolve callback address: detect the local IP that can reach the upstream ClickHouse,
+	// so that remote() calls use an address ClickHouse can connect back to.
+	rewriter.callbackAddr = resolveCallbackAddr(config.Upstream, config.Listen)
+	log.Infof("resolved remote() callback address: %s", rewriter.callbackAddr)
 
 	// Establish gRPC connection (blocking connect, ensures connection is ready before first RPC)
 	// Add keepalive to maintain long connection health
@@ -330,13 +337,10 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 				}
 				log.Debugf("local table rewrite: %s -> %s.%s", table.FullMatch, database, physicalTable)
 			} else {
-				// Remote table: rewrite addr to localhost (back to local Proxy1)
+				// Remote table: rewrite addr to point back to this proxy (Proxy1)
 				// and encode route info into user parameter for dynamic upstream routing.
 				// Format: __route__<target_proxy_addr>__<real_user>
-				localAddr := r.config.Listen
-				if strings.HasPrefix(localAddr, ":") {
-					localAddr = "localhost" + localAddr // e.g. "localhost:9001"
-				}
+				localAddr := r.callbackAddr
 				routeUser := fmt.Sprintf("__route__%s__%s", indexerAddr, user)
 				remoteTableMap[table.FullMatch] = RemoteTable{
 					Addr:     localAddr,
@@ -620,6 +624,67 @@ func (r *SentioNetworkRewriter) Close() error {
 		return r.grpcConn.Close()
 	}
 	return nil
+}
+
+// resolveCallbackAddr determines the address that ClickHouse should use to connect
+// back to this proxy when executing remote() calls.
+//
+// Strategy:
+//  1. If listen has an explicit non-wildcard host (e.g. "10.15.0.103:19001"), use that directly.
+//  2. Otherwise, UDP-dial the upstream to discover the local outbound IP.
+//     If the result is loopback (upstream is local), probe a public IP to get the real NIC address.
+//  3. Falls back to "localhost" + listen port if all detection fails.
+func resolveCallbackAddr(upstream, listen string) string {
+	// Extract host and port from listen address
+	var listenHost, port string
+	if strings.HasPrefix(listen, ":") {
+		port = listen[1:]
+	} else if h, p, err := net.SplitHostPort(listen); err == nil {
+		listenHost = h
+		port = p
+	} else {
+		port = listen
+	}
+
+	// If listen has an explicit non-wildcard IP, use it directly
+	if listenHost != "" && listenHost != "0.0.0.0" && listenHost != "::" {
+		return listenHost + ":" + port
+	}
+
+	if upstream == "" {
+		return "localhost:" + port
+	}
+
+	// UDP dial to upstream to discover the local outbound IP.
+	// No actual packets are sent; the OS just resolves the route.
+	conn, err := net.Dial("udp", upstream)
+	if err != nil {
+		log.Warnf("failed to detect local IP for upstream %s, falling back to localhost: %v", upstream, err)
+		return "localhost:" + port
+	}
+	localAddr, ok := conn.LocalAddr().(*net.UDPAddr)
+	conn.Close()
+
+	if !ok || localAddr.IP.IsUnspecified() {
+		return "localhost:" + port
+	}
+
+	// If upstream is on loopback, the detected IP will also be loopback.
+	// CK needs a routable IP to connect back, so probe a public address instead.
+	if localAddr.IP.IsLoopback() {
+		probe, err := net.Dial("udp", "8.8.8.8:53")
+		if err == nil {
+			if probeAddr, ok := probe.LocalAddr().(*net.UDPAddr); ok && !probeAddr.IP.IsUnspecified() && !probeAddr.IP.IsLoopback() {
+				probe.Close()
+				return fmt.Sprintf("%s:%s", probeAddr.IP.String(), port)
+			}
+			probe.Close()
+		}
+		// If public probe also fails, fall back to localhost
+		return "localhost:" + port
+	}
+
+	return fmt.Sprintf("%s:%s", localAddr.IP.String(), port)
 }
 
 // maskPassword masks a password string for safe logging.

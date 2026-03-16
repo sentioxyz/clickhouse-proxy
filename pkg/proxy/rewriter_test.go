@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -216,4 +217,64 @@ func TestInMemoryNetworkState(t *testing.T) {
 
 func containsString(s, substr string) bool {
 	return len(s) >= len(substr) && (s == substr || len(s) > 0 && (s[0:len(substr)] == substr || containsString(s[1:], substr)))
+}
+
+func TestResolveCallbackAddr(t *testing.T) {
+	tests := []struct {
+		name           string
+		upstream       string
+		listen         string
+		expectPort     string // expected port suffix
+		expectNonLocal bool   // true = should NOT be "localhost"
+	}{
+		{
+			name:           "remote upstream should auto-detect IP",
+			upstream:       "10.15.0.100:9000",
+			listen:         ":9001",
+			expectPort:     "9001",
+			expectNonLocal: true,
+		},
+		{
+			name:           "empty upstream falls back to localhost",
+			upstream:       "",
+			listen:         ":9001",
+			expectPort:     "9001",
+			expectNonLocal: false,
+		},
+		{
+			name:           "listen with host:port format",
+			upstream:       "10.15.0.100:9000",
+			listen:         "0.0.0.0:22200",
+			expectPort:     "22200",
+			expectNonLocal: true,
+		},
+		{
+			name:           "listen port only",
+			upstream:       "8.8.8.8:53",
+			listen:         ":8080",
+			expectPort:     "8080",
+			expectNonLocal: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := resolveCallbackAddr(tt.upstream, tt.listen)
+			t.Logf("resolveCallbackAddr(%q, %q) = %q", tt.upstream, tt.listen, result)
+
+			// Must end with correct port
+			if !strings.HasSuffix(result, ":"+tt.expectPort) {
+				t.Errorf("expected port %s, got %s", tt.expectPort, result)
+			}
+
+			// Check localhost vs non-localhost
+			isLocal := strings.HasPrefix(result, "localhost:")
+			if tt.expectNonLocal && isLocal {
+				t.Errorf("expected non-localhost address for upstream=%q, got %s", tt.upstream, result)
+			}
+			if !tt.expectNonLocal && !isLocal {
+				t.Errorf("expected localhost fallback for upstream=%q, got %s", tt.upstream, result)
+			}
+		})
+	}
 }

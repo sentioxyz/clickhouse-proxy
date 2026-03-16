@@ -884,6 +884,66 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 	}
 }
 
+// TestEndToEnd_RemoteCallbackAddr verifies that remote() uses auto-detected IP
+// instead of "localhost" when proxy and ClickHouse are on different hosts.
+func TestEndToEnd_RemoteCallbackAddr(t *testing.T) {
+	state := setupTestNetworkState()
+
+	// Simulate cross-host deployment: upstream is a remote address (not localhost)
+	config := RewriterConfig{
+		Enabled:     true,
+		ServiceAddr: "localhost:50051",
+		Upstream:    "10.15.0.100:39000", // remote CK address
+		Listen:      ":22200",
+	}
+	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	if err != nil {
+		t.Fatalf("failed to create rewriter: %v", err)
+	}
+	defer rewriter.Close()
+
+	// Verify callbackAddr was resolved to non-localhost
+	t.Logf("Resolved callbackAddr: %s", rewriter.callbackAddr)
+	if strings.HasPrefix(rewriter.callbackAddr, "localhost:") {
+		t.Errorf("callbackAddr should not be localhost when upstream is remote, got: %s", rewriter.callbackAddr)
+	}
+	if !strings.HasSuffix(rewriter.callbackAddr, ":22200") {
+		t.Errorf("callbackAddr should use listen port 22200, got: %s", rewriter.callbackAddr)
+	}
+
+	ctx := context.Background()
+
+	// Rewrite a remote table query
+	inputSQL := "SELECT * FROM sentio_pancakeswap123.Withdrawl"
+	result, err := rewriter.Rewrite(ctx, inputSQL, "default", "test123")
+	if err != nil {
+		t.Fatalf("rewrite failed: %v", err)
+	}
+
+	t.Logf("Input:  %s", inputSQL)
+	t.Logf("Output: %s", result)
+
+	// Core assertion: remote() should NOT use "localhost"
+	if strings.Contains(result, "remote('localhost:") {
+		t.Errorf("remote() should not use localhost when proxy and CK are on different hosts.\nGot: %s", result)
+	}
+
+	// Should contain remote() with the auto-detected IP
+	if !strings.Contains(result, "remote(") {
+		t.Errorf("expected remote() function in result, got: %s", result)
+	}
+
+	// Should contain the correct port
+	if !strings.Contains(result, ":22200") {
+		t.Errorf("expected port 22200 in remote() addr, got: %s", result)
+	}
+
+	// Should contain __route__ for routing
+	if !strings.Contains(result, "__route__") {
+		t.Errorf("expected __route__ in user parameter, got: %s", result)
+	}
+}
+
 // setupTestNetworkState 设置测试用网络状态
 func setupTestNetworkState() *InMemoryNetworkState {
 	state := NewInMemoryNetworkState()
