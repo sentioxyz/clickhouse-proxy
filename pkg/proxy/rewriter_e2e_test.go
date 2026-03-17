@@ -216,7 +216,7 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -291,7 +291,7 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -356,7 +356,7 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -398,7 +398,7 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -455,7 +455,7 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -511,7 +511,7 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -610,7 +610,7 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -653,7 +653,7 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -708,7 +708,7 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -753,7 +753,7 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -788,7 +788,7 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -846,7 +846,7 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -896,7 +896,7 @@ func TestEndToEnd_RemoteCallbackAddr(t *testing.T) {
 		Upstream:    "10.15.0.100:39000", // remote CK address
 		Listen:      ":22200",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -1057,7 +1057,7 @@ func BenchmarkRewrite(b *testing.B) {
 		Enabled: true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		b.Fatalf("failed to create rewriter: %v", err)
 	}

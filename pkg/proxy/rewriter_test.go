@@ -111,7 +111,7 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 		Enabled:        true,
 	}
 
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -244,6 +244,19 @@ func (m *mockTableRewriter) Reverse(rawTable string) (string, bool, error) {
 		}
 	}
 	return "", false, nil
+}
+
+// mockTableRewriterFactory returns a test-only factory that creates a mockTableRewriter
+// with identity mappings (table name passes through as-is). Replaces the removed DefaultTableRewriterFactory.
+func mockTableRewriterFactory(database string) SentioNetworkTableRewriterFactory {
+	return func(ctx context.Context, processorId string,
+		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
+		// Return nil mappings — callers needing specific All() results should use a custom factory
+		return &mockTableRewriter{
+			database: database,
+			mappings: nil,
+		}, nil
+	}
 }
 
 // TestBuildRewriteMappings_UnknownProcessorSkipped verifies that when a processorId

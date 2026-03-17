@@ -10,7 +10,9 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	ckhmanager "sentioxyz/sentio-core/common/clickhousemanager"
 	log "sentioxyz/sentio-core/common/log"
+	"sentioxyz/sentio-core/network/sqlrewriter"
 
 	proxy "ck_remote_proxy/pkg/proxy"
 )
@@ -69,8 +71,22 @@ func main() {
 
 	// Create rewriter (optional in forwarding-only mode)
 	if !cfg.ForwardingOnly {
-		// Create table rewriter factory
-		tableRewriterFactory := proxy.DefaultTableRewriterFactory("sentio")
+		// ClickHouse manager config is required for table mapping
+		if cfg.CkhManagerConfigPath == "" {
+			log.Fatalf("ckh_manager_config_path is required for SQL rewriter table mapping")
+		}
+		ckhMgr := ckhmanager.LoadManager(cfg.CkhManagerConfigPath)
+		if ckhMgr == nil {
+			log.Fatalf("failed to load ClickHouse manager from %s", cfg.CkhManagerConfigPath)
+		}
+		privateKeyHex := cfg.RelayPrivateKeyHex
+
+		// Create table rewriter factory backed by sentio-core TableMapper
+		tableRewriterFactory := func(ctx context.Context, processorId string,
+			indexerInfo proxy.IndexerInfo, processorInfo proxy.ProcessorInfo) (proxy.SentioNetworkTableRewriter, error) {
+			return sqlrewriter.NewTableMapper(privateKeyHex, processorId, ckhMgr, indexerInfo, processorInfo)
+		}
+		log.Infof("using sentio-core TableMapper, ckh_manager_config=%s", cfg.CkhManagerConfigPath)
 
 		// Create rewriter
 		rwConfig := proxy.RewriterConfig{
