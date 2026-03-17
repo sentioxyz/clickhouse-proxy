@@ -322,14 +322,15 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		indexerAddr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
 		isLocal := indexerAddr == r.config.Upstream
 
+		// Get all logical→physical table mappings at once
+		allMappings := tableRewriter.All()
+
 		for _, table := range pTables {
-			// Use SentioNetworkTableRewriter to resolve physical table name
-			physicalTable, found, err := tableRewriter.RawTable(table.TableName)
-			if err != nil {
-				return nil, nil, fmt.Errorf("table rewriter RawTable failed for %s: %w", table.FullMatch, err)
-			}
+			// Look up physical table name from All() mapping
+			physicalTable, found := allMappings[table.TableName]
 			if !found {
-				return nil, nil, fmt.Errorf("table %s not found in rewriter mappings for processor_id=%s", table.FullMatch, processorId)
+				log.Debugf("table %s not found in All() mappings for processor_id=%s, skipping", table.FullMatch, processorId)
+				continue
 			}
 
 			if isLocal {

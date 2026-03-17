@@ -216,6 +216,36 @@ func TestFilterSentioNetworkTables(t *testing.T) {
 	}
 }
 
+// mockTableRewriter is a test helper that returns explicit All() mappings.
+type mockTableRewriter struct {
+	database string
+	mappings map[string]string // logical → physical
+}
+
+func (m *mockTableRewriter) Database() string { return m.database }
+func (m *mockTableRewriter) RawTable(table string) (string, bool, error) {
+	raw, ok := m.mappings[table]
+	return raw, ok, nil
+}
+func (m *mockTableRewriter) RawTables(tables ...string) (map[string]string, error) {
+	result := make(map[string]string)
+	for _, t := range tables {
+		if raw, ok := m.mappings[t]; ok {
+			result[t] = raw
+		}
+	}
+	return result, nil
+}
+func (m *mockTableRewriter) All() map[string]string { return m.mappings }
+func (m *mockTableRewriter) Reverse(rawTable string) (string, bool, error) {
+	for k, v := range m.mappings {
+		if v == rawTable {
+			return k, true, nil
+		}
+	}
+	return "", false, nil
+}
+
 // TestBuildRewriteMappings_UnknownProcessorSkipped verifies that when a processorId
 // is not found in NetworkState (Redis), buildRewriteMappings silently skips it
 // instead of returning an error. Known processors are still rewritten.
@@ -232,10 +262,21 @@ func TestBuildRewriteMappings_UnknownProcessorSkipped(t *testing.T) {
 	}
 	state.ProcessorInfos["coinbase"] = ProcessorInfo{ProcessorId: "coinbase"}
 
+	// Use a mock factory that returns explicit All() mappings
+	mockFactory := func(ctx context.Context, processorId string,
+		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
+		return &mockTableRewriter{
+			database: "sentio",
+			mappings: map[string]string{
+				"transfer": "transfer",
+			},
+		}, nil
+	}
+
 	rewriter := &SentioNetworkRewriter{
 		config:               RewriterConfig{Upstream: "localhost:9001"},
 		networkState:         state,
-		tableRewriterFactory: DefaultTableRewriterFactory("sentio"),
+		tableRewriterFactory: mockFactory,
 	}
 
 	tables := []ParsedTable{
@@ -267,6 +308,69 @@ func TestBuildRewriteMappings_UnknownProcessorSkipped(t *testing.T) {
 	}
 	if _, ok := remoteTable["unknown_db.some_table"]; ok {
 		t.Error("unknown_db.some_table should not be in remoteTableMap")
+	}
+}
+
+// TestBuildRewriteMappings_AllMappings verifies that buildRewriteMappings uses All()
+// to get all physical table mappings, and tables not in the mapping are silently skipped.
+func TestBuildRewriteMappings_AllMappings(t *testing.T) {
+	state := NewInMemoryNetworkState()
+	state.IndexerInfos[1] = IndexerInfo{
+		IndexerId:           1,
+		IndexerUrl:          "localhost",
+		ClickhouseProxyPort: 9001,
+	}
+	state.ProcessorAllocations["myproc"] = []ProcessorAllocation{
+		{ProcessorId: "myproc", IndexerId: 1},
+	}
+	state.ProcessorInfos["myproc"] = ProcessorInfo{ProcessorId: "myproc"}
+
+	// Mock factory: "transfer" → "w6B0Uyvq_event_Transfer", "orders" → "w6B0Uyvq_event_Orders"
+	// "unknown_table" is NOT in the mapping
+	mockFactory := func(ctx context.Context, processorId string,
+		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
+		return &mockTableRewriter{
+			database: "sentio",
+			mappings: map[string]string{
+				"transfer": "w6B0Uyvq_event_Transfer",
+				"orders":   "w6B0Uyvq_event_Orders",
+			},
+		}, nil
+	}
+
+	rewriter := &SentioNetworkRewriter{
+		config:               RewriterConfig{Upstream: "localhost:9001"},
+		networkState:         state,
+		tableRewriterFactory: mockFactory,
+	}
+
+	tables := []ParsedTable{
+		{FullMatch: "sentio_myproc.transfer", ProcessorId: "myproc", TableName: "transfer"},
+		{FullMatch: "sentio_myproc.orders", ProcessorId: "myproc", TableName: "orders"},
+		{FullMatch: "sentio_myproc.unknown_table", ProcessorId: "myproc", TableName: "unknown_table"},
+	}
+
+	ctx := context.Background()
+	tableWithDB, _, err := rewriter.buildRewriteMappings(ctx, tables, "default", "pass")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// "transfer" and "orders" should be rewritten
+	if td, ok := tableWithDB["sentio_myproc.transfer"]; !ok {
+		t.Error("expected sentio_myproc.transfer in tableWithDatabaseMap")
+	} else if td.Table != "w6B0Uyvq_event_Transfer" {
+		t.Errorf("expected physical table w6B0Uyvq_event_Transfer, got %s", td.Table)
+	}
+	if td, ok := tableWithDB["sentio_myproc.orders"]; !ok {
+		t.Error("expected sentio_myproc.orders in tableWithDatabaseMap")
+	} else if td.Table != "w6B0Uyvq_event_Orders" {
+		t.Errorf("expected physical table w6B0Uyvq_event_Orders, got %s", td.Table)
+	}
+
+	// "unknown_table" should NOT be in the map (silently skipped)
+	if _, ok := tableWithDB["sentio_myproc.unknown_table"]; ok {
+		t.Error("unknown_table should not be in tableWithDatabaseMap, expected it to be skipped")
 	}
 }
 
