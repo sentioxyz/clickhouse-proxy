@@ -49,6 +49,18 @@ func TestParseSentioNetworkTables(t *testing.T) {
 				{FullMatch: "sentio_proj2.users", ProcessorId: "proj2", TableName: "users"},
 			},
 		},
+		{
+			name:     "system tables ignored",
+			sql:      "SELECT * FROM system.numbers",
+			expected: nil,
+		},
+		{
+			name: "mixed with system tables",
+			sql:  "SELECT a.*, b.* FROM sentio_proj1.events a JOIN system.numbers b ON a.id = b.number",
+			expected: []ParsedTable{
+				{FullMatch: "sentio_proj1.events", ProcessorId: "proj1", TableName: "events"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -166,6 +178,34 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestFilterSentioNetworkTables(t *testing.T) {
+	rewriter := &SentioNetworkRewriter{}
+	
+	astTables := []string{
+		"sentio_coinbase.transfer",
+		"system.numbers",
+		"SYSTEM.processes",
+		"pancakeswap.Withdrawl",
+	}
+	
+	filtered := rewriter.filterSentioNetworkTables(astTables)
+	
+	if len(filtered) != 2 {
+		t.Errorf("expected 2 tables after filtering, got %d", len(filtered))
+	}
+	
+	expectedTables := map[string]bool{
+		"sentio_coinbase.transfer": true,
+		"pancakeswap.Withdrawl": true,
+	}
+	
+	for _, pt := range filtered {
+		if !expectedTables[pt.FullMatch] {
+			t.Errorf("unexpected table passed filter: %s", pt.FullMatch)
+		}
 	}
 }
 

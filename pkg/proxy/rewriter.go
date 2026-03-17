@@ -244,6 +244,11 @@ func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string
 		dbPart := parts[0]    // e.g. "sentio_coinbase" or "coinbase"
 		tableName := parts[1] // e.g. "transfer"
 
+		// Ignore system database (e.g. system.numbers, SYSTEM.processes)
+		if strings.ToLower(dbPart) == "system" {
+			continue
+		}
+
 		// Extract processorId: strip "sentio_" prefix if present
 		processorId := dbPart
 		const prefix = "sentio_"
