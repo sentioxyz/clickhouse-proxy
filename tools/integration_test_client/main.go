@@ -452,7 +452,7 @@ ORDER BY o.order_id`
 					}
 					cnt := 0
 					for rows.Next() {
-						var orderId uint32
+						var orderId int64
 						var productName, customerName string
 						if err := rows.Scan(&orderId, &productName, &customerName); err != nil {
 							errCh <- fmt.Errorf("goroutine %d: scan error: %v", idx, err)
