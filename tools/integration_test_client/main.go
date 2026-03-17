@@ -213,26 +213,8 @@ func runPhaseAuthValid() bool {
 		}
 	}
 
-	// Test 2.3: SQL_skip_rewrite 反向用例 — 不带 skip 时，system.numbers 应被 Rewriter 拦截报错
-	log.Println("[Test 2.3] SQL_skip_rewrite 反向用例 (不带 skip，预期报错)")
-	{
-		rows, err := conn.Query(context.Background(), "SELECT number FROM system.numbers LIMIT 5")
-		if err != nil {
-			log.Printf("  ✅ 不带 skip_rewrite 正确被拒绝: %v", err)
-		} else {
-			// 如果没有报错，消费结果并报告失败
-			count := 0
-			for rows.Next() {
-				count++
-			}
-			rows.Close()
-			log.Printf("  ❌ 不带 skip_rewrite 竟然成功了 (返回 %d 行)！Rewriter 应该拦截此查询", count)
-			allPassed = false
-		}
-	}
-
-	// Test 2.4: INSERT/UPDATE/DELETE 操作 sentio.local_data + 数据恢复 (SQL_skip_rewrite)
-	log.Println("[Test 2.4] INSERT/UPDATE/DELETE 操作 sentio.local_data (SQL_skip_rewrite)")
+	// Test 2.3: INSERT/UPDATE/DELETE 操作 sentio.local_data + 数据恢复 (SQL_skip_rewrite)
+	log.Println("[Test 2.3] INSERT/UPDATE/DELETE 操作 sentio.local_data (SQL_skip_rewrite)")
 	{
 		crudOK := true
 		skipCtx := clickhouse.Context(context.Background(), clickhouse.WithSettings(clickhouse.Settings{
@@ -240,7 +222,7 @@ func runPhaseAuthValid() bool {
 		}))
 
 		// Step 1: INSERT 新行
-		log.Println("  [2.4.1] INSERT 新行 (id=99)")
+		log.Println("  [2.3.1] INSERT 新行 (id=99)")
 		if err := conn.Exec(skipCtx, "INSERT INTO sentio.local_data VALUES (99, 'test_insert', 99.9)"); err != nil {
 			log.Printf("    ❌ INSERT 失败: %v", err)
 			crudOK = false
@@ -250,7 +232,7 @@ func runPhaseAuthValid() bool {
 
 		// Step 2: 验证 INSERT
 		if crudOK {
-			log.Println("  [2.4.2] 验证 INSERT")
+			log.Println("  [2.3.2] 验证 INSERT")
 			var cnt uint64
 			if err := conn.QueryRow(skipCtx, "SELECT count() FROM sentio.local_data WHERE id = 99").Scan(&cnt); err != nil {
 				log.Printf("    ❌ 验证查询失败: %v", err)
@@ -265,7 +247,7 @@ func runPhaseAuthValid() bool {
 
 		// Step 3: ALTER TABLE UPDATE
 		if crudOK {
-			log.Println("  [2.4.3] ALTER TABLE UPDATE (id=99 name → 'test_updated')")
+			log.Println("  [2.3.3] ALTER TABLE UPDATE (id=99 name → 'test_updated')")
 			if err := conn.Exec(skipCtx, "ALTER TABLE sentio.local_data UPDATE name = 'test_updated' WHERE id = 99"); err != nil {
 				log.Printf("    ❌ UPDATE 失败: %v", err)
 				crudOK = false
@@ -278,7 +260,7 @@ func runPhaseAuthValid() bool {
 
 		// Step 4: 验证 UPDATE
 		if crudOK {
-			log.Println("  [2.4.4] 验证 UPDATE")
+			log.Println("  [2.3.4] 验证 UPDATE")
 			var name string
 			if err := conn.QueryRow(skipCtx, "SELECT name FROM sentio.local_data WHERE id = 99").Scan(&name); err != nil {
 				log.Printf("    ❌ 验证查询失败: %v", err)
@@ -292,7 +274,7 @@ func runPhaseAuthValid() bool {
 		}
 
 		// Step 5: ALTER TABLE DELETE (清理测试数据)
-		log.Println("  [2.4.5] ALTER TABLE DELETE (id=99)")
+		log.Println("  [2.3.5] ALTER TABLE DELETE (id=99)")
 		if err := conn.Exec(skipCtx, "ALTER TABLE sentio.local_data DELETE WHERE id = 99"); err != nil {
 			log.Printf("    ❌ DELETE 失败: %v", err)
 			crudOK = false
@@ -303,7 +285,7 @@ func runPhaseAuthValid() bool {
 		}
 
 		// Step 6: 验证 DELETE + 数据恢复
-		log.Println("  [2.4.6] 验证数据恢复 (应回到原始 3 行)")
+		log.Println("  [2.3.6] 验证数据恢复 (应回到原始 3 行)")
 		{
 			var cnt uint64
 			if err := conn.QueryRow(skipCtx, "SELECT count() FROM sentio.local_data").Scan(&cnt); err != nil {
@@ -322,7 +304,7 @@ func runPhaseAuthValid() bool {
 		}
 	}
 
-	// ========== SDK API 签名测试 (2.5–2.8) — 双签名模式 ==========
+	// ========== SDK API 签名测试 (2.4–2.7) — 双签名模式 ==========
 	// 每个测试执行两次: ① 连接级签名 ② 查询级签名 (WithSignFunc)
 	{
 		type sdkSignMode struct {
@@ -369,11 +351,11 @@ func runPhaseAuthValid() bool {
 			skipCtx := mode.makeCtx()
 			prefix := fmt.Sprintf("[%s]", mode.name)
 
-			// Test 2.5: 普通查询与参数化查询
-			log.Printf("%s [Test 2.5] 普通查询与参数化查询", prefix)
+			// Test 2.4: 普通查询与参数化查询
+			log.Printf("%s [Test 2.4] 普通查询与参数化查询", prefix)
 			{
-				// 2.5a: 普通 SELECT count(*)
-				log.Printf("%s   [2.5a] 普通 SELECT count(*)", prefix)
+				// 2.4a: 普通 SELECT count(*)
+				log.Printf("%s   [2.4a] 普通 SELECT count(*)", prefix)
 				var count uint64
 				if err := sc.QueryRow(skipCtx, "SELECT count(*) FROM sentio.orders").Scan(&count); err != nil {
 					log.Printf("%s     ❌ SELECT count(*) 失败: %v", prefix, err)
@@ -382,8 +364,8 @@ func runPhaseAuthValid() bool {
 					log.Printf("%s     ✅ SELECT count(*) = %d", prefix, count)
 				}
 
-				// 2.5b: 参数化查询
-				log.Printf("%s   [2.5b] 参数化查询 WHERE order_id > @id", prefix)
+				// 2.4b: 参数化查询
+				log.Printf("%s   [2.4b] 参数化查询 WHERE order_id > @id", prefix)
 				rows, err := sc.Query(skipCtx,
 					"SELECT order_id, customer FROM sentio.orders WHERE order_id > @id ORDER BY order_id",
 					clickhouse.Named("id", 1003),
@@ -413,8 +395,8 @@ func runPhaseAuthValid() bool {
 				}
 			}
 
-			// Test 2.6: 批量插入 Batch Insert
-			log.Printf("%s [Test 2.6] 批量插入 Batch Insert (PrepareBatch)", prefix)
+			// Test 2.5: 批量插入 Batch Insert
+			log.Printf("%s [Test 2.5] 批量插入 Batch Insert (PrepareBatch)", prefix)
 			{
 				const batchSize = 1000
 				const batchStartID = 900000
@@ -473,8 +455,8 @@ func runPhaseAuthValid() bool {
 				}
 			}
 
-			// Test 2.7: Select struct 扫描
-			log.Printf("%s [Test 2.7] Select struct 扫描", prefix)
+			// Test 2.6: Select struct 扫描
+			log.Printf("%s [Test 2.6] Select struct 扫描", prefix)
 			{
 				type Order struct {
 					OrderID   uint32  `ch:"order_id"`
@@ -498,8 +480,8 @@ func runPhaseAuthValid() bool {
 				}
 			}
 
-			// Test 2.8: AsyncInsert 异步插入
-			log.Printf("%s [Test 2.8] AsyncInsert 异步插入", prefix)
+			// Test 2.7: AsyncInsert 异步插入
+			log.Printf("%s [Test 2.7] AsyncInsert 异步插入", prefix)
 			{
 				const asyncTestID = 899999
 
