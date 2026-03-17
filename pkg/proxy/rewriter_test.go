@@ -183,29 +183,90 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 
 func TestFilterSentioNetworkTables(t *testing.T) {
 	rewriter := &SentioNetworkRewriter{}
-	
+
 	astTables := []string{
 		"sentio_coinbase.transfer",
 		"system.numbers",
 		"SYSTEM.processes",
 		"pancakeswap.Withdrawl",
 	}
-	
+
 	filtered := rewriter.filterSentioNetworkTables(astTables)
-	
-	if len(filtered) != 2 {
-		t.Errorf("expected 2 tables after filtering, got %d", len(filtered))
+
+	// system.numbers and SYSTEM.processes are no longer filtered out;
+	// they pass through and will be skipped later by NetworkState lookup.
+	if len(filtered) != 4 {
+		t.Errorf("expected 4 tables after filtering, got %d", len(filtered))
+		for _, pt := range filtered {
+			t.Logf("  %s", pt.FullMatch)
+		}
 	}
-	
+
 	expectedTables := map[string]bool{
 		"sentio_coinbase.transfer": true,
-		"pancakeswap.Withdrawl": true,
+		"system.numbers":          true,
+		"SYSTEM.processes":        true,
+		"pancakeswap.Withdrawl":   true,
 	}
-	
+
 	for _, pt := range filtered {
 		if !expectedTables[pt.FullMatch] {
 			t.Errorf("unexpected table passed filter: %s", pt.FullMatch)
 		}
+	}
+}
+
+// TestBuildRewriteMappings_UnknownProcessorSkipped verifies that when a processorId
+// is not found in NetworkState (Redis), buildRewriteMappings silently skips it
+// instead of returning an error. Known processors are still rewritten.
+func TestBuildRewriteMappings_UnknownProcessorSkipped(t *testing.T) {
+	state := NewInMemoryNetworkState()
+	// Only "coinbase" is known
+	state.IndexerInfos[1] = IndexerInfo{
+		IndexerId:           1,
+		IndexerUrl:          "localhost",
+		ClickhouseProxyPort: 9001,
+	}
+	state.ProcessorAllocations["coinbase"] = []ProcessorAllocation{
+		{ProcessorId: "coinbase", IndexerId: 1},
+	}
+	state.ProcessorInfos["coinbase"] = ProcessorInfo{ProcessorId: "coinbase"}
+
+	rewriter := &SentioNetworkRewriter{
+		config:               RewriterConfig{Upstream: "localhost:9001"},
+		networkState:         state,
+		tableRewriterFactory: DefaultTableRewriterFactory("sentio"),
+	}
+
+	tables := []ParsedTable{
+		{FullMatch: "sentio_coinbase.transfer", ProcessorId: "coinbase", TableName: "transfer"},
+		{FullMatch: "system.numbers", ProcessorId: "system", TableName: "numbers"},           // unknown
+		{FullMatch: "unknown_db.some_table", ProcessorId: "unknown_db", TableName: "some_table"}, // unknown
+	}
+
+	ctx := context.Background()
+	tableWithDB, remoteTable, err := rewriter.buildRewriteMappings(ctx, tables, "default", "pass")
+	if err != nil {
+		t.Fatalf("expected no error for unknown processors, got: %v", err)
+	}
+
+	// "coinbase" is local (upstream matches), so should appear in tableWithDB
+	if _, ok := tableWithDB["sentio_coinbase.transfer"]; !ok {
+		t.Error("expected sentio_coinbase.transfer in tableWithDatabaseMap")
+	}
+
+	// Unknown processors should NOT appear in either map
+	if _, ok := tableWithDB["system.numbers"]; ok {
+		t.Error("system.numbers should not be in tableWithDatabaseMap")
+	}
+	if _, ok := remoteTable["system.numbers"]; ok {
+		t.Error("system.numbers should not be in remoteTableMap")
+	}
+	if _, ok := tableWithDB["unknown_db.some_table"]; ok {
+		t.Error("unknown_db.some_table should not be in tableWithDatabaseMap")
+	}
+	if _, ok := remoteTable["unknown_db.some_table"]; ok {
+		t.Error("unknown_db.some_table should not be in remoteTableMap")
 	}
 }
 

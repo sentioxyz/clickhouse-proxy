@@ -244,10 +244,7 @@ func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string
 		dbPart := parts[0]    // e.g. "sentio_coinbase" or "coinbase"
 		tableName := parts[1] // e.g. "transfer"
 
-		// Ignore system database (e.g. system.numbers, SYSTEM.processes)
-		if strings.ToLower(dbPart) == "system" {
-			continue
-		}
+
 
 		// Extract processorId: strip "sentio_" prefix if present
 		processorId := dbPart
@@ -288,7 +285,8 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 			// Retry with "sentio_" prefix
 			allocations, ok = r.networkState.GetProcessorAllocation("sentio_" + processorId)
 			if !ok || len(allocations) == 0 {
-				return nil, nil, fmt.Errorf("processor allocation not found for processor_id=%s (also tried sentio_%s)", processorId, processorId)
+				log.Debugf("processor allocation not found for processor_id=%s, skipping (passthrough)", processorId)
+				continue
 			}
 		}
 
