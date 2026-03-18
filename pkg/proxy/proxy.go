@@ -931,46 +931,44 @@ func (p *Proxy) handleDataBlock(
 		totalFrameBytes := 0
 
 		for {
-			// ReadRaw returns a slice from proto.Reader's shared internal buffer.
-			// The slice is invalidated by the next ReadRaw call, so we must copy
-			// the header bytes before reading compressed data.
-			headerRaw, err := chReader.ReadRaw(frameHeaderSize)
-			if err != nil {
+			// FIX: Read compressed frame directly from br (bufio.Reader) into independent
+			// buffers, bypassing chReader.ReadRaw which returns slices from proto.Reader's
+			// shared internal buffer (r.b.Buf). The shared buffer gets overwritten on each
+			// ReadRaw call, causing data corruption when the header bytes are still referenced
+			// while reading compressed data.
+
+			// Step 1: Read frame header (25 bytes) into independent buffer
+			headerBuf := make([]byte, frameHeaderSize)
+			if _, err := io.ReadFull(br, headerBuf); err != nil {
 				return fmt.Errorf("compressed frame header: %w", err)
 			}
 
-			fBuf := p.getBuffer()
-			fBuf.Buf = append(fBuf.Buf[:0], headerRaw...) // copy before next ReadRaw
-
 			// Extract compressed_size from header[17:21] (little-endian uint32)
-			compressedSize := binary.LittleEndian.Uint32(fBuf.Buf[17:21])
+			compressedSize := binary.LittleEndian.Uint32(headerBuf[17:21])
 
 			// Sanity check: compressed_size must be >= 9 (sub-header size)
 			if compressedSize < 9 {
-				p.putBuffer(fBuf)
 				return fmt.Errorf("invalid compressed_size %d (< 9)", compressedSize)
 			}
 			if compressedSize > maxCompressedFrameSize {
-				p.putBuffer(fBuf)
 				return fmt.Errorf("compressed_size %d exceeds limit %d", compressedSize, maxCompressedFrameSize)
 			}
 
 			// Remaining compressed data bytes = compressed_size - 9 (sub-header already read)
 			remainingDataSize := int(compressedSize) - 9
 
-			compressedData, err := chReader.ReadRaw(remainingDataSize)
-			if err != nil {
-				p.putBuffer(fBuf)
+			// Step 2: Allocate full frame buffer and copy header + read compressed data
+			frameBuf := make([]byte, frameHeaderSize+remainingDataSize)
+			copy(frameBuf, headerBuf)
+			if _, err := io.ReadFull(br, frameBuf[frameHeaderSize:]); err != nil {
 				return fmt.Errorf("compressed frame data: %w", err)
 			}
 
-			fBuf.Buf = append(fBuf.Buf, compressedData...)
-			if _, err := upstreamWriter.Write(fBuf.Buf); err != nil {
-				p.putBuffer(fBuf)
+			// Step 3: Write complete frame to upstream
+			if _, err := upstreamWriter.Write(frameBuf); err != nil {
 				return fmt.Errorf("write compressed frame: %w", err)
 			}
-			p.putBuffer(fBuf)
-			totalFrameBytes += frameHeaderSize + remainingDataSize
+			totalFrameBytes += len(frameBuf)
 
 			// R1-4: Detect if there are subsequent compressed frames.
 			// IMPORTANT: bufio.Reader.Peek(n) may block if buffered bytes < n, which can add
