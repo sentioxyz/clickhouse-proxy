@@ -376,7 +376,7 @@ func TestSimpleRewrite_SafeFromInjection(t *testing.T) {
 	rewriter := &SentioNetworkRewriter{
 		config:               RewriterConfig{},
 		networkState:         state,
-		tableRewriterFactory: DefaultTableRewriterFactory("sentio"),
+		tableRewriterFactory: mockTableRewriterFactory("sentio"),
 	}
 
 	// SQL 中字符串字面量包含表名模式

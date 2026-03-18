@@ -102,15 +102,14 @@ type SentioNetworkTableRewriterFactory func(ctx context.Context, processorId str
 	indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error)
 
 // NewSentioNetworkRewriter creates a new SentioNetworkRewriter.
-// The factory parameter provides a SentioNetworkTableRewriter for each processor.
+// The factory parameter provides a SentioNetworkTableRewriter for each processor (backed by sentio-core TableMapper).
 // gRPC connection to sql-rewriter service is required (ServiceAddr must not be empty).
-// Pass DefaultTableRewriterFactory() for backward-compatible simple prefix logic.
 func NewSentioNetworkRewriter(config RewriterConfig, state NetworkState, factory SentioNetworkTableRewriterFactory) (*SentioNetworkRewriter, error) {
 	if config.ServiceAddr == "" {
 		return nil, fmt.Errorf("rewriter_service_addr is required when rewriter is enabled")
 	}
 	if factory == nil {
-		factory = DefaultTableRewriterFactory("")
+		return nil, fmt.Errorf("table rewriter factory is required (must be backed by sentio-core TableMapper)")
 	}
 	rewriter := &SentioNetworkRewriter{
 		config:               config,
@@ -244,6 +243,8 @@ func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string
 		dbPart := parts[0]    // e.g. "sentio_coinbase" or "coinbase"
 		tableName := parts[1] // e.g. "transfer"
 
+
+
 		// Extract processorId: strip "sentio_" prefix if present
 		processorId := dbPart
 		const prefix = "sentio_"
@@ -283,7 +284,8 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 			// Retry with "sentio_" prefix
 			allocations, ok = r.networkState.GetProcessorAllocation("sentio_" + processorId)
 			if !ok || len(allocations) == 0 {
-				return nil, nil, fmt.Errorf("processor allocation not found for processor_id=%s (also tried sentio_%s)", processorId, processorId)
+				log.Debugf("processor allocation not found for processor_id=%s, skipping (passthrough)", processorId)
+				continue
 			}
 		}
 
@@ -319,14 +321,15 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		indexerAddr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
 		isLocal := indexerAddr == r.config.Upstream
 
+		// Get all logical→physical table mappings at once
+		allMappings := tableRewriter.All()
+
 		for _, table := range pTables {
-			// Use SentioNetworkTableRewriter to resolve physical table name
-			physicalTable, found, err := tableRewriter.RawTable(table.TableName)
-			if err != nil {
-				return nil, nil, fmt.Errorf("table rewriter RawTable failed for %s: %w", table.FullMatch, err)
-			}
+			// Look up physical table name from All() mapping
+			physicalTable, found := allMappings[table.TableName]
 			if !found {
-				return nil, nil, fmt.Errorf("table %s not found in rewriter mappings for processor_id=%s", table.FullMatch, processorId)
+				log.Debugf("table %s not found in All() mappings for processor_id=%s, skipping", table.FullMatch, processorId)
+				continue
 			}
 
 			if isLocal {
@@ -386,56 +389,6 @@ func (r *SentioNetworkRewriter) parseSentioNetworkTables(sql string) []ParsedTab
 	return tables
 }
 
-// DefaultTableRewriterFactory returns a default factory that maps logical to physical tables.
-// Without CKHManager, this implementation passes the table name through directly.
-func DefaultTableRewriterFactory(database string) SentioNetworkTableRewriterFactory {
-	return func(ctx context.Context, processorId string,
-		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
-		return &simpleTableRewriter{
-			database:      database,
-			processorId:   processorId,
-			processorInfo: processorInfo,
-		}, nil
-	}
-}
-
-// simpleTableRewriter is the default TableRewriter implementation.
-// It directly returns the table name without any physical mapping.
-type simpleTableRewriter struct {
-	database      string
-	processorId   string
-	processorInfo ProcessorInfo
-}
-
-func (s *simpleTableRewriter) Database() string {
-	if s.database != "" {
-		return s.database
-	}
-	return "sentio"
-}
-
-func (s *simpleTableRewriter) RawTable(table string) (string, bool, error) {
-	// Without CKHManager, we assume the provided table name is already the physical table name.
-	return table, true, nil
-}
-
-func (s *simpleTableRewriter) RawTables(tables ...string) (map[string]string, error) {
-	result := make(map[string]string, len(tables))
-	for _, t := range tables {
-		raw, _, err := s.RawTable(t)
-		if err != nil {
-			return nil, err
-		}
-		result[t] = raw
-	}
-	return result, nil
-}
-
-func (s *simpleTableRewriter) All() map[string]string { return nil }
-
-func (s *simpleTableRewriter) Reverse(rawTable string) (string, bool, error) {
-	return "", false, nil
-}
 
 // TableWithDatabase represents a table with its database
 type TableWithDatabase struct {

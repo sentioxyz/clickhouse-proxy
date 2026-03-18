@@ -514,7 +514,7 @@ func TestRewriter_BacktickIntegration(t *testing.T) {
 		Enabled:     true,
 		ServiceAddr: "localhost:50051",
 	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, DefaultTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}

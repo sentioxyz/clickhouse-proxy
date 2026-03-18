@@ -39,6 +39,9 @@ type Config struct {
 	RewriterServiceAddr string   `json:"rewriter_service_addr" yaml:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
 	RewriterTimeout     Duration `json:"rewriter_timeout"      yaml:"rewriter_timeout"`      // Rewrite timeout
 
+	// ClickHouse manager config path (for sentio-core table mapper, required)
+	CkhManagerConfigPath string `json:"ckh_manager_config_path" yaml:"ckh_manager_config_path"`
+
 	// Network State configuration
 	NetworkStateRedis string `json:"network_state_redis" yaml:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
 
@@ -144,6 +147,8 @@ func DefaultConfig() Config {
 		// Rewriter defaults
 		RewriterServiceAddr: envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
 		RewriterTimeout:     Duration{5 * time.Second},
+		// ClickHouse manager config
+		CkhManagerConfigPath: envOrDefault("CKH_MANAGER_CONFIG", ""),
 		// Network state defaults
 		NetworkStateRedis: envOrDefault("CK_NETWORK_STATE_REDIS", ""),
 		// Streaming buffer size

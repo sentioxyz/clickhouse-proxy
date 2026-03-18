@@ -13,7 +13,7 @@ env:
   DEPLOY_USER: sentio
   REMOTE_BASE: /home/sentio/node/distributed
   # Pinned sentio-core commit hash. Update this when upgrading the dependency.
-  SENTIO_CORE_REF: 73d1ae22edda
+  SENTIO_CORE_REF: ecc0cd145878
 
 jobs:
   build-and-test:

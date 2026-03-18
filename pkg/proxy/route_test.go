@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"net"
 	"testing"
 
@@ -236,10 +237,22 @@ func TestBuildRewriteMappingsRouteEncoding(t *testing.T) {
 		Listen:   ":9001",
 	}
 
+	// Use a mock factory that returns explicit All() mappings
+	mockFactory := func(ctx context.Context, processorId string,
+		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
+		return &mockTableRewriter{
+			database: "sentio",
+			mappings: map[string]string{
+				"transfer": "transfer",
+			},
+		}, nil
+	}
+
 	rewriter := &SentioNetworkRewriter{
 		config:               config,
 		networkState:         state,
-		tableRewriterFactory: DefaultTableRewriterFactory("sentio"),
+		tableRewriterFactory: mockFactory,
+		callbackAddr:         "localhost:9001",
 	}
 
 	tables := []ParsedTable{
