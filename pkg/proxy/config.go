@@ -59,6 +59,10 @@ type Config struct {
 	// R1-16: ShutdownTimeout 优雅关闭时等待在途连接排水的最大时间，默认 30s。
 	ShutdownTimeout Duration `json:"shutdown_timeout" yaml:"shutdown_timeout"`
 
+	// Query usage reporting to sentio-node
+	SentioNodeAddr    string `json:"sentio_node_addr" yaml:"sentio_node_addr"`       // sentio-node gRPC address for query usage
+	QueryUsageEnabled bool   `json:"query_usage_enabled" yaml:"query_usage_enabled"` // Enable query usage reporting
+
 	// ForwardingOnly 标记该 proxy 没有绑定 ClickHouse 实例，
 	// 所有请求将随机转发给 NetworkState 中的已绑定 proxy。
 	// 当 Upstream 为空时自动启用，不从 JSON 读取。

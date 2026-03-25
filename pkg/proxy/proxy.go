@@ -137,8 +137,9 @@ type Proxy struct {
 	validator    Validator
 	rewriter     Rewriter
 	observer     *MetricsObserver
-	relaySigner  *RelaySigner // Signs relay JWS tokens for __route__ connections
-	networkState NetworkState // Used by forwarding-only mode to discover bound proxy targets
+	relaySigner  *RelaySigner  // Signs relay JWS tokens for __route__ connections
+	networkState NetworkState  // Used by forwarding-only mode to discover bound proxy targets
+	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled)
 	// compressedBufPool removed: proto.Reader.ReadRaw always returns a newly allocated slice,
 	// so data cannot be read into a pool-obtained buffer, making the pool ineffective.
 	bufferPool sync.Pool // Reuse proto.Buffer to reduce allocations in the packet loop
@@ -168,6 +169,11 @@ func (p *Proxy) SetRelaySigner(s *RelaySigner) {
 // SetNetworkState sets the network state for forwarding-only mode.
 func (p *Proxy) SetNetworkState(ns NetworkState) {
 	p.networkState = ns
+}
+
+// SetUsageClient sets the query usage client for billing integration.
+func (p *Proxy) SetUsageClient(c *UsageClient) {
+	p.usageClient = c
 }
 
 // getBuffer retrieves a proto.Buffer from bufferPool and resets its content.
@@ -823,9 +829,25 @@ func (p *Proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					Settings:     parsed.Settings,
 				}
 				log.Infof("[conn %d] Processing parsed packet. SQL: %q, Settings: %v", id, parsed.SQL, parsed.Settings)
-				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
+				signerAddr, err := p.validator.ValidateQuery(ctx, meta)
+				if err != nil {
 					log.Infof("[conn %d] query rejected: %v", id, err)
 					return
+				}
+
+				// Query usage: check balance and report usage
+				if signerAddr != "" && p.usageClient != nil {
+					// Determine payer: use SQL_x_payer setting if present, otherwise signer pays
+					payer := signerAddr
+					if payerSetting, ok := parsed.Settings["SQL_x_payer"]; ok && payerSetting != "" {
+						payer = payerSetting
+					}
+					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {
+						log.Infof("[conn %d] query rejected: %v (payer=%s signer=%s)", id, reason, payer, signerAddr)
+						return
+					}
+					// Report usage asynchronously
+					p.usageClient.ReportUsage(ctx, payer, signerAddr, 1)
 				}
 
 				if p.cfg.LogQueries {
@@ -1560,7 +1582,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 					SQL:          eq.Body,
 					Settings:     settingsMap,
 				}
-				if err := p.validator.ValidateQuery(ctx, meta); err != nil {
+				if _, err := p.validator.ValidateQuery(ctx, meta); err != nil {
 					log.Infof("[conn %d] streaming: query rejected by validator: %v", id, err)
 					return
 				}
@@ -2236,7 +2258,7 @@ func (p *Proxy) handleServerClientWithAuth(id int64, br *bufio.Reader, chReader 
 				SQL:          eq.Body,
 				Settings:     settingsMap,
 			}
-			if err := p.validator.ValidateQuery(ctx, meta); err != nil {
+			if _, err := p.validator.ValidateQuery(ctx, meta); err != nil {
 				log.Infof("[conn %d] server-auth: relay token rejected: %v", id, err)
 				upstreamConn.Close()
 				<-done

@@ -9,7 +9,7 @@ import (
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-
+	"github.com/redis/go-redis/v9"
 	ckhmanager "sentioxyz/sentio-core/common/clickhousemanager"
 	log "sentioxyz/sentio-core/common/log"
 	"sentioxyz/sentio-core/network/sqlrewriter"
@@ -56,18 +56,23 @@ func main() {
 
 	// Create rewriter based on configuration
 	var rewriter proxy.Rewriter
+	// Initialize shared Redis client
+	if cfg.NetworkStateRedis == "" {
+		log.Fatalf("network_state_redis is required")
+	}
+	redisClient := redis.NewClient(&redis.Options{Addr: cfg.NetworkStateRedis})
+	defer redisClient.Close()
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Fatalf("failed to connect to Redis at %s: %v", cfg.NetworkStateRedis, err)
+	}
+
 	// Load network state
 	var networkState proxy.NetworkState
-	if cfg.NetworkStateRedis != "" {
-		state, err := proxy.NewRedisNetworkState(cfg.NetworkStateRedis)
-		if err != nil {
-			log.Fatalf("failed to connect to Redis network state: %v", err)
-		}
-		defer state.Close()
-		networkState = state
-	} else {
-		log.Fatalf("network_state_redis is required for network state")
+	state, err := proxy.NewRedisNetworkState(redisClient)
+	if err != nil {
+		log.Fatalf("failed to initialize Redis network state: %v", err)
 	}
+	networkState = state
 
 	// Create rewriter (optional in forwarding-only mode)
 	if !cfg.ForwardingOnly {
@@ -119,6 +124,18 @@ func main() {
 		}
 		p.SetRelaySigner(signer)
 		log.Infof("relay JWS signer enabled, address=%s", signer.Address())
+	}
+
+	// Initialize query usage client for billing integration
+	if cfg.QueryUsageEnabled && cfg.SentioNodeAddr != "" {
+		usageClient, err := proxy.NewUsageClient(cfg.SentioNodeAddr, redisClient)
+		if err != nil {
+			log.Warnf("failed to create usage client: %v, query billing disabled", err)
+		} else {
+			p.SetUsageClient(usageClient)
+			defer usageClient.Close()
+			log.Infof("query usage reporting enabled, sentio_node=%s", cfg.SentioNodeAddr)
+		}
 	}
 
 	if err := p.Serve(ctx); err != nil {

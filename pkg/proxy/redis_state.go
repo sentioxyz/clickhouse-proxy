@@ -23,20 +23,8 @@ type RedisNetworkState struct {
 	mirror      statemirror.Mirror
 }
 
-// NewRedisNetworkState creates a NetworkState backed by Redis statemirror.
-// The addr should be a Redis address like "localhost:6379".
-func NewRedisNetworkState(addr string) (*RedisNetworkState, error) {
-	client := redis.NewClient(&redis.Options{
-		Addr: addr,
-	})
-
-	// Verify connectivity
-	ctx := context.Background()
-	if err := client.Ping(ctx).Err(); err != nil {
-		return nil, fmt.Errorf("failed to connect to Redis at %s: %w", addr, err)
-	}
-	log.Infof("connected to Redis statemirror at %s", addr)
-
+// NewRedisNetworkState creates a NetworkState using an existing Redis client.
+func NewRedisNetworkState(client *redis.Client) (*RedisNetworkState, error) {
 	mirror := statemirror.NewRedisMirror(client)
 	reg := registry.NewProcessorRegistry(mirror)
 

@@ -22,10 +22,10 @@ type mockValidator struct {
 	err      error
 }
 
-func (m *mockValidator) ValidateQuery(_ context.Context, meta QueryMeta) error {
+func (m *mockValidator) ValidateQuery(_ context.Context, meta QueryMeta) (string, error) {
 	m.called = true
 	m.lastMeta = meta
-	return m.err
+	return "", m.err
 }
 
 func TestStreamingMode_ValidatorCalled(t *testing.T) {
@@ -42,7 +42,7 @@ func TestStreamingMode_ValidatorCalled(t *testing.T) {
 			SQL:      "SELECT 1",
 			Settings: map[string]string{"key": "value"},
 		}
-		err := v.ValidateQuery(context.Background(), meta)
+		_, err := v.ValidateQuery(context.Background(), meta)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -61,7 +61,7 @@ func TestStreamingMode_ValidatorCalled(t *testing.T) {
 			SQL:      "DROP TABLE x",
 			Settings: map[string]string{},
 		}
-		err := v.ValidateQuery(context.Background(), meta)
+		_, err := v.ValidateQuery(context.Background(), meta)
 		if err == nil {
 			t.Fatal("expected error")
 		}
@@ -72,7 +72,7 @@ func TestStreamingMode_ValidatorCalled(t *testing.T) {
 
 	t.Run("NoopValidator 始终通过", func(t *testing.T) {
 		v := NoopValidator{}
-		err := v.ValidateQuery(context.Background(), QueryMeta{SQL: "SELECT 1"})
+		_, err := v.ValidateQuery(context.Background(), QueryMeta{SQL: "SELECT 1"})
 		if err != nil {
 			t.Fatalf("NoopValidator should always pass, got: %v", err)
 		}
@@ -182,14 +182,14 @@ func TestValidateJWSJSON_PayloadDecodedOnce(t *testing.T) {
 	}
 
 	t.Run("空签名应返回错误", func(t *testing.T) {
-		err := v.validateJWSJSON(`{"payload":"dGVzdA","signatures":[]}`, "SELECT 1")
+		_, err := v.validateJWSJSON(`{"payload":"dGVzdA","signatures":[]}`, "SELECT 1")
 		if err == nil || err.Error() != "no signatures found in JWS JSON" {
 			t.Errorf("unexpected error: %v", err)
 		}
 	})
 
 	t.Run("无效 payload 编码应返回错误", func(t *testing.T) {
-		err := v.validateJWSJSON(`{"payload":"!!!invalid!!!","signatures":[{"protected":"dGVzdA","signature":"dGVzdA"}]}`, "SELECT 1")
+		_, err := v.validateJWSJSON(`{"payload":"!!!invalid!!!","signatures":[{"protected":"dGVzdA","signature":"dGVzdA"}]}`, "SELECT 1")
 		if err == nil {
 			t.Fatal("expected error for invalid payload encoding")
 		}
@@ -200,7 +200,7 @@ func TestValidateJWSJSON_PayloadDecodedOnce(t *testing.T) {
 
 	t.Run("无效 payload JSON 应返回错误", func(t *testing.T) {
 		// base64url("not json") = "bm90IGpzb24"
-		err := v.validateJWSJSON(`{"payload":"bm90IGpzb24","signatures":[{"protected":"dGVzdA","signature":"dGVzdA"}]}`, "SELECT 1")
+		_, err := v.validateJWSJSON(`{"payload":"bm90IGpzb24","signatures":[{"protected":"dGVzdA","signature":"dGVzdA"}]}`, "SELECT 1")
 		if err == nil {
 			t.Fatal("expected error for invalid payload JSON")
 		}

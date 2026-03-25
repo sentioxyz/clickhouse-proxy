@@ -8,6 +8,7 @@ go_library(
     deps = [
         "//pkg/proxy",
         "@com_github_prometheus_client_golang//prometheus/promhttp",
+        "@com_github_redis_go_redis_v9//:go-redis",
         "@sentioxyz_sentio_core//common/clickhousemanager",
         "@sentioxyz_sentio_core//common/log",
         "@sentioxyz_sentio_core//network/sqlrewriter",
