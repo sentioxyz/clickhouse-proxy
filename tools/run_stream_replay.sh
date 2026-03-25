@@ -42,9 +42,11 @@ echo "=========================================="
 
 # Build everything
 echo "📦 Building binaries..."
-go build -o tools/bin/mock_server tools/mock_server/main.go
-go build -o tools/bin/stream_client tools/stream_client/main.go
-go build -o tools/bin/proxy ./cmd/proxy/
+bazel build //tools/mock_server //tools/stream_client //cmd/proxy:clickhouse-proxy
+mkdir -p tools/bin
+cp bazel-bin/tools/mock_server/mock_server_/mock_server tools/bin/mock_server
+cp bazel-bin/tools/stream_client/stream_client_/stream_client tools/bin/stream_client
+cp bazel-bin/cmd/proxy/clickhouse-proxy_/clickhouse-proxy tools/bin/proxy
 
 # Start mock server
 echo "🚀 Starting mock server on :$MOCK_PORT..."

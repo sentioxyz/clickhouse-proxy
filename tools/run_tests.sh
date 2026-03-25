@@ -8,9 +8,11 @@ cleanup() {
 trap cleanup EXIT
 
 echo "Building tools..."
-go build -o tools/bin/mock_server tools/mock_server/main.go
-go build -o tools/bin/load_client tools/load_client/main.go
-go build -o tools/bin/proxy ./cmd/proxy/
+bazel build //tools/mock_server //tools/load_client //cmd/proxy:clickhouse-proxy
+mkdir -p tools/bin
+cp bazel-bin/tools/mock_server/mock_server_/mock_server tools/bin/mock_server
+cp bazel-bin/tools/load_client/load_client_/load_client tools/bin/load_client
+cp bazel-bin/cmd/proxy/clickhouse-proxy_/clickhouse-proxy tools/bin/proxy
 
 echo "Starting Mock Server..."
 ./tools/bin/mock_server -addr :19001 > tools/mock.log 2>&1 &
