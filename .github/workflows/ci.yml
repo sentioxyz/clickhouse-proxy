@@ -12,8 +12,6 @@ concurrency:
 env:
   DEPLOY_USER: sentio
   REMOTE_BASE: /home/sentio/node/distributed
-  # Pinned sentio-core commit hash. Update this when upgrading the dependency.
-  SENTIO_CORE_REF: ecc0cd145878
 
 jobs:
   build-and-test:
@@ -29,30 +27,23 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Setup Go
-        uses: actions/setup-go@v5
+      - name: Install Bazel
+        run: |
+          sudo curl -fSsL https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 -o /usr/local/bin/bazel
+          sudo chmod +x /usr/local/bin/bazel
+
+      - name: Cache Bazel
+        uses: actions/cache@v4
         with:
-          go-version-file: go.mod
-
-      - name: Configure Go private modules
-        env:
-          GH_PAT: ${{ secrets.GH_PAT }}
-        run: |
-          git config --global url."https://${GH_PAT}@github.com/".insteadOf "https://github.com/"
-          go env -w GOPRIVATE=github.com/sentioxyz/*
-
-      - name: Fix local replace for CI
-        # The local go.mod uses a filesystem replace for sentio-core.
-        # In CI we override it to fetch the pinned commit from GitHub.
-        run: |
-          go mod edit -replace sentioxyz/sentio-core=github.com/sentioxyz/sentio-core@${{ env.SENTIO_CORE_REF }}
-          go mod tidy
+          path: ~/.cache/bazel
+          key: bazel-${{ runner.os }}-${{ hashFiles('MODULE.bazel', 'go.mod', 'go.sum') }}
+          restore-keys: bazel-${{ runner.os }}-
 
       - name: Build proxy binary (linux/amd64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o clickhouse-proxy ./cmd/proxy/
+        run: bazel build --@rules_go//go/config:static=true //cmd/proxy:clickhouse-proxy
 
       - name: Build integration test client (linux/amd64)
-        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o integration_test_client ./tools/integration_test_client/
+        run: bazel build --@rules_go//go/config:static=true //tools/integration_test_client
 
       - name: Configure SSH
         env:
@@ -67,7 +58,6 @@ jobs:
             Port ${{ env.DEPLOY_PORT }}
             User ${{ env.DEPLOY_USER }}
             IdentityFile ~/.ssh/id_deploy
-            # Accept any host key — acceptable for an ephemeral CI runner.
             StrictHostKeyChecking no
             UserKnownHostsFile /dev/null
           EOF
@@ -75,10 +65,10 @@ jobs:
       - name: Deploy binaries to test server
         run: |
           echo ">>> Uploading proxy binary..."
-          scp clickhouse-proxy deploy-target:${{ env.REMOTE_BASE }}/clickhouse-proxy-latest
+          scp bazel-bin/cmd/proxy/clickhouse-proxy_/clickhouse-proxy deploy-target:${{ env.REMOTE_BASE }}/clickhouse-proxy-latest
 
           echo ">>> Uploading integration test client..."
-          scp integration_test_client deploy-target:${{ env.REMOTE_BASE }}/integration_test_client
+          scp bazel-bin/tools/integration_test_client/integration_test_client_/integration_test_client deploy-target:${{ env.REMOTE_BASE }}/integration_test_client
 
           echo ">>> Stopping old proxy processes..."
           ssh deploy-target "killall ck_proxy1 ck_proxy2 ck_proxy3 ck_proxy4 2>/dev/null || true; sleep 1"
