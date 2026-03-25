@@ -12,6 +12,7 @@ go_library(
         "relay_signer.go",
         "rewriter.go",
         "route.go",
+        "usage_client.go",
         "validator.go",
     ],
     importpath = "ck_remote_proxy/pkg/proxy",
@@ -33,6 +34,7 @@ go_library(
         "@sentioxyz_sentio_core//common/statemirror",
         "@sentioxyz_sentio_core//network/registry",
         "@sentioxyz_sentio_core//network/state",
+        "@sentioxyz_sentio_core//service/usage/protos",
     ],
 )
 

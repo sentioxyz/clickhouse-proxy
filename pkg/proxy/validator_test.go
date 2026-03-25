@@ -67,7 +67,7 @@ func TestEthValidator_ValidToken(t *testing.T) {
 		},
 	}
 
-	err := validator.ValidateQuery(context.Background(), meta)
+	_, err := validator.ValidateQuery(context.Background(), meta)
 	if err != nil {
 		t.Errorf("unexpected error: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestEthValidator_MissingToken(t *testing.T) {
 		Settings: map[string]string{},
 	}
 
-	err := validator.ValidateQuery(context.Background(), meta)
+	_, err := validator.ValidateQuery(context.Background(), meta)
 	if err == nil {
 		t.Error("expected error for missing token, got nil")
 	}
@@ -111,7 +111,7 @@ func TestEthValidator_ExpiredToken(t *testing.T) {
 		},
 	}
 
-	err := validator.ValidateQuery(context.Background(), meta)
+	_, err := validator.ValidateQuery(context.Background(), meta)
 	if err == nil {
 		t.Error("expected error for expired token, got nil")
 	}
@@ -137,7 +137,7 @@ func TestEthValidator_QueryHashMismatch(t *testing.T) {
 		},
 	}
 
-	err := validator.ValidateQuery(context.Background(), meta)
+	_, err := validator.ValidateQuery(context.Background(), meta)
 	if err == nil {
 		t.Error("expected error for query hash mismatch, got nil")
 	}
@@ -162,7 +162,7 @@ func TestEthValidator_UnauthorizedAddress(t *testing.T) {
 		},
 	}
 
-	err := validator.ValidateQuery(context.Background(), meta)
+	_, err := validator.ValidateQuery(context.Background(), meta)
 	if err == nil {
 		t.Error("expected error for unauthorized address, got nil")
 	}
@@ -177,7 +177,7 @@ func TestEthValidator_Disabled(t *testing.T) {
 		Settings: map[string]string{},
 	}
 
-	err := validator.ValidateQuery(context.Background(), meta)
+	_, err := validator.ValidateQuery(context.Background(), meta)
 	if err != nil {
 		t.Errorf("expected no error when validator is disabled, got: %v", err)
 	}

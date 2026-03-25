@@ -37,19 +37,21 @@ type QueryMeta struct {
 }
 
 type Validator interface {
-	ValidateQuery(context.Context, QueryMeta) error
+	// ValidateQuery validates the query and returns the authenticated address (if any).
+	// Returns ("", nil) when auth is disabled or no token is provided with AllowNoAuth.
+	ValidateQuery(context.Context, QueryMeta) (string, error)
 }
 
 // NoopValidator is the default validation implementation: always allows queries and prints the parsed SQL.
 type NoopValidator struct{}
 
-func (NoopValidator) ValidateQuery(_ context.Context, meta QueryMeta) error {
+func (NoopValidator) ValidateQuery(_ context.Context, meta QueryMeta) (string, error) {
 	if meta.SQL != "" {
 		log.Infof("[validator] allow query from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.SQL)
 	} else if meta.QueryPreview != "" {
 		log.Infof("[validator] allow query (preview) from %s -> %s: %s", meta.ClientAddr, meta.UpstreamAddr, meta.QueryPreview)
 	}
-	return nil
+	return "", nil
 }
 
 // AuthTokenSettingKey is the setting key used to pass the JWS authentication token.
@@ -108,9 +110,9 @@ func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool, all
 }
 
 // ValidateQuery validates the query using the x_auth_token setting.
-func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error {
+func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) (string, error) {
 	if !v.Enabled {
-		return nil
+		return "", nil
 	}
 
 	token, ok := meta.Settings[AuthTokenSettingKey]
@@ -121,9 +123,9 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 	if !ok || token == "" {
 		if v.AllowNoAuth {
 			log.Infof("[eth_validator] no auth token, allowing due to allow_no_auth=true")
-			return nil
+			return "", nil
 		}
-		return errors.New("missing authentication token")
+		return "", errors.New("missing authentication token")
 	}
 
 	// Trim possible quotes that might be added by some client libs
@@ -136,50 +138,50 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) error 
 	return v.validateJWSCompact(token, meta.SQL)
 }
 
-func (v *EthValidator) validateJWSCompact(token, sql string) error {
+func (v *EthValidator) validateJWSCompact(token, sql string) (string, error) {
 	header, payload, signature, err := parseJWSCompact(token)
 	if err != nil {
-		return fmt.Errorf("invalid JWS token: %w", err)
+		return "", fmt.Errorf("invalid JWS token: %w", err)
 	}
 
 	if err := v.verifyPayloadAndHeader(header, payload, sql); err != nil {
-		return err
+		return "", err
 	}
 
 	// Verify signature and recover address
 	signingInput := token[:strings.LastIndex(token, ".")]
 	recoveredAddr, err := v.recoverAddressFromInput(signingInput, signature)
 	if err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
+		return "", fmt.Errorf("signature verification failed: %w", err)
 	}
 
 	// Check allowlist
 	if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
-		return fmt.Errorf("address %s not in allowlist", recoveredAddr)
+		return "", fmt.Errorf("address %s not in allowlist", recoveredAddr)
 	}
 
-	log.Infof("[eth_validator] authenticated query (compact) from %s (address: %s)", "", recoveredAddr)
-	return nil
+	log.Infof("[eth_validator] authenticated query (compact) (address: %s)", recoveredAddr)
+	return recoveredAddr, nil
 }
 
-func (v *EthValidator) validateJWSJSON(token, sql string) error {
+func (v *EthValidator) validateJWSJSON(token, sql string) (string, error) {
 	var jws JWSJSON
 	if err := json.Unmarshal([]byte(token), &jws); err != nil {
-		return fmt.Errorf("invalid JWS JSON: %w", err)
+		return "", fmt.Errorf("invalid JWS JSON: %w", err)
 	}
 
 	if len(jws.Signatures) == 0 {
-		return errors.New("no signatures found in JWS JSON")
+		return "", errors.New("no signatures found in JWS JSON")
 	}
 
 	// R4-4: Payload 对所有签名相同，提升到循环外解码一次
 	payloadBytes, err := base64.RawURLEncoding.DecodeString(jws.Payload)
 	if err != nil {
-		return fmt.Errorf("invalid payload encoding: %w", err)
+		return "", fmt.Errorf("invalid payload encoding: %w", err)
 	}
 	var payload JWSPayload
 	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
-		return fmt.Errorf("invalid payload JSON: %w", err)
+		return "", fmt.Errorf("invalid payload JSON: %w", err)
 	}
 
 	// All signatures must be valid and from allowed addresses
@@ -188,38 +190,39 @@ func (v *EthValidator) validateJWSJSON(token, sql string) error {
 	for i, sig := range jws.Signatures {
 		headerBytes, err := base64.RawURLEncoding.DecodeString(sig.Protected)
 		if err != nil {
-			return fmt.Errorf("sig[%d]: invalid protected header encoding: %w", i, err)
+			return "", fmt.Errorf("sig[%d]: invalid protected header encoding: %w", i, err)
 		}
 		var header JWSHeader
 		if err := json.Unmarshal(headerBytes, &header); err != nil {
-			return fmt.Errorf("sig[%d]: invalid header JSON: %w", i, err)
+			return "", fmt.Errorf("sig[%d]: invalid header JSON: %w", i, err)
 		}
 
 		// Verify header and payload constraints
 		if err := v.verifyPayloadAndHeader(header, payload, sql); err != nil {
-			return fmt.Errorf("sig[%d]: %w", i, err)
+			return "", fmt.Errorf("sig[%d]: %w", i, err)
 		}
 
 		// Verify signature
 		signatureBytes, err := base64.RawURLEncoding.DecodeString(sig.Signature)
 		if err != nil {
-			return fmt.Errorf("sig[%d]: invalid signature encoding: %w", i, err)
+			return "", fmt.Errorf("sig[%d]: invalid signature encoding: %w", i, err)
 		}
 
 		signingInput := sig.Protected + "." + jws.Payload
 		recoveredAddr, err := v.recoverAddressFromInput(signingInput, signatureBytes)
 		if err != nil {
-			return fmt.Errorf("sig[%d]: signature verification failed: %w", i, err)
+			return "", fmt.Errorf("sig[%d]: signature verification failed: %w", i, err)
 		}
 
 		if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
-			return fmt.Errorf("sig[%d]: address %s not in allowlist", i, recoveredAddr)
+			return "", fmt.Errorf("sig[%d]: address %s not in allowlist", i, recoveredAddr)
 		}
 		authenticatedAddresses = append(authenticatedAddresses, recoveredAddr)
 	}
 
-	log.Infof("[eth_validator] authenticated query (json) from %s (addresses: %v)", "", authenticatedAddresses)
-	return nil
+	log.Infof("[eth_validator] authenticated query (json) (addresses: %v)", authenticatedAddresses)
+	// Return the first authenticated address as the primary signer
+	return authenticatedAddresses[0], nil
 }
 
 func (v *EthValidator) verifyPayloadAndHeader(header JWSHeader, payload JWSPayload, sql string) error {

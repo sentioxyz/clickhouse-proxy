@@ -1,18 +1,27 @@
 load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//proto:def.bzl", "go_proto_library")
+load("@protobuf//bazel:proto_library.bzl", "proto_library")
 
 go_library(
     name = "protos",
-    srcs = [
-        "rewriter.pb.go",
-        "rewriter_grpc.pb.go",
-    ],
+    embed = [":protos_go_proto"],
     importpath = "ck_remote_proxy/protos",
     visibility = ["//visibility:public"],
-    deps = [
-        "@org_golang_google_grpc//:grpc",
-        "@org_golang_google_grpc//codes",
-        "@org_golang_google_grpc//status",
-        "@org_golang_google_protobuf//reflect/protoreflect",
-        "@org_golang_google_protobuf//runtime/protoimpl",
+)
+
+proto_library(
+    name = "protos_proto",
+    srcs = ["rewriter.proto"],
+    visibility = ["//visibility:public"],
+)
+
+go_proto_library(
+    name = "protos_go_proto",
+    compilers = [
+        "@rules_go//proto:go_proto",
+        "@rules_go//proto:go_grpc_v2",
     ],
+    importpath = "ck_remote_proxy/protos",
+    proto = ":protos_proto",
+    visibility = ["//visibility:public"],
 )

@@ -33,7 +33,7 @@ func TestRelaySigner_SignAndValidate(t *testing.T) {
 			AuthTokenSettingKey: token,
 		},
 	}
-	if err := validator.ValidateQuery(context.Background(), meta); err != nil {
+	if _, err := validator.ValidateQuery(context.Background(), meta); err != nil {
 		t.Errorf("relay token validation failed: %v", err)
 	}
 }
@@ -124,7 +124,7 @@ func TestRelaySigner_WrongSQLFailsValidation(t *testing.T) {
 			AuthTokenSettingKey: token,
 		},
 	}
-	if err := validator.ValidateQuery(context.Background(), meta); err == nil {
+	if _, err := validator.ValidateQuery(context.Background(), meta); err == nil {
 		t.Error("expected validation to fail for wrong SQL, got nil")
 	}
 }
