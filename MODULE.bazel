@@ -14,7 +14,7 @@ bazel_dep(name = "sentio-core", version = "0.0.0", repo_name = "sentioxyz_sentio
 git_override(
     module_name = "sentio-core",
     remote = "https://github.com/sentioxyz/sentio-core",
-    commit = "0385a824cfa51f4a8692e68f2cd13b9dfe450b7f",
+    commit = "ecc0cd14587839aa2afbd73ca6ba46d42efb043e",
     patch_strip = 1,
     patches = ["//third_party:sentio-core.patch"],
 )
