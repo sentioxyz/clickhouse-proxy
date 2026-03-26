@@ -1584,9 +1584,25 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 					SQL:          eq.Body,
 					Settings:     settingsMap,
 				}
-				if _, err := p.validator.ValidateQuery(ctx, meta); err != nil {
+				signerAddr, err := p.validator.ValidateQuery(ctx, meta)
+				if err != nil {
 					log.Infof("[conn %d] streaming: query rejected by validator: %v", id, err)
 					return
+				}
+
+				// Query usage: check balance and report usage (same as non-streaming path)
+				if signerAddr != "" && p.usageClient != nil {
+					payer := signerAddr
+					if payerSetting, ok := settingsMap["SQL_x_payer"]; ok && payerSetting != "" {
+						payer = payerSetting
+					}
+					log.Infof("[conn %d] streaming: checking query balance: payer=%s signer=%s", id, payer, signerAddr)
+					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {
+						log.Infof("[conn %d] streaming: query rejected: %v (payer=%s signer=%s)", id, reason, payer, signerAddr)
+						return
+					}
+					log.Infof("[conn %d] streaming: query allowed, reporting usage: payer=%s signer=%s", id, payer, signerAddr)
+					p.usageClient.ReportUsage(ctx, payer, signerAddr, 1)
 				}
 			}
 
@@ -2260,13 +2276,20 @@ func (p *Proxy) handleServerClientWithAuth(id int64, br *bufio.Reader, chReader 
 				SQL:          eq.Body,
 				Settings:     settingsMap,
 			}
-			if _, err := p.validator.ValidateQuery(ctx, meta); err != nil {
+			signerAddr, err := p.validator.ValidateQuery(ctx, meta)
+			if err != nil {
 				log.Infof("[conn %d] server-auth: relay token rejected: %v", id, err)
 				upstreamConn.Close()
 				<-done
 				return
 			}
-			log.Infof("[conn %d] server-auth: relay token validated, sql_len=%d", id, len(eq.Body))
+			log.Infof("[conn %d] server-auth: relay token validated, signer=%s sql_len=%d", id, signerAddr, len(eq.Body))
+			if p.cfg.LogQueries {
+				log.Infof("[conn %d] server-auth: Query: %q", id, eq.Body)
+			}
+
+			// NOTE: No usage tracking here — the entry proxy (streaming path) already
+			// handles CheckBalance + ReportUsage. Doing it again would double-count.
 
 			// Strip auth token settings before forwarding to ClickHouse
 			eq.Settings = stripAuthTokenSettings(eq.Settings)
