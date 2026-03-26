@@ -842,11 +842,13 @@ func (p *Proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					if payerSetting, ok := parsed.Settings["SQL_x_payer"]; ok && payerSetting != "" {
 						payer = payerSetting
 					}
+					log.Infof("[conn %d] checking query balance: payer=%s signer=%s", id, payer, signerAddr)
 					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {
 						log.Infof("[conn %d] query rejected: %v (payer=%s signer=%s)", id, reason, payer, signerAddr)
 						return
 					}
 					// Report usage asynchronously
+					log.Infof("[conn %d] query allowed, reporting usage: payer=%s signer=%s", id, payer, signerAddr)
 					p.usageClient.ReportUsage(ctx, payer, signerAddr, 1)
 				}
 
