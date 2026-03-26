@@ -37,12 +37,22 @@ func NewRedisNetworkState(client *redis.Client) (*RedisNetworkState, error) {
 
 func (r *RedisNetworkState) GetProcessorAllocation(processorId string) ([]ProcessorAllocation, bool) {
 	ctx := context.Background()
-	allocs, err := r.registry.RetrieveProcessorAllocation(ctx, processorId)
+	// Read directly from statemirror instead of registry.RetrieveProcessorAllocation()
+	// to avoid sentio-core logging "processor allocation not found" at error level.
+	value, ok, err := r.mirror.Get(ctx, statemirror.MappingProcessorAllocations, processorId)
 	if err != nil {
 		log.Warnf("Redis: failed to get processor allocation for %s: %v", processorId, err)
 		return nil, false
 	}
-	// Convert sentio-core types to proxy types
+	if !ok {
+		log.Warnf("Redis: processor allocation not found for %s", processorId)
+		return nil, false
+	}
+	var allocs []state.ProcessorAllocation
+	if err := json.Unmarshal([]byte(value), &allocs); err != nil {
+		log.Warnf("Redis: failed to decode processor allocation for %s: %v", processorId, err)
+		return nil, false
+	}
 	result := make([]ProcessorAllocation, len(allocs))
 	for i, a := range allocs {
 		result[i] = ProcessorAllocation{
