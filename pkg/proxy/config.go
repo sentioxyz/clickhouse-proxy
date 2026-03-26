@@ -17,6 +17,7 @@ type Config struct {
 	StatsInterval    Duration `json:"stats_interval"     yaml:"stats_interval"`
 	DialTimeout      Duration `json:"dial_timeout"       yaml:"dial_timeout"`
 	IdleTimeout      Duration `json:"idle_timeout"       yaml:"idle_timeout"`
+	LogLevel         string   `json:"log_level"          yaml:"log_level"`
 	LogQueries       bool     `json:"log_queries"        yaml:"log_queries"`
 	LogData          bool     `json:"log_data"           yaml:"log_data"`
 	MaxQueryLogBytes int      `json:"max_query_log_bytes" yaml:"max_query_log_bytes"`
@@ -134,6 +135,7 @@ func DefaultConfig() Config {
 		StatsInterval:    Duration{10 * time.Second},
 		DialTimeout:      Duration{5 * time.Second},
 		IdleTimeout:      Duration{5 * time.Minute},
+		LogLevel:         envOrDefault("CK_LOG_LEVEL", "info"),
 		LogQueries:       true,
 		LogData:          false,
 		MaxQueryLogBytes: 300,

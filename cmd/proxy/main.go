@@ -9,6 +9,7 @@ import (
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.uber.org/zap/zapcore"
 
 	ckhmanager "sentioxyz/sentio-core/common/clickhousemanager"
 	log "sentioxyz/sentio-core/common/log"
@@ -22,8 +23,24 @@ func main() {
 	flag.Parse()
 
 	cfg := proxy.LoadConfig(*configPath)
-	log.Infof("clickhouse-proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t",
-		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled)
+
+	// Apply log level from config (default: info)
+	switch cfg.LogLevel {
+	case "debug":
+		log.ManuallySetLevel(zapcore.DebugLevel)
+	case "info":
+		log.ManuallySetLevel(zapcore.InfoLevel)
+	case "warn", "warning":
+		log.ManuallySetLevel(zapcore.WarnLevel)
+	case "error":
+		log.ManuallySetLevel(zapcore.ErrorLevel)
+	default:
+		log.Warnf("unknown log_level %q, defaulting to info", cfg.LogLevel)
+		log.ManuallySetLevel(zapcore.InfoLevel)
+	}
+
+	log.Infof("clickhouse-proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t log_level=%s",
+		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled, cfg.LogLevel)
 
 	// Detect forwarding-only mode: no local ClickHouse instance bound
 	if cfg.Upstream == "" {
