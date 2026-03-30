@@ -243,8 +243,6 @@ func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string
 		dbPart := parts[0]    // e.g. "sentio_coinbase" or "coinbase"
 		tableName := parts[1] // e.g. "transfer"
 
-
-
 		// Extract processorId: strip "sentio_" prefix if present
 		processorId := dbPart
 		const prefix = "sentio_"
@@ -284,7 +282,7 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 			// Retry with "sentio_" prefix
 			allocations, ok = r.networkState.GetProcessorAllocation("sentio_" + processorId)
 			if !ok || len(allocations) == 0 {
-				log.Debugf("processor allocation not found for processor_id=%s, skipping (passthrough)", processorId)
+				log.Warnf("processor allocation not found for processor_id=%s, skipping table name rewrite (SQL passes through as-is)", processorId)
 				continue
 			}
 		}
@@ -388,7 +386,6 @@ func (r *SentioNetworkRewriter) parseSentioNetworkTables(sql string) []ParsedTab
 	}
 	return tables
 }
-
 
 // TableWithDatabase represents a table with its database
 type TableWithDatabase struct {
