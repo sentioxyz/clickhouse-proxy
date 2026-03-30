@@ -39,7 +39,12 @@ func (r *RedisNetworkState) GetProcessorAllocation(processorId string) ([]Proces
 	ctx := context.Background()
 	allocs, err := r.registry.RetrieveProcessorAllocation(ctx, processorId)
 	if err != nil {
-		log.Warnf("Redis: failed to get processor allocation for %s: %v", processorId, err)
+		// NOTE: The upstream sentio-core ProcessorRegistry logs at "error" level when
+		// a processor allocation is not found in Redis. This is expected behavior in the
+		// proxy — when a processor is not registered in the network state, the SQL query
+		// simply passes through without table name rewriting. The upstream "error" log
+		// (registry/processor_registry.go) can be safely ignored in this context.
+		log.Warnf("processor allocation not found for %s, query will pass through without rewrite", processorId)
 		return nil, false
 	}
 	// Convert sentio-core types to proxy types
