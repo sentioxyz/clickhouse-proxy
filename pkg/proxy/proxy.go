@@ -868,6 +868,7 @@ func (p *Proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 			// Use eraseTokenValue to replace the key with promql_table and erase the value content
 			chunk = eraseTokenValue(chunk, "x_auth_token")
 			chunk = eraseTokenValue(chunk, "SQL_x_auth_token")
+			chunk = eraseTokenValue(chunk, "SQL_x_payer")
 
 			if p.cfg.IdleTimeout.Duration > 0 {
 				_ = upstreamConn.SetWriteDeadline(time.Now().Add(p.cfg.IdleTimeout.Duration))
@@ -2387,6 +2388,7 @@ const SkipRewriteSettingKey = "SQL_skip_rewrite"
 var proxySettingKeys = map[string]bool{
 	"x_auth_token":        true,
 	"SQL_x_auth_token":    true,
+	"SQL_x_payer":         true,
 	SkipRewriteSettingKey: true,
 	"skip_rewrite":        true,
 }
