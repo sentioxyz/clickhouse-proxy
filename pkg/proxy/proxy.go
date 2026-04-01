@@ -840,7 +840,7 @@ func (p *Proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					// Determine payer: use SQL_x_payer setting if present, otherwise signer pays
 					payer := signerAddr
 					if payerSetting, ok := parsed.Settings["SQL_x_payer"]; ok && payerSetting != "" {
-						payer = payerSetting
+						payer = strings.Trim(payerSetting, "'")
 					}
 					log.Infof("[conn %d] checking query balance: payer=%s signer=%s", id, payer, signerAddr)
 					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {
@@ -1595,7 +1595,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				if signerAddr != "" && p.usageClient != nil {
 					payer := signerAddr
 					if payerSetting, ok := settingsMap["SQL_x_payer"]; ok && payerSetting != "" {
-						payer = payerSetting
+						payer = strings.Trim(payerSetting, "'")
 					}
 					log.Infof("[conn %d] streaming: checking query balance: payer=%s signer=%s", id, payer, signerAddr)
 					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {

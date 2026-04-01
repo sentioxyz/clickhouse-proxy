@@ -54,6 +54,7 @@ func (c *UsageClient) CheckBalance(ctx context.Context, payer string, signer str
 		cached, err := c.redisClient.Get(ctx, cacheKey).Result()
 		if err == nil {
 			if cached == "ok" {
+				log.Infof("[usage_client] cache hit: payer=%s signer=%s result=ok", payer, signer)
 				return true, 0, nil
 			}
 			// cached value is the rejection reason number
@@ -66,6 +67,7 @@ func (c *UsageClient) CheckBalance(ctx context.Context, payer string, signer str
 			default:
 				reason = usageProtos.CheckQueryBalanceRejection_UNKNOWN
 			}
+			log.Infof("[usage_client] cache hit: payer=%s signer=%s result=rejected(%v)", payer, signer, reason)
 			return false, reason, nil
 		}
 	}
