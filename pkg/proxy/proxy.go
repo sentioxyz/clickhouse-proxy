@@ -1578,13 +1578,6 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				for _, s := range eq.OldSettings {
 					settingsMap[s.Key] = fmt.Sprintf("%d", s.Value)
 				}
-				log.Infof("[conn %d] streaming: decoded %d settings + %d old settings, settingsMap keys: %v", id, len(eq.Settings), len(eq.OldSettings), func() []string {
-					keys := make([]string, 0, len(settingsMap))
-					for k := range settingsMap {
-						keys = append(keys, k)
-					}
-					return keys
-				}())
 				meta := QueryMeta{
 					ConnID:       id,
 					ClientAddr:   clientConn.RemoteAddr().String(),
