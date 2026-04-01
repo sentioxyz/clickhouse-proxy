@@ -155,8 +155,8 @@ func (v *EthValidator) validateJWSCompact(token, sql string) (string, error) {
 		return "", fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// Check allowlist
-	if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
+	// Check allowlist (empty allowlist = allow all authenticated addresses)
+	if len(v.AllowedAddresses) > 0 && !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
 		return "", fmt.Errorf("address %s not in allowlist", recoveredAddr)
 	}
 
@@ -214,7 +214,7 @@ func (v *EthValidator) validateJWSJSON(token, sql string) (string, error) {
 			return "", fmt.Errorf("sig[%d]: signature verification failed: %w", i, err)
 		}
 
-		if !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
+		if len(v.AllowedAddresses) > 0 && !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
 			return "", fmt.Errorf("sig[%d]: address %s not in allowlist", i, recoveredAddr)
 		}
 		authenticatedAddresses = append(authenticatedAddresses, recoveredAddr)
