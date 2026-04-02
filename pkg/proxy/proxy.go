@@ -1205,18 +1205,17 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 
 	// ========== Dial upstream (dynamic target) ==========
 	var upstreamConn net.Conn
-	var pooledConn *cluster.PooledConn // non-nil if connection came from cluster pool
 
 	if p.clusterMgr != nil && !isRoute {
-		// Multi-replica mode: use cluster manager to select healthy replica
+		// Multi-replica mode: use cluster manager to select healthy replica.
+		// PooledConn embeds net.Conn and overrides Close() to track pool active count.
 		pc, err := p.clusterMgr.GetConnection(ctx)
 		if err != nil {
 			log.Infof("[conn %d] streaming: cluster get connection error: %v", id, err)
 			p.observer.Error("dial", err)
 			return
 		}
-		pooledConn = pc
-		upstreamConn = pc.Conn
+		upstreamConn = pc // PooledConn satisfies net.Conn; Close() decrements pool active count
 		upstreamTarget = pc.Replica().Addr()
 		log.Infof("[conn %d] streaming: cluster routed to replica %s", id, upstreamTarget)
 	} else {
@@ -1238,7 +1237,6 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			tc.SetNoDelay(true)
 		}
 	}
-	_ = pooledConn // used later for connection return
 	*upstreamConnOut = upstreamConn
 
 	// Create upstream bufio.Reader (copyUpstreamToClient will also read from this)

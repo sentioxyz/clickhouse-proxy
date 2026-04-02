@@ -1,0 +1,17 @@
+load("@rules_go//go:def.bzl", "go_library")
+
+go_library(
+    name = "cluster",
+    srcs = [
+        "health.go",
+        "manager.go",
+        "pool.go",
+        "router.go",
+        "types.go",
+    ],
+    importpath = "ck_remote_proxy/pkg/cluster",
+    visibility = ["//visibility:public"],
+    deps = [
+        "@sentioxyz_sentio_core//common/log",
+    ],
+)

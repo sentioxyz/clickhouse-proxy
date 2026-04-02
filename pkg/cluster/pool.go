@@ -12,13 +12,16 @@ import (
 )
 
 // PooledConn wraps a net.Conn with pool metadata.
-// When the connection is done being used, it should be returned to the pool via Put().
+// When the connection is done being used, call Close() to close the TCP connection
+// and decrement the pool's active count.
 type PooledConn struct {
 	net.Conn
 	createdAt time.Time
 	lastUsed  time.Time
 	replica   ReplicaConfig
 	pool      *ReplicaPool
+	inUse     atomic.Bool // true while checked out to a caller
+	tcpClosed atomic.Bool // true after underlying TCP Close() called
 }
 
 // Replica returns the ReplicaConfig this connection belongs to.
@@ -26,13 +29,30 @@ func (c *PooledConn) Replica() ReplicaConfig {
 	return c.replica
 }
 
-// ReturnToPool returns this connection back to its pool.
+// Close closes the underlying TCP connection.
+// If the connection is currently in use (checked out), it also decrements
+// the pool's active count. Safe to call multiple times.
+func (c *PooledConn) Close() error {
+	// Decrement active count only if transitioning from in-use to not-in-use
+	if c.inUse.CompareAndSwap(true, false) {
+		if c.pool != nil {
+			c.pool.activeCount.Add(-1)
+		}
+	}
+	// Close the underlying TCP connection (idempotent via atomic guard)
+	if c.tcpClosed.CompareAndSwap(false, true) {
+		return c.Conn.Close()
+	}
+	return nil
+}
+
+// ReturnToPool returns this connection back to its pool for reuse.
 // If the pool is nil or the connection should be discarded, it closes the connection.
 func (c *PooledConn) ReturnToPool() {
 	if c.pool != nil {
 		c.pool.Put(c)
 	} else {
-		c.Conn.Close()
+		c.Close()
 	}
 }
 
@@ -78,12 +98,13 @@ func (p *ReplicaPool) Get(ctx context.Context) (*PooledConn, error) {
 
 		// Check if connection is still valid
 		if p.isConnectionExpired(conn, now) {
-			conn.Conn.Close()
+			conn.Conn.Close() // direct close since idle conn is not "in use"
 			continue
 		}
 
 		p.mu.Unlock()
 		conn.lastUsed = now
+		conn.inUse.Store(true)
 		p.activeCount.Add(1)
 		return conn, nil
 	}
@@ -102,24 +123,28 @@ func (p *ReplicaPool) Get(ctx context.Context) (*PooledConn, error) {
 		return nil, err
 	}
 
+	conn.inUse.Store(true)
 	p.activeCount.Add(1)
 	p.totalDials.Add(1)
 	return conn, nil
 }
 
 // Put returns a connection to the pool. If the pool is full or the connection
-// is expired, the connection is closed.
+// is expired, the connection is closed instead.
 func (p *ReplicaPool) Put(conn *PooledConn) {
 	if conn == nil {
 		return
 	}
 
-	p.activeCount.Add(-1)
+	// Transition from in-use to idle: decrement active count
+	if conn.inUse.CompareAndSwap(true, false) {
+		p.activeCount.Add(-1)
+	}
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	if p.closed {
+	if p.closed || conn.tcpClosed.Load() {
 		conn.Conn.Close()
 		return
 	}
@@ -148,8 +173,7 @@ func (p *ReplicaPool) Discard(conn *PooledConn) {
 	if conn == nil {
 		return
 	}
-	p.activeCount.Add(-1)
-	conn.Conn.Close()
+	conn.Close() // Close handles active count decrement via closeOnce
 }
 
 // ActiveCount returns the number of connections currently in use.

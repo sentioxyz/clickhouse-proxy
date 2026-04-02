@@ -18,6 +18,7 @@ go_library(
     importpath = "ck_remote_proxy/pkg/proxy",
     visibility = ["//visibility:public"],
     deps = [
+        "//pkg/cluster",
         "//protos",
         "@com_github_clickhouse_ch_go//proto",
         "@com_github_ethereum_go_ethereum//crypto",
