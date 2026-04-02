@@ -18,6 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"ck_remote_proxy/pkg/cluster"
 	"github.com/ClickHouse/ch-go/proto"
 )
 
@@ -140,6 +141,7 @@ type Proxy struct {
 	relaySigner  *RelaySigner  // Signs relay JWS tokens for __route__ connections
 	networkState NetworkState  // Used by forwarding-only mode to discover bound proxy targets
 	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled)
+	clusterMgr   *cluster.Manager // Cluster manager for multi-replica routing (nil = legacy single-upstream)
 	// compressedBufPool removed: proto.Reader.ReadRaw always returns a newly allocated slice,
 	// so data cannot be read into a pool-obtained buffer, making the pool ineffective.
 	bufferPool sync.Pool // Reuse proto.Buffer to reduce allocations in the packet loop
@@ -174,6 +176,11 @@ func (p *Proxy) SetNetworkState(ns NetworkState) {
 // SetUsageClient sets the query usage client for billing integration.
 func (p *Proxy) SetUsageClient(c *UsageClient) {
 	p.usageClient = c
+}
+
+// SetClusterManager sets the cluster manager for multi-replica routing.
+func (p *Proxy) SetClusterManager(m *cluster.Manager) {
+	p.clusterMgr = m
 }
 
 // getBuffer retrieves a proto.Buffer from bufferPool and resets its content.
@@ -535,8 +542,8 @@ func (p *Proxy) Serve(ctx context.Context) error {
 		go p.runStatsPrinter(ctx)
 	}
 
-	// Start background health check (skip in forwarding-only mode — no local upstream)
-	if !p.cfg.ForwardingOnly {
+	// Start background health check (skip in forwarding-only mode and cluster mode — cluster has its own)
+	if !p.cfg.ForwardingOnly && p.clusterMgr == nil {
 		go p.runHealthCheck(ctx)
 	}
 
@@ -1197,21 +1204,41 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	}
 
 	// ========== Dial upstream (dynamic target) ==========
-	dialer := &net.Dialer{
-		Timeout:   p.cfg.DialTimeout.Duration,
-		KeepAlive: 30 * time.Second,
+	var upstreamConn net.Conn
+	var pooledConn *cluster.PooledConn // non-nil if connection came from cluster pool
+
+	if p.clusterMgr != nil && !isRoute {
+		// Multi-replica mode: use cluster manager to select healthy replica
+		pc, err := p.clusterMgr.GetConnection(ctx)
+		if err != nil {
+			log.Infof("[conn %d] streaming: cluster get connection error: %v", id, err)
+			p.observer.Error("dial", err)
+			return
+		}
+		pooledConn = pc
+		upstreamConn = pc.Conn
+		upstreamTarget = pc.Replica().Addr()
+		log.Infof("[conn %d] streaming: cluster routed to replica %s", id, upstreamTarget)
+	} else {
+		// Legacy single-upstream mode or __route__ connection: direct dial
+		dialer := &net.Dialer{
+			Timeout:   p.cfg.DialTimeout.Duration,
+			KeepAlive: 30 * time.Second,
+		}
+		var err error
+		upstreamConn, err = dialer.DialContext(ctx, "tcp", upstreamTarget)
+		if err != nil {
+			log.Infof("[conn %d] streaming: dial upstream %s error: %v", id, upstreamTarget, err)
+			p.observer.Error("dial", err)
+			return
+		}
+		if tc, ok := upstreamConn.(*net.TCPConn); ok {
+			tc.SetKeepAlive(true)
+			tc.SetKeepAlivePeriod(30 * time.Second)
+			tc.SetNoDelay(true)
+		}
 	}
-	upstreamConn, err := dialer.DialContext(ctx, "tcp", upstreamTarget)
-	if err != nil {
-		log.Infof("[conn %d] streaming: dial upstream %s error: %v", id, upstreamTarget, err)
-		p.observer.Error("dial", err)
-		return
-	}
-	if tc, ok := upstreamConn.(*net.TCPConn); ok {
-		tc.SetKeepAlive(true)
-		tc.SetKeepAlivePeriod(30 * time.Second)
-		tc.SetNoDelay(true)
-	}
+	_ = pooledConn // used later for connection return
 	*upstreamConnOut = upstreamConn
 
 	// Create upstream bufio.Reader (copyUpstreamToClient will also read from this)

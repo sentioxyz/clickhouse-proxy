@@ -7,6 +7,8 @@ import (
 	"os"
 	log "sentioxyz/sentio-core/common/log"
 	"time"
+
+	"ck_remote_proxy/pkg/cluster"
 )
 
 // Config controls proxy behavior. All fields have sane defaults so the
@@ -63,9 +65,17 @@ type Config struct {
 	SentioNodeAddr    string `json:"sentio_node_addr" yaml:"sentio_node_addr"`       // sentio-node gRPC address for query usage
 	QueryUsageEnabled bool   `json:"query_usage_enabled" yaml:"query_usage_enabled"` // Enable query usage reporting
 
+	// Cluster configuration: shard with multiple replicas mode.
+	// When Shard is configured, the proxy manages replicas within this shard (health check, routing, pool).
+	// When Shard is nil and Upstream is non-empty, backward-compatible single-upstream mode is used.
+	Shard       *cluster.ShardConfig       `json:"shard,omitempty" yaml:"shard,omitempty"`
+	HealthCheck *cluster.HealthCheckConfig  `json:"health_check,omitempty" yaml:"health_check,omitempty"`
+	Pool        *cluster.PoolConfig         `json:"pool,omitempty" yaml:"pool,omitempty"`
+	Routing     *cluster.RoutingConfig      `json:"routing,omitempty" yaml:"routing,omitempty"`
+
 	// ForwardingOnly 标记该 proxy 没有绑定 ClickHouse 实例，
 	// 所有请求将随机转发给 NetworkState 中的已绑定 proxy。
-	// 当 Upstream 为空时自动启用，不从 JSON 读取。
+	// 当 Upstream 为空且 Shard 为 nil 时自动启用，不从 JSON 读取。
 	ForwardingOnly bool `json:"-" yaml:"-"`
 }
 
