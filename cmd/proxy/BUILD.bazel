@@ -6,6 +6,7 @@ go_library(
     importpath = "ck_remote_proxy/cmd/proxy",
     visibility = ["//visibility:private"],
     deps = [
+        "//pkg/cluster",
         "//pkg/proxy",
         "@com_github_prometheus_client_golang//prometheus/promhttp",
         "@com_github_redis_go_redis_v9//:go-redis",

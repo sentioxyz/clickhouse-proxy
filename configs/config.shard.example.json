@@ -1,0 +1,54 @@
+{
+    "listen": ":19001",
+    "stats_interval": "30s",
+    "dial_timeout": "5s",
+    "idle_timeout": "5m",
+    "log_queries": true,
+    "log_data": false,
+    "max_query_log_bytes": 300,
+    "max_data_log_bytes": 200,
+    "metrics_listen": ":19091",
+    "auth_enabled": false,
+    "rewriter_service_addr": "",
+    "rewriter_timeout": "5s",
+    "network_state_redis": "localhost:6379",
+
+    "_comment": "Shard-aware multi-replica mode: proxy manages multiple replicas within one shard",
+
+    "shard": {
+        "name": "shard-01",
+        "replicas": [
+            {
+                "host": "ch-shard01-r1.internal",
+                "port": 9000,
+                "weight": 1,
+                "is_backup": false
+            },
+            {
+                "host": "ch-shard01-r2.internal",
+                "port": 9000,
+                "weight": 1,
+                "is_backup": false
+            }
+        ]
+    },
+
+    "health_check": {
+        "interval": "5s",
+        "timeout": "3s",
+        "failure_threshold": 3,
+        "recovery_threshold": 2
+    },
+
+    "pool": {
+        "max_idle": 10,
+        "max_open": 50,
+        "max_lifetime": "1h",
+        "max_idle_time": "10m",
+        "dial_timeout": "5s"
+    },
+
+    "routing": {
+        "strategy": "round-robin"
+    }
+}

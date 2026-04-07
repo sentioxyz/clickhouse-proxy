@@ -14,6 +14,7 @@ import (
 	log "sentioxyz/sentio-core/common/log"
 	"sentioxyz/sentio-core/network/sqlrewriter"
 
+	"ck_remote_proxy/pkg/cluster"
 	proxy "ck_remote_proxy/pkg/proxy"
 )
 
@@ -25,10 +26,13 @@ func main() {
 	log.Infof("clickhouse-proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t",
 		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled)
 
-	// Detect forwarding-only mode: no local ClickHouse instance bound
-	if cfg.Upstream == "" {
+	// Detect forwarding-only mode: no local ClickHouse instance bound and no shard config
+	if cfg.Upstream == "" && cfg.Shard == nil {
 		cfg.ForwardingOnly = true
-		log.Infof("forwarding-only mode: no upstream configured, requests will be forwarded to bound proxies via NetworkState")
+		log.Infof("forwarding-only mode: no upstream/shard configured, requests will be forwarded to bound proxies via NetworkState")
+	}
+	if cfg.Shard != nil && cfg.Upstream != "" {
+		log.Warnf("both 'shard' and 'upstream' configured; 'shard' takes priority, 'upstream' will be ignored for routing")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -113,8 +117,41 @@ func main() {
 		log.Infof("forwarding-only mode: SQL rewriter disabled")
 	}
 
+	// Initialize cluster manager for multi-replica routing
+	var clusterMgr *cluster.Manager
+	if cfg.Shard != nil {
+		// New multi-replica mode: use shard config
+		var err error
+		clusterMgr, err = cluster.NewManager(*cfg.Shard, cfg.HealthCheck, cfg.Pool, cfg.Routing)
+		if err != nil {
+			log.Fatalf("failed to create cluster manager: %v", err)
+		}
+		clusterMgr.Start(ctx)
+		defer clusterMgr.Close()
+		log.Infof("cluster manager started for shard %q with %d replicas", cfg.Shard.Name, len(cfg.Shard.Replicas))
+	} else if cfg.Upstream != "" {
+		// Backward-compatible mode: single upstream auto-wrapped as single-replica shard
+		var err error
+		clusterMgr, err = cluster.NewSingleReplicaManager(cfg.Upstream)
+		if err != nil {
+			log.Warnf("failed to create single-replica cluster manager for upstream %s: %v, falling back to direct dial", cfg.Upstream, err)
+		} else {
+			clusterMgr.Start(ctx)
+			defer clusterMgr.Close()
+			log.Infof("cluster manager started in single-replica mode for upstream %s", cfg.Upstream)
+		}
+	}
+
 	p := proxy.NewProxy(cfg, validator, rewriter)
 	p.SetNetworkState(networkState)
+	p.SetClusterManager(clusterMgr)
+
+	// Wire cluster manager to rewriter for multi-replica isLocal detection
+	if clusterMgr != nil {
+		if rw, ok := rewriter.(*proxy.SentioNetworkRewriter); ok && rw != nil {
+			rw.SetClusterManager(clusterMgr)
+		}
+	}
 
 	// Initialize relay JWS signer for proxy-to-proxy (__route__) token propagation
 	if cfg.RelayPrivateKeyHex != "" {

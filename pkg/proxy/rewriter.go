@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"ck_remote_proxy/pkg/cluster"
 	log "sentioxyz/sentio-core/common/log"
 	"sentioxyz/sentio-core/network/state"
 
@@ -69,6 +70,12 @@ type SentioNetworkRewriter struct {
 	grpcClient           pb.RewriterServiceClient // cached gRPC client stub
 	tableRewriterFactory SentioNetworkTableRewriterFactory
 	callbackAddr         string // resolved address for remote() callback (e.g. "10.15.0.103:9001")
+	clusterMgr           *cluster.Manager // cluster manager for multi-replica isLocal detection (may be nil)
+}
+
+// SetClusterManager sets the cluster manager for multi-replica isLocal detection.
+func (r *SentioNetworkRewriter) SetClusterManager(m *cluster.Manager) {
+	r.clusterMgr = m
 }
 
 // sentioNetworkTableRegex matches Sentio-Network mode table names
@@ -310,14 +317,22 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 		}
 		database := tableRewriter.Database()
 
-		// Determine local/remote by comparing IndexerInfo address with proxy's upstream
+		// Determine local/remote by comparing IndexerInfo address with proxy's shard replicas.
+		// In multi-replica mode, check if indexerAddr matches any replica in this shard.
+		// In single-upstream mode, compare directly with config.Upstream.
 		// NOTE: This intentionally uses Upstream (CK backend addr like "127.0.0.1:19000")
 		// while indexerAddr is the proxy addr (like "10.15.0.103:19001"), so isLocal
 		// is always false. This is correct: all tables go through remote() + __route__,
 		// which prevents ClickHouse from pushing down JOINs to remote CK nodes that
 		// lack the local tables.
 		indexerAddr := fmt.Sprintf("%s:%d", indexerInfo.IndexerUrl, indexerInfo.ClickhouseProxyPort)
-		isLocal := indexerAddr == r.config.Upstream
+		var isLocal bool
+		if r.clusterMgr != nil {
+			// Multi-replica mode: check if indexerAddr belongs to any replica in this shard
+			isLocal = r.clusterMgr.HasReplica(indexerAddr)
+		} else {
+			isLocal = indexerAddr == r.config.Upstream
+		}
 
 		// Get all logical→physical table mappings at once
 		allMappings := tableRewriter.All()
