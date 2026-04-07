@@ -77,6 +77,14 @@ type Config struct {
 	// 所有请求将随机转发给 NetworkState 中的已绑定 proxy。
 	// 当 Upstream 为空且 Shard 为 nil 时自动启用，不从 JSON 读取。
 	ForwardingOnly bool `json:"-" yaml:"-"`
+
+	// Sidecar mode: proxy sits next to the ClickHouse client, intercepts queries,
+	// signs them with JWS token, and forwards to a remote server-side proxy.
+	// When enabled, most server-side features (auth validation, SQL rewriting,
+	// NetworkState, Redis) are not needed.
+	SidecarMode          bool   `json:"sidecar_mode" yaml:"sidecar_mode"`
+	SidecarUpstream      string `json:"sidecar_upstream" yaml:"sidecar_upstream"`                  // Remote server-side proxy address (required when sidecar_mode=true)
+	SidecarPrivateKeyHex string `json:"sidecar_private_key_hex" yaml:"sidecar_private_key_hex"`    // Sidecar's own Ethereum private key for JWS signing (required when sidecar_mode=true)
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON

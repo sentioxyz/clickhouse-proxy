@@ -27,7 +27,7 @@ func main() {
 		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled)
 
 	// Detect forwarding-only mode: no local ClickHouse instance bound and no shard config
-	if cfg.Upstream == "" && cfg.Shard == nil {
+	if cfg.Upstream == "" && cfg.Shard == nil && !cfg.SidecarMode {
 		cfg.ForwardingOnly = true
 		log.Infof("forwarding-only mode: no upstream/shard configured, requests will be forwarded to bound proxies via NetworkState")
 	}
@@ -50,6 +50,33 @@ func main() {
 			log.Infof("metrics server error: %v", err)
 		}
 	}()
+
+	// ========== Sidecar mode: simplified startup ==========
+	if cfg.SidecarMode {
+		if cfg.SidecarPrivateKeyHex == "" {
+			log.Fatalf("sidecar_mode requires sidecar_private_key_hex")
+		}
+		if cfg.SidecarUpstream == "" {
+			log.Fatalf("sidecar_mode requires sidecar_upstream")
+		}
+
+		signer, err := proxy.NewRelaySigner(cfg.SidecarPrivateKeyHex)
+		if err != nil {
+			log.Fatalf("failed to create sidecar signer: %v", err)
+		}
+
+		p := proxy.NewProxy(cfg, nil, nil) // no validator, no rewriter
+		p.SetSidecarSigner(signer)
+
+		log.Infof("sidecar proxy mode: signing queries with address=%s, forwarding to %s",
+			signer.Address(), cfg.SidecarUpstream)
+		if err := p.Serve(ctx); err != nil {
+			log.Fatalf("proxy stopped: %v", err)
+		}
+		return
+	}
+
+	// ========== Server mode: full initialization ==========
 
 	// Create validator based on configuration
 	var validator proxy.Validator
