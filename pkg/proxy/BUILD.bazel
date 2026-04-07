@@ -12,6 +12,7 @@ go_library(
         "relay_signer.go",
         "rewriter.go",
         "route.go",
+        "sidecar.go",
         "usage_client.go",
         "validator.go",
     ],

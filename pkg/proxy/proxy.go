@@ -139,6 +139,7 @@ type Proxy struct {
 	rewriter     Rewriter
 	observer     *MetricsObserver
 	relaySigner  *RelaySigner  // Signs relay JWS tokens for __route__ connections
+	sidecarSigner *RelaySigner // Signs JWS tokens in sidecar mode (separate key from relaySigner)
 	networkState NetworkState  // Used by forwarding-only mode to discover bound proxy targets
 	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled)
 	clusterMgr   *cluster.Manager // Cluster manager for multi-replica routing (nil = legacy single-upstream)
@@ -181,6 +182,11 @@ func (p *Proxy) SetUsageClient(c *UsageClient) {
 // SetClusterManager sets the cluster manager for multi-replica routing.
 func (p *Proxy) SetClusterManager(m *cluster.Manager) {
 	p.clusterMgr = m
+}
+
+// SetSidecarSigner sets the sidecar JWS signer for sidecar proxy mode.
+func (p *Proxy) SetSidecarSigner(s *RelaySigner) {
+	p.sidecarSigner = s
 }
 
 // getBuffer retrieves a proto.Buffer from bufferPool and resets its content.
@@ -542,8 +548,8 @@ func (p *Proxy) Serve(ctx context.Context) error {
 		go p.runStatsPrinter(ctx)
 	}
 
-	// Start background health check (skip in forwarding-only mode and cluster mode — cluster has its own)
-	if !p.cfg.ForwardingOnly && p.clusterMgr == nil {
+	// Start background health check (skip in forwarding-only mode, cluster mode, and sidecar mode)
+	if !p.cfg.ForwardingOnly && !p.cfg.SidecarMode && p.clusterMgr == nil {
 		go p.runHealthCheck(ctx)
 	}
 
@@ -659,6 +665,12 @@ func (p *Proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		tc.SetKeepAlive(true)
 		tc.SetKeepAlivePeriod(30 * time.Second)
 		tc.SetNoDelay(true) // P2-12: Disable Nagle algorithm to reduce small packet latency
+	}
+
+	// Sidecar mode: intercept queries, sign with JWS, forward to upstream proxy
+	if p.cfg.SidecarMode {
+		p.handleSidecarConnection(ctx, id, clientConn)
+		return
 	}
 
 	// Forwarding-only mode: pure TCP forwarding without protocol parsing

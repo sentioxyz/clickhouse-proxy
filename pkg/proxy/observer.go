@@ -64,6 +64,16 @@ var (
 		Help:    "Time spent on Hello/ServerHello/Addendum handshake",
 		Buckets: prometheus.DefBuckets,
 	})
+
+	// Sidecar mode metrics
+	sidecarTokensInjected = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "clickhouse_proxy_sidecar_tokens_injected_total",
+		Help: "Total JWS tokens injected by sidecar proxy",
+	})
+	sidecarTokenErrors = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "clickhouse_proxy_sidecar_token_errors_total",
+		Help: "Total JWS token signing errors in sidecar mode",
+	})
 )
 
 func init() {
@@ -79,6 +89,8 @@ func init() {
 	prometheus.MustRegister(fallbackTotal)
 	prometheus.MustRegister(streamingDataBlocksTotal)
 	prometheus.MustRegister(handshakeDuration)
+	prometheus.MustRegister(sidecarTokensInjected)
+	prometheus.MustRegister(sidecarTokenErrors)
 }
 
 type MetricsObserver struct{}
@@ -164,4 +176,12 @@ func (m *MetricsObserver) StreamingDataBlock(mode string) {
 
 func (m *MetricsObserver) HandshakeCompleted(duration float64) {
 	handshakeDuration.Observe(duration)
+}
+
+func (m *MetricsObserver) SidecarTokenInjected() {
+	sidecarTokensInjected.Inc()
+}
+
+func (m *MetricsObserver) SidecarTokenError() {
+	sidecarTokenErrors.Inc()
 }
