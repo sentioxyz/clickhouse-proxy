@@ -1,7 +1,7 @@
 syntax = "proto3";
 
 package rewriter;
-option go_package = "ck_remote_proxy/protos";
+option go_package = "github.com/sentioxyz/clickhouse-proxy/protos";
 
 enum RewriteOp {
     TableNameRewrite = 0;

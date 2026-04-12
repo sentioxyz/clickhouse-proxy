@@ -9,7 +9,7 @@ go_library(
         "router.go",
         "types.go",
     ],
-    importpath = "ck_remote_proxy/pkg/cluster",
+    importpath = "github.com/sentioxyz/clickhouse-proxy/pkg/cluster",
     visibility = ["//visibility:public"],
     deps = [
         "@sentioxyz_sentio_core//common/log",

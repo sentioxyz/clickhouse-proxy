@@ -18,7 +18,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ck_remote_proxy/pkg/cluster"
+	"github.com/sentioxyz/clickhouse-proxy/pkg/cluster"
 	"github.com/ClickHouse/ch-go/proto"
 )
 

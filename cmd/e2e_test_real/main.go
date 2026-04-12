@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"ck_remote_proxy/pkg/proxy"
+	"github.com/sentioxyz/clickhouse-proxy/pkg/proxy"
 )
 
 func main() {

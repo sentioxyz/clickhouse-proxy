@@ -1304,7 +1304,7 @@ const file_protos_rewriter_proto_rawDesc = "" +
 	"\fRewriteError\x10\x022\xbf\x01\n" +
 	"\x0fRewriterService\x12F\n" +
 	"\aRewrite\x12\x1b.rewriter.RewriteSQLRequest\x1a\x1c.rewriter.RewriteSQLResponse\"\x00\x12d\n" +
-	"\x13RewriteErrorMessage\x12$.rewriter.RewriteErrorMessageRequest\x1a%.rewriter.RewriteErrorMessageResponse\"\x00B\x18Z\x16ck_remote_proxy/protosb\x06proto3"
+	"\x13RewriteErrorMessage\x12$.rewriter.RewriteErrorMessageRequest\x1a%.rewriter.RewriteErrorMessageResponse\"\x00B\x18Z\x16github.com/sentioxyz/clickhouse-proxy/protosb\x06proto3"
 
 var (
 	file_protos_rewriter_proto_rawDescOnce sync.Once

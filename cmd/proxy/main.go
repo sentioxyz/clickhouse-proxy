@@ -14,8 +14,8 @@ import (
 	log "sentioxyz/sentio-core/common/log"
 	"sentioxyz/sentio-core/network/sqlrewriter"
 
-	"ck_remote_proxy/pkg/cluster"
-	proxy "ck_remote_proxy/pkg/proxy"
+	"github.com/sentioxyz/clickhouse-proxy/pkg/cluster"
+	proxy "github.com/sentioxyz/clickhouse-proxy/pkg/proxy"
 )
 
 func main() {

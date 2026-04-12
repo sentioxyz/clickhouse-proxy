@@ -1,6 +1,6 @@
-module ck_remote_proxy
+module github.com/sentioxyz/clickhouse-proxy
 
-go 1.25.3
+go 1.24.13
 
 require (
 	github.com/ClickHouse/ch-go v0.71.0
@@ -14,7 +14,7 @@ require (
 	golang.org/x/crypto v0.47.0
 	google.golang.org/grpc v1.78.0
 	google.golang.org/protobuf v1.36.11
-	sentioxyz/sentio-core v0.0.0-20260317233224-ecc0cd145878
+	sentioxyz/sentio-core v0.0.0-00010101000000-000000000000
 )
 
 require (
@@ -99,7 +99,6 @@ replace github.com/ClickHouse/ch-go => github.com/sentioxyz/ch-go v0.71.0-sentio
 
 replace github.com/ClickHouse/clickhouse-go/v2 => github.com/sentioxyz/clickhouse-go/v2 v2.41.0-sentioxyz
 
-// sentio-core declares module path as "sentioxyz/sentio-core" (without github.com/ prefix),
-// so we must use replace to map the import path. Use local path for development.
-// For CI/production, use: replace sentioxyz/sentio-core => github.com/sentioxyz/sentio-core <version>
-replace sentioxyz/sentio-core => ../sentio-core
+// sentio-core declares module path as "sentioxyz/sentio-core" (without github.com/ prefix).
+// We map it to the remote repository.
+replace sentioxyz/sentio-core => github.com/sentioxyz/sentio-core v0.0.0-20260325082209-7a8c569b8f64

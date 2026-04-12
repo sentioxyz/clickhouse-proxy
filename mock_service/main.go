@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	pb "ck_remote_proxy/protos"
+	pb "github.com/sentioxyz/clickhouse-proxy/protos"
 
 	"google.golang.org/grpc"
 )

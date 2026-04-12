@@ -13,10 +13,10 @@ bazel_dep(name = "sentio-core", version = "0.0.0", repo_name = "sentioxyz_sentio
 # When used as a dependency, the parent module's override takes precedence.
 git_override(
     module_name = "sentio-core",
-    remote = "https://github.com/sentioxyz/sentio-core",
     commit = "7a8c569b8f649dd6dcdf9436241c30cd6e10981d",
     patch_strip = 1,
     patches = ["//third_party:sentio-core.patch"],
+    remote = "https://github.com/sentioxyz/sentio-core",
 )
 
 go_sdk = use_extension("@rules_go//go:extensions.bzl", "go_sdk")

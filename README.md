@@ -27,20 +27,17 @@ A lightweight ClickHouse native TCP protocol proxy. It sits transparently betwee
 
 Minimal steps to get a proxy running (assuming ClickHouse is at `localhost:9000`):
 
+### Using go install (Fastest)
+
 ```bash
-# 1. Clone the repository
-git clone git@github.com:sentioxyz/clickhouse-proxy.git
-cd clickhouse-proxy
+# Install the latest version
+go install github.com/sentioxyz/clickhouse-proxy/cmd/proxy@latest
 
-# 2. Build
-go build -o clickhouse-proxy ./cmd/proxy/
-
-# 3. Run (using environment variables to specify upstream)
-CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" ./clickhouse-proxy
-
-# 4. Connect via clickhouse-client through the proxy
-clickhouse-client --host localhost --port 9001
+# Run (using environment variables to specify upstream)
+CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" proxy
 ```
+
+### From Source
 
 ---
 
