@@ -5,7 +5,7 @@ load("@protobuf//bazel:proto_library.bzl", "proto_library")
 go_library(
     name = "protos",
     embed = [":protos_go_proto"],
-    importpath = "ck_remote_proxy/protos",
+    importpath = "github.com/sentioxyz/clickhouse-proxy/protos",
     visibility = ["//visibility:public"],
 )
 
@@ -21,7 +21,7 @@ go_proto_library(
         "@rules_go//proto:go_proto",
         "@rules_go//proto:go_grpc_v2",
     ],
-    importpath = "ck_remote_proxy/protos",
+    importpath = "github.com/sentioxyz/clickhouse-proxy/protos",
     proto = ":protos_proto",
     visibility = ["//visibility:public"],
 )

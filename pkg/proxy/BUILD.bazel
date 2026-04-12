@@ -16,7 +16,7 @@ go_library(
         "usage_client.go",
         "validator.go",
     ],
-    importpath = "ck_remote_proxy/pkg/proxy",
+    importpath = "github.com/sentioxyz/clickhouse-proxy/pkg/proxy",
     visibility = ["//visibility:public"],
     deps = [
         "//pkg/cluster",

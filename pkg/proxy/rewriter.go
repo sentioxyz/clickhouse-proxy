@@ -11,11 +11,11 @@ import (
 	"sync"
 	"time"
 
-	"ck_remote_proxy/pkg/cluster"
+	"github.com/sentioxyz/clickhouse-proxy/pkg/cluster"
 	log "sentioxyz/sentio-core/common/log"
 	"sentioxyz/sentio-core/network/state"
 
-	pb "ck_remote_proxy/protos"
+	pb "github.com/sentioxyz/clickhouse-proxy/protos"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

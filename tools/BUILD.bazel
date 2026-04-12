@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library")
 go_library(
     name = "tools_lib",
     srcs = ["stability_check.go"],
-    importpath = "ck_remote_proxy/tools",
+    importpath = "github.com/sentioxyz/clickhouse-proxy/tools",
     visibility = ["//visibility:private"],
     deps = [
         "@com_github_clickhouse_clickhouse_go_v2//:clickhouse-go",

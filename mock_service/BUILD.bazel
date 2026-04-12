@@ -3,7 +3,7 @@ load("@rules_go//go:def.bzl", "go_binary", "go_library")
 go_library(
     name = "mock_service_lib",
     srcs = ["main.go"],
-    importpath = "ck_remote_proxy/mock_service",
+    importpath = "github.com/sentioxyz/clickhouse-proxy/mock_service",
     visibility = ["//visibility:private"],
     deps = [
         "//protos",

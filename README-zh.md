@@ -27,20 +27,17 @@
 
 最少步骤跑起一个 proxy（假设 ClickHouse 运行在 `localhost:9000`）：
 
+### 使用 go install (最快)
+
 ```bash
-# 1. 克隆仓库
-git clone git@github.com:sentioxyz/clickhouse-proxy.git
-cd clickhouse-proxy
+# 安装最新版本
+go install github.com/sentioxyz/clickhouse-proxy/cmd/proxy@latest
 
-# 2. 编译
-go build -o clickhouse-proxy ./cmd/proxy/
-
-# 3. 运行（使用环境变量指定上游地址）
-CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" ./clickhouse-proxy
-
-# 4. 用 clickhouse-client 连接 proxy 测试
-clickhouse-client --host localhost --port 9001
+# 运行（使用环境变量指定上游地址）
+CK_LISTEN=":9001" CK_UPSTREAM="localhost:9000" proxy
 ```
+
+### 源码编译
 
 ---
 

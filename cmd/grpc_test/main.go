@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"time"
 
-	pb "ck_remote_proxy/protos"
+	pb "github.com/sentioxyz/clickhouse-proxy/protos"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"

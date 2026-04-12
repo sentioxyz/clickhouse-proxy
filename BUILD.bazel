@@ -9,5 +9,5 @@ alias(
     visibility = ["//visibility:public"],
 )
 
-# gazelle:prefix ck_remote_proxy
+# gazelle:prefix github.com/sentioxyz/clickhouse-proxy
 gazelle(name = "gazelle")
