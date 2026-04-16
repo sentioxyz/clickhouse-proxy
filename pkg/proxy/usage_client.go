@@ -122,6 +122,23 @@ func (c *UsageClient) ReportUsage(ctx context.Context, payer string, signer stri
 	}()
 }
 
+// RejectionException maps a CheckBalance rejection reason to a ClickHouse
+// Exception packet (code, name, message) that includes payer and signer so
+// the client sees why the query was refused instead of a silent close.
+func RejectionException(reason usageProtos.CheckQueryBalanceRejection, payer, signer string) (int32, string, string) {
+	switch reason {
+	case usageProtos.CheckQueryBalanceRejection_INSUFFICIENT_BALANCE:
+		return 1003, "INSUFFICIENT_BALANCE",
+			fmt.Sprintf("Insufficient balance: payer=%s signer=%s", payer, signer)
+	case usageProtos.CheckQueryBalanceRejection_UNAUTHORIZED_SIGNER:
+		return 1002, "UNAUTHORIZED_SIGNER",
+			fmt.Sprintf("Signer not authorized to query on behalf of payer: payer=%s signer=%s", payer, signer)
+	default:
+		return 1001, "QUERY_REJECTED",
+			fmt.Sprintf("Query rejected (reason=%v) payer=%s signer=%s", reason, payer, signer)
+	}
+}
+
 // Close closes the gRPC connection.
 func (c *UsageClient) Close() error {
 	if c.grpcConn != nil {
