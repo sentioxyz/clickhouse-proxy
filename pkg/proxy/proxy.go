@@ -864,6 +864,8 @@ func (p *Proxy) copyClientToUpstream(ctx context.Context, id int64, clientConn, 
 					log.Infof("[conn %d] checking query balance: payer=%s signer=%s", id, payer, signerAddr)
 					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {
 						log.Infof("[conn %d] query rejected: %v (payer=%s signer=%s)", id, reason, payer, signerAddr)
+						code, name, msg := RejectionException(reason, payer, signerAddr)
+						sendExceptionToClient(clientConn, code, name, msg)
 						return
 					}
 					// Report usage asynchronously
@@ -1644,6 +1646,8 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 					log.Infof("[conn %d] streaming: checking query balance: payer=%s signer=%s", id, payer, signerAddr)
 					if ok, reason, err := p.usageClient.CheckBalance(ctx, payer, signerAddr); err == nil && !ok {
 						log.Infof("[conn %d] streaming: query rejected: %v (payer=%s signer=%s)", id, reason, payer, signerAddr)
+						code, name, msg := RejectionException(reason, payer, signerAddr)
+						sendExceptionToClient(clientConn, code, name, msg)
 						return
 					}
 					log.Infof("[conn %d] streaming: query allowed, reporting usage: payer=%s signer=%s", id, payer, signerAddr)
