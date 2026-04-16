@@ -170,6 +170,27 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 }
 ```
 
+示例配置文件（Sidecar 模式）：
+
+```json
+{
+    // === Sidecar 模式配置 ===
+    "sidecar_mode": true,
+    "listen": ":9001",
+    "sidecar_upstream": "10.0.0.8:9001",
+    "sidecar_private_key_hex": "0xYOUR_SIDECAR_PRIVATE_KEY_HERE",
+
+    // === 基础配置 (部分) ===
+    "dial_timeout": "5s",
+    "idle_timeout": "5m",
+    "metrics_listen": ":9091",
+
+    // === 日志配置 ===
+    "log_queries": true,
+    "log_data": false
+}
+```
+
 ### 完整参数表
 
 #### 基础配置
@@ -217,6 +238,15 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 |------|------|---------|-------|------|
 | `network_state_redis` | string | 是 | （空） | Redis statemirror 地址（如 `localhost:6379`） |
 
+#### Sidecar 配置
+
+Sidecar 模式下，proxy 会同 ClickHouse 客户端部署在一起，拦截客户端请求并使用其自身私钥注入 JWS 签名 token 后再发往服务端的 proxy 服务器。该模式不支持路由重写等服务端代理功能。
+
+| 参数 | 类型 | 是否必填 | 默认值 | 说明 |
+|------|------|---------|-------|------|
+| `sidecar_mode` | bool | 否 | `false` | 是否开启 Sidecar 模式 |
+| `sidecar_upstream` | string | 是（Sidecar 模式下） | （空） | 服务端 proxy 的地址（如 `10.0.0.8:9001`） |
+| `sidecar_private_key_hex` | string | 是（Sidecar 模式下） | （空） | Sidecar 自身用于签署 JWS token 的以太坊私钥 |
 
 #### 高级配置
 

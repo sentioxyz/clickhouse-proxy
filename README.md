@@ -170,7 +170,26 @@ Example configuration with authentication enabled:
 }
 ```
 
+Example configuration for Sidecar mode:
 
+```json
+{
+    // === Sidecar Mode ===
+    "sidecar_mode": true,
+    "listen": ":9001",
+    "sidecar_upstream": "10.0.0.8:9001",
+    "sidecar_private_key_hex": "0xYOUR_SIDECAR_PRIVATE_KEY_HERE",
+
+    // === Core Settings (Partial) ===
+    "dial_timeout": "5s",
+    "idle_timeout": "5m",
+    "metrics_listen": ":9091",
+
+    // === Logging ===
+    "log_queries": true,
+    "log_data": false
+}
+```
 
 ### Full Parameter Reference
 
@@ -219,6 +238,15 @@ Example configuration with authentication enabled:
 |-----------|------|----------|---------|-------------|
 | `network_state_redis` | string | Yes | (empty) | Redis address for statemirror-based network state (e.g. `localhost:6379`) |
 
+#### Sidecar Configuration
+
+In Sidecar mode, the proxy is deployed alongside the ClickHouse client. It intercepts client requests, injects a local JWS signature token using its own private key, and forwards the requests to the server-side proxy. This mode does not support query routing to different downstream databases or other server-side proxy features.
+
+| Parameter | Type | Required | Default | Description |
+|-----------|------|----------|---------|-------------|
+| `sidecar_mode` | bool | No | `false` | Enable Sidecar mode |
+| `sidecar_upstream` | string | Yes (in Sidecar mode) | (empty) | Server-side proxy address (e.g., `10.0.0.8:9001`) |
+| `sidecar_private_key_hex` | string | Yes (in Sidecar mode) | (empty) | Sidecar's own Ethereum private key for JWS token signing |
 
 #### Advanced
 
