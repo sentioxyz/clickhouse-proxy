@@ -44,6 +44,12 @@ type Config struct {
 	// ClickHouse manager config path (for sentio-core table mapper, required)
 	CkhManagerConfigPath string `json:"ckh_manager_config_path" yaml:"ckh_manager_config_path"`
 
+	// CredentialReplaceEnabled enables automatic credential replacement.
+	// When true, the proxy replaces client's user/password with credentials
+	// from CkhManagerConfigPath before forwarding to upstream ClickHouse.
+	// This allows sidecar clients to connect without knowing the real ClickHouse password.
+	CredentialReplaceEnabled bool `json:"credential_replace_enabled" yaml:"credential_replace_enabled"`
+
 	// Network State configuration
 	NetworkStateRedis string `json:"network_state_redis" yaml:"network_state_redis"` // Redis address (for statemirror, e.g. "localhost:6379")
 
@@ -170,7 +176,8 @@ func DefaultConfig() Config {
 		RewriterServiceAddr: envOrDefault("CK_REWRITER_ADDR", "localhost:50051"),
 		RewriterTimeout:     Duration{5 * time.Second},
 		// ClickHouse manager config
-		CkhManagerConfigPath: envOrDefault("CKH_MANAGER_CONFIG", ""),
+		CkhManagerConfigPath:    envOrDefault("CKH_MANAGER_CONFIG", ""),
+		CredentialReplaceEnabled: true, // enabled by default
 		// Network state defaults
 		NetworkStateRedis: envOrDefault("CK_NETWORK_STATE_REDIS", ""),
 		// Streaming buffer size

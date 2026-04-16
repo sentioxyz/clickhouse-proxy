@@ -143,6 +143,7 @@ type Proxy struct {
 	networkState NetworkState  // Used by forwarding-only mode to discover bound proxy targets
 	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled)
 	clusterMgr   *cluster.Manager // Cluster manager for multi-replica routing (nil = legacy single-upstream)
+	credProvider CredentialProvider // Provides ClickHouse credentials for upstream connections (nil = passthrough client creds)
 	// compressedBufPool removed: proto.Reader.ReadRaw always returns a newly allocated slice,
 	// so data cannot be read into a pool-obtained buffer, making the pool ineffective.
 	bufferPool sync.Pool // Reuse proto.Buffer to reduce allocations in the packet loop
@@ -182,6 +183,11 @@ func (p *Proxy) SetUsageClient(c *UsageClient) {
 // SetClusterManager sets the cluster manager for multi-replica routing.
 func (p *Proxy) SetClusterManager(m *cluster.Manager) {
 	p.clusterMgr = m
+}
+
+// SetCredentialProvider sets the credential provider for automatic credential replacement.
+func (p *Proxy) SetCredentialProvider(cp CredentialProvider) {
+	p.credProvider = cp
 }
 
 // SetSidecarSigner sets the sidecar JWS signer for sidecar proxy mode.
@@ -1209,10 +1215,32 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		// Override clientUser for SQL rewriter (use real user, not __route__...)
 		clientUser = realUser
 	} else {
-		// No route: send original Hello as-is
-		helloToSend = make([]byte, 1+helloBuf.Len())
-		helloToSend[0] = typeByte
-		copy(helloToSend[1:], helloBuf.Bytes())
+		// No route: check credential replacement
+		if p.cfg.CredentialReplaceEnabled && p.credProvider != nil {
+			newUser, newPass, err := p.credProvider.GetDefaultCredential()
+			if err != nil {
+				log.Warnf("[conn %d] streaming: credential replacement failed: %v, using original credentials", id, err)
+				helloToSend = make([]byte, 1+helloBuf.Len())
+				helloToSend[0] = typeByte
+				copy(helloToSend[1:], helloBuf.Bytes())
+			} else {
+				rewrittenHello, err := rewriteHelloCredentials(helloBuf.Bytes(), newUser, newPass)
+				if err != nil {
+					log.Warnf("[conn %d] streaming: Hello credential rewrite failed: %v, using original", id, err)
+					helloToSend = make([]byte, 1+helloBuf.Len())
+					helloToSend[0] = typeByte
+					copy(helloToSend[1:], helloBuf.Bytes())
+				} else {
+					helloToSend = rewrittenHello // already includes type byte
+					log.Infof("[conn %d] streaming: credentials replaced, original_user=%s -> %s", id, clientUser, newUser)
+				}
+			}
+		} else {
+			// No credential replacement: send original Hello as-is
+			helloToSend = make([]byte, 1+helloBuf.Len())
+			helloToSend[0] = typeByte
+			copy(helloToSend[1:], helloBuf.Bytes())
+		}
 	}
 
 	// ========== Dial upstream (dynamic target) ==========

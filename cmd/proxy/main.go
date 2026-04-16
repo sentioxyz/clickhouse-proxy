@@ -105,15 +105,21 @@ func main() {
 	}
 	networkState = state
 
+	// Load ClickHouse manager (shared by rewriter and credential provider)
+	var ckhMgr ckhmanager.Manager
+	if !cfg.ForwardingOnly && cfg.CkhManagerConfigPath != "" {
+		ckhMgr = ckhmanager.LoadManager(cfg.CkhManagerConfigPath)
+		if ckhMgr == nil {
+			log.Fatalf("failed to load ClickHouse manager from %s", cfg.CkhManagerConfigPath)
+		}
+		log.Infof("loaded ClickHouse manager from %s", cfg.CkhManagerConfigPath)
+	}
+
 	// Create rewriter (optional in forwarding-only mode)
 	if !cfg.ForwardingOnly {
 		// ClickHouse manager config is required for table mapping
-		if cfg.CkhManagerConfigPath == "" {
-			log.Fatalf("ckh_manager_config_path is required for SQL rewriter table mapping")
-		}
-		ckhMgr := ckhmanager.LoadManager(cfg.CkhManagerConfigPath)
 		if ckhMgr == nil {
-			log.Fatalf("failed to load ClickHouse manager from %s", cfg.CkhManagerConfigPath)
+			log.Fatalf("ckh_manager_config_path is required for SQL rewriter table mapping")
 		}
 		privateKeyHex := cfg.RelayPrivateKeyHex
 
@@ -178,6 +184,16 @@ func main() {
 		if rw, ok := rewriter.(*proxy.SentioNetworkRewriter); ok && rw != nil {
 			rw.SetClusterManager(clusterMgr)
 		}
+	}
+
+	// Initialize credential provider for automatic credential replacement
+	if cfg.CredentialReplaceEnabled && ckhMgr != nil {
+		credProvider := proxy.NewCkhManagerCredentialProvider(ckhMgr, cfg.RelayPrivateKeyHex)
+		p.SetCredentialProvider(credProvider)
+		if rw, ok := rewriter.(*proxy.SentioNetworkRewriter); ok && rw != nil {
+			rw.SetCredentialProvider(credProvider)
+		}
+		log.Infof("credential replacement enabled via ckh_manager_config")
 	}
 
 	// Initialize relay JWS signer for proxy-to-proxy (__route__) token propagation
