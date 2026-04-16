@@ -20,9 +20,63 @@ import (
 
 func main() {
 	configPath := flag.String("config", envOrDefault("CK_CONFIG", ""), "path to JSON config file (optional)")
+
+	// Sidecar mode flags: allow launching sidecar without a config file.
+	// Priority: CLI flag > env var (CK_SIDECAR / CK_SIDECAR_UPSTREAM / CK_SIDECAR_KEY) > config file > default.
+	sidecarMode := flag.Bool("sidecar", false, "enable sidecar mode (token-signing pass-through proxy)")
+	sidecarUpstream := flag.String("sidecar-upstream", "", "server-side proxy address, e.g. 10.0.0.8:9001 (required in sidecar mode)")
+	// NOTE: passing private keys via CLI flags leaks them in /proc. Prefer CK_SIDECAR_KEY env var.
+	sidecarKey := flag.String("sidecar-key", "", "sidecar Ethereum private key hex for JWS signing (prefer env var CK_SIDECAR_KEY)")
+
+	// Common overrides (also available as env vars CK_LISTEN / CK_METRICS_LISTEN).
+	listenAddr := flag.String("listen", "", "proxy listen address, e.g. :9001 (overrides config/env)")
+	metricsAddr := flag.String("metrics-listen", "", "Prometheus metrics listen address, e.g. :9091 (overrides config/env)")
+	dialTimeout := flag.String("dial-timeout", "", "upstream dial timeout, e.g. 5s (overrides config/env)")
+	idleTimeout := flag.String("idle-timeout", "", "connection idle timeout, e.g. 5m (overrides config/env)")
+	logQueries := flag.Bool("log-queries", true, "log SQL query content")
+
 	flag.Parse()
 
+	// Track which flags were explicitly set by the user.
+	explicitFlags := make(map[string]bool)
+	flag.Visit(func(f *flag.Flag) { explicitFlags[f.Name] = true })
+
 	cfg := proxy.LoadConfig(*configPath)
+
+	// Apply CLI flag overrides (only when explicitly set).
+	if explicitFlags["sidecar"] {
+		cfg.SidecarMode = *sidecarMode
+	}
+	if explicitFlags["sidecar-upstream"] {
+		cfg.SidecarUpstream = *sidecarUpstream
+	}
+	if explicitFlags["sidecar-key"] {
+		cfg.SidecarPrivateKeyHex = *sidecarKey
+	}
+	if explicitFlags["listen"] {
+		cfg.Listen = *listenAddr
+	}
+	if explicitFlags["metrics-listen"] {
+		cfg.MetricsListen = *metricsAddr
+	}
+	if explicitFlags["dial-timeout"] {
+		var d proxy.Duration
+		if err := d.UnmarshalText([]byte(*dialTimeout)); err != nil {
+			log.Fatalf("-dial-timeout: %v", err)
+		}
+		cfg.DialTimeout = d
+	}
+	if explicitFlags["idle-timeout"] {
+		var d proxy.Duration
+		if err := d.UnmarshalText([]byte(*idleTimeout)); err != nil {
+			log.Fatalf("-idle-timeout: %v", err)
+		}
+		cfg.IdleTimeout = d
+	}
+	if explicitFlags["log-queries"] {
+		cfg.LogQueries = *logQueries
+	}
+
 	log.Infof("clickhouse-proxy starting. listen=%s upstream=%s dial_timeout=%s idle_timeout=%s stats_interval=%s log_queries=%t log_data=%t auth_enabled=%t",
 		cfg.Listen, cfg.Upstream, cfg.DialTimeout, cfg.IdleTimeout, cfg.StatsInterval, cfg.LogQueries, cfg.LogData, cfg.AuthEnabled)
 

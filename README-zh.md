@@ -283,3 +283,56 @@ metrics listening on :9091
 ```
 
 按 `Ctrl+C` 优雅关闭，关闭前会打印最终统计信息。
+
+### Sidecar 模式 — 命令行启动
+
+Sidecar 模式可以直接通过命令行启动，无需配置文件。
+
+**使用 CLI flags：**
+
+```bash
+./clickhouse-proxy \
+  -sidecar \
+  -sidecar-upstream 10.0.0.8:9001 \
+  -sidecar-key 0xYOUR_PRIVATE_KEY_HERE \
+  -listen :9001
+```
+
+**使用环境变量（推荐用于密钥传递）：**
+
+```bash
+CK_SIDECAR=true \
+CK_SIDECAR_UPSTREAM=10.0.0.8:9001 \
+CK_SIDECAR_KEY=0xYOUR_PRIVATE_KEY_HERE \
+CK_LISTEN=:9001 \
+./clickhouse-proxy
+```
+
+**混合使用（环境变量传密钥，flags 指定路由）：**
+
+```bash
+CK_SIDECAR_KEY=0xYOUR_PRIVATE_KEY_HERE \
+./clickhouse-proxy -sidecar -sidecar-upstream 10.0.0.8:9001
+```
+
+> **安全提示**：通过 CLI flag 传递的私钥会出现在进程列表（`ps`、`/proc`）中，请优先使用 `CK_SIDECAR_KEY` 环境变量或配置文件传递私钥。
+
+**参数覆盖优先级**（由高到低）：
+1. CLI flags（`-sidecar`、`-sidecar-upstream`、`-sidecar-key` 等）
+2. 环境变量（`CK_SIDECAR`、`CK_SIDECAR_UPSTREAM`、`CK_SIDECAR_KEY` 等）
+3. 配置文件中的值
+4. 内置默认值
+
+**所有可用 CLI flags：**
+
+| Flag | 默认值 | 说明 |
+|------|--------|------|
+| `-sidecar` | `false` | 启用 sidecar 模式 |
+| `-sidecar-upstream` | （空） | 服务端 proxy 地址 |
+| `-sidecar-key` | （空） | 用于 JWS 签名的以太坊私钥 |
+| `-listen` | `:9001` | proxy 监听地址 |
+| `-metrics-listen` | `:9091` | Prometheus metrics 监听地址 |
+| `-dial-timeout` | `5s` | 上游连接超时时间 |
+| `-idle-timeout` | `5m` | 连接空闲超时时间 |
+| `-log-queries` | `true` | 是否记录 SQL 查询日志 |
+| `-config` | （空） | JSON 配置文件路径 |
