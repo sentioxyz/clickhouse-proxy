@@ -71,11 +71,17 @@ type SentioNetworkRewriter struct {
 	tableRewriterFactory SentioNetworkTableRewriterFactory
 	callbackAddr         string // resolved address for remote() callback (e.g. "10.15.0.103:9001")
 	clusterMgr           *cluster.Manager // cluster manager for multi-replica isLocal detection (may be nil)
+	credProvider         CredentialProvider // credential provider for remote() credential replacement (may be nil)
 }
 
 // SetClusterManager sets the cluster manager for multi-replica isLocal detection.
 func (r *SentioNetworkRewriter) SetClusterManager(m *cluster.Manager) {
 	r.clusterMgr = m
+}
+
+// SetCredentialProvider sets the credential provider for remote() credential replacement.
+func (r *SentioNetworkRewriter) SetCredentialProvider(cp CredentialProvider) {
+	r.credProvider = cp
 }
 
 // sentioNetworkTableRegex matches Sentio-Network mode table names
@@ -357,13 +363,26 @@ func (r *SentioNetworkRewriter) buildRewriteMappings(ctx context.Context, tables
 				// and encode route info into user parameter for dynamic upstream routing.
 				// Format: __route__<target_proxy_addr>__<real_user>
 				localAddr := r.callbackAddr
-				routeUser := fmt.Sprintf("__route__%s__%s", indexerAddr, user)
+
+				// Use credential provider if available, otherwise fall back to client credentials
+				remoteUser, remotePass := user, password
+				if r.credProvider != nil {
+					if u, p, err := r.credProvider.GetCredentialForIndexer(indexerInfo); err == nil {
+						remoteUser = u
+						remotePass = p
+						log.Debugf("remote table credential replaced for indexer %d: user=%s", indexerInfo.IndexerId, u)
+					} else {
+						log.Warnf("credential lookup failed for indexer %d: %v, using client credentials", indexerInfo.IndexerId, err)
+					}
+				}
+
+				routeUser := fmt.Sprintf("__route__%s__%s", indexerAddr, remoteUser)
 				remoteTableMap[table.FullMatch] = RemoteTable{
 					Addr:     localAddr,
 					Database: database,
 					Table:    physicalTable,
 					User:     routeUser,
-					Password: password,
+					Password: remotePass,
 				}
 				log.Debugf("remote table rewrite: %s -> remote('%s', '%s', '%s', '%s', '***')",
 					table.FullMatch, localAddr, database, physicalTable, routeUser)

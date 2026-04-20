@@ -119,3 +119,53 @@ func rewriteHelloUser(helloPayload []byte, realUser string) ([]byte, error) {
 
 	return buf.Buf, nil
 }
+
+// rewriteHelloCredentials re-encodes a ClientHello packet, replacing both user and password fields.
+// Takes the raw Hello bytes (excluding type byte) and the new user/password to substitute.
+// Returns the full Hello packet bytes including the type byte (0x00).
+func rewriteHelloCredentials(helloPayload []byte, newUser, newPassword string) ([]byte, error) {
+	// Decode original Hello fields
+	r := proto.NewReader(bufio.NewReader(bytes.NewReader(helloPayload)))
+
+	clientName, err := r.Str()
+	if err != nil {
+		return nil, fmt.Errorf("decode client_name: %w", err)
+	}
+	major, err := r.UVarInt()
+	if err != nil {
+		return nil, fmt.Errorf("decode major: %w", err)
+	}
+	minor, err := r.UVarInt()
+	if err != nil {
+		return nil, fmt.Errorf("decode minor: %w", err)
+	}
+	revision, err := r.UVarInt()
+	if err != nil {
+		return nil, fmt.Errorf("decode revision: %w", err)
+	}
+	database, err := r.Str()
+	if err != nil {
+		return nil, fmt.Errorf("decode database: %w", err)
+	}
+	// Skip original user
+	if _, err := r.Str(); err != nil {
+		return nil, fmt.Errorf("decode user: %w", err)
+	}
+	// Skip original password
+	if _, err := r.Str(); err != nil {
+		return nil, fmt.Errorf("decode password: %w", err)
+	}
+
+	// Re-encode with replaced user and password
+	var buf proto.Buffer
+	buf.PutByte(byte(proto.ClientCodeHello)) // type = 0x00
+	buf.PutString(clientName)
+	buf.PutUVarInt(major)
+	buf.PutUVarInt(minor)
+	buf.PutUVarInt(revision)
+	buf.PutString(database)
+	buf.PutString(newUser)     // replaced user
+	buf.PutString(newPassword) // replaced password
+
+	return buf.Buf, nil
+}

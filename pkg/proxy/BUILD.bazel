@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "chunked.go",
         "config.go",
+        "credential_provider.go",
         "observer.go",
         "proxy.go",
         "query_codec.go",
@@ -22,6 +23,7 @@ go_library(
         "//pkg/cluster",
         "//protos",
         "@com_github_clickhouse_ch_go//proto",
+        "@sentioxyz_sentio_core//common/clickhousemanager",
         "@com_github_ethereum_go_ethereum//crypto",
         "@com_github_prometheus_client_golang//prometheus",
         "@com_github_redis_go_redis_v9//:go-redis",
