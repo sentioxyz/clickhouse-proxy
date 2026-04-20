@@ -283,3 +283,56 @@ metrics listening on :9091
 ```
 
 Press `Ctrl+C` for a graceful shutdown; final statistics are printed before exit.
+
+### Sidecar Mode — CLI Startup
+
+Sidecar mode can be started directly from the command line without a config file.
+
+**Using CLI flags:**
+
+```bash
+./clickhouse-proxy \
+  -sidecar \
+  -sidecar-upstream 10.0.0.8:9001 \
+  -sidecar-key 0xYOUR_PRIVATE_KEY_HERE \
+  -listen :9001
+```
+
+**Using environment variables (recommended for secrets):**
+
+```bash
+CK_SIDECAR=true \
+CK_SIDECAR_UPSTREAM=10.0.0.8:9001 \
+CK_SIDECAR_KEY=0xYOUR_PRIVATE_KEY_HERE \
+CK_LISTEN=:9001 \
+./clickhouse-proxy
+```
+
+**Mixed (env for secrets, flags for routing):**
+
+```bash
+CK_SIDECAR_KEY=0xYOUR_PRIVATE_KEY_HERE \
+./clickhouse-proxy -sidecar -sidecar-upstream 10.0.0.8:9001
+```
+
+> **Security note**: CLI flags are visible in process listings (`ps`, `/proc`). Always prefer `CK_SIDECAR_KEY` environment variable or a config file to pass the private key.
+
+**Flag override priority** (highest → lowest):
+1. CLI flags (`-sidecar`, `-sidecar-upstream`, `-sidecar-key`, …)
+2. Environment variables (`CK_SIDECAR`, `CK_SIDECAR_UPSTREAM`, `CK_SIDECAR_KEY`, …)
+3. Config file values
+4. Built-in defaults
+
+**All available CLI flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `-sidecar` | `false` | Enable sidecar mode |
+| `-sidecar-upstream` | (empty) | Server-side proxy address |
+| `-sidecar-key` | (empty) | Ethereum private key for JWS signing |
+| `-listen` | `:9001` | Proxy listen address |
+| `-metrics-listen` | `:9091` | Prometheus metrics listen address |
+| `-dial-timeout` | `5s` | Upstream dial timeout |
+| `-idle-timeout` | `5m` | Connection idle timeout |
+| `-log-queries` | `true` | Log SQL query content |
+| `-config` | (empty) | Path to JSON config file |

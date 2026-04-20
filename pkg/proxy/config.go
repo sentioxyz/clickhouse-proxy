@@ -129,6 +129,16 @@ func (d Duration) MarshalJSON() ([]byte, error) {
 	return json.Marshal(d.Duration.String())
 }
 
+// UnmarshalText implements encoding.TextUnmarshaler, used for CLI flag parsing.
+func (d *Duration) UnmarshalText(text []byte) error {
+	dur, err := time.ParseDuration(string(text))
+	if err != nil {
+		return fmt.Errorf("invalid duration %q: %w", string(text), err)
+	}
+	d.Duration = dur
+	return nil
+}
+
 func (d Duration) MarshalYAML() (interface{}, error) {
 	return d.Duration.String(), nil
 }
@@ -185,6 +195,10 @@ func DefaultConfig() Config {
 		ValidateChecksum:      false,
 		MaxConnectionLifetime: Duration{24 * time.Hour},
 		ShutdownTimeout:       Duration{30 * time.Second},
+		// Sidecar defaults (can be driven entirely by env vars, no config file needed)
+		SidecarMode:          envOrDefault("CK_SIDECAR", "") == "true",
+		SidecarUpstream:      envOrDefault("CK_SIDECAR_UPSTREAM", ""),
+		SidecarPrivateKeyHex: envOrDefault("CK_SIDECAR_KEY", ""),
 	}
 }
 
