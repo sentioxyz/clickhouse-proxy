@@ -34,6 +34,11 @@ type QueryMeta struct {
 
 	// Settings contains query settings extracted from the ClickHouse protocol.
 	Settings map[string]string
+
+	// Database is the current database context for this connection.
+	// Initialized from ClientHello.Database and updated after successful USE statements.
+	// Reflects the proxy's view of which database is active, confirmed by server EndOfStream.
+	Database string
 }
 
 type Validator interface {

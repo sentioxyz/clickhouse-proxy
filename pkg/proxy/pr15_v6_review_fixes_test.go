@@ -449,14 +449,14 @@ func TestForwardUntilQueryDone(t *testing.T) {
 		defer upstreamRead.Close()
 		defer upstreamWrite.Close()
 
-		queryDoneCh := make(chan struct{}, 8)
+		queryDoneCh := make(chan queryDoneSignal, 8)
 
 		// 在后台写入一些数据然后发出 queryDone 信号
 		go func() {
 			time.Sleep(100 * time.Millisecond)
 			clientWrite.Write([]byte("some_raw_data"))
 			time.Sleep(100 * time.Millisecond)
-			queryDoneCh <- struct{}{} // 模拟 upstream 返回 EndOfStream
+			queryDoneCh <- queryDoneSignal{IsEndOfStream: true} // 模拟 upstream 返回 EndOfStream
 		}()
 
 		// 在后台消费 upstream 写入的数据
@@ -489,7 +489,7 @@ func TestForwardUntilQueryDone(t *testing.T) {
 		defer upstreamRead.Close()
 		defer upstreamWrite.Close()
 
-		queryDoneCh := make(chan struct{}, 8)
+		queryDoneCh := make(chan queryDoneSignal, 8)
 
 		// 在后台关闭客户端连接
 		go func() {

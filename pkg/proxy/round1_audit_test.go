@@ -30,7 +30,7 @@ func TestForwardUntilQueryDone_NoGoroutineLeak(t *testing.T) {
 	defer clientWrite.Close()
 
 	upstreamBuf := &bytes.Buffer{}
-	queryDoneCh := make(chan struct{}, 8)
+	queryDoneCh := make(chan queryDoneSignal, 8)
 
 	// 记录初始 goroutine 数
 	runtime.GC()
@@ -42,7 +42,7 @@ func TestForwardUntilQueryDone_NoGoroutineLeak(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 		clientWrite.Write([]byte("test data packet"))
 		time.Sleep(10 * time.Millisecond)
-		queryDoneCh <- struct{}{}
+		queryDoneCh <- queryDoneSignal{IsEndOfStream: true}
 	}()
 
 	br := bufio.NewReaderSize(clientRead, 4096)
@@ -82,13 +82,13 @@ func TestForwardUntilQueryDone_DrainBeforeReturn(t *testing.T) {
 	defer clientWrite.Close()
 
 	upstreamBuf := &bytes.Buffer{}
-	queryDoneCh := make(chan struct{}, 8)
+	queryDoneCh := make(chan queryDoneSignal, 8)
 
 	// 先写入数据，等一小段时间让 goroutine 读入 readCh，再发 queryDone
 	go func() {
 		clientWrite.Write([]byte("data-before-signal"))
 		time.Sleep(50 * time.Millisecond)
-		queryDoneCh <- struct{}{}
+		queryDoneCh <- queryDoneSignal{IsEndOfStream: true}
 	}()
 
 	br := bufio.NewReaderSize(clientRead, 4096)
@@ -113,7 +113,7 @@ func TestForwardUntilQueryDone_ConnectionError(t *testing.T) {
 	defer clientRead.Close()
 
 	upstreamBuf := &bytes.Buffer{}
-	queryDoneCh := make(chan struct{}, 8)
+	queryDoneCh := make(chan queryDoneSignal, 8)
 
 	// 立即关闭写端，模拟连接断开
 	clientWrite.Close()

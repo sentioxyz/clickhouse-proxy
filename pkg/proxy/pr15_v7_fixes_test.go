@@ -95,7 +95,7 @@ func TestForwardUntilQueryDone_Channel(t *testing.T) {
 		defer upstreamRead.Close()
 		defer upstreamWrite.Close()
 
-		queryDoneCh := make(chan struct{}, 8)
+		queryDoneCh := make(chan queryDoneSignal, 8)
 
 		// 消费 upstream 数据
 		go func() {
@@ -111,7 +111,7 @@ func TestForwardUntilQueryDone_Channel(t *testing.T) {
 		// 延迟 200ms 后发 queryDone 信号
 		go func() {
 			time.Sleep(200 * time.Millisecond)
-			queryDoneCh <- struct{}{}
+			queryDoneCh <- queryDoneSignal{IsEndOfStream: true}
 		}()
 
 		br := bufio.NewReader(clientRead)
@@ -141,7 +141,7 @@ func TestForwardUntilQueryDone_Channel(t *testing.T) {
 		defer upstreamRead.Close()
 		defer upstreamWrite.Close()
 
-		queryDoneCh := make(chan struct{}, 8)
+		queryDoneCh := make(chan queryDoneSignal, 8)
 
 		// 收集 upstream 数据
 		var received bytes.Buffer
@@ -165,7 +165,7 @@ func TestForwardUntilQueryDone_Channel(t *testing.T) {
 			time.Sleep(50 * time.Millisecond)
 			clientWrite.Write(testData)
 			time.Sleep(100 * time.Millisecond)
-			queryDoneCh <- struct{}{}
+			queryDoneCh <- queryDoneSignal{IsEndOfStream: true}
 		}()
 
 		br := bufio.NewReader(clientRead)
