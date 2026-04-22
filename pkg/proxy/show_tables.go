@@ -56,11 +56,14 @@ func rewriteShowTablesWithProcessor(sql, currentDB, currentProcessorID string, d
 	}
 
 	// Resolve which processorID to use for filtering.
+	// currentProcessorID takes priority: it means the client reached this database via
+	// "USE <processorID>" with DefaultProcessorDatabase, so we must filter by that specific
+	// processorID even if targetDB also has an explicit entry in dbProcessors.
 	processorID := ""
-	if pid, ok := dbProcessors[targetDB]; ok {
+	if targetDB == currentDB && currentProcessorID != "" {
+		processorID = currentProcessorID // Case 3: per-connection processor context (highest priority)
+	} else if pid, ok := dbProcessors[targetDB]; ok {
 		processorID = pid // Case 2: explicit mapping
-	} else if targetDB == currentDB && currentProcessorID != "" {
-		processorID = currentProcessorID // Case 3: default database with tracked processorID
 	}
 
 	if processorID != "" {

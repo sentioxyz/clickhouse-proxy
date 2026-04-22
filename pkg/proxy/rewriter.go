@@ -685,15 +685,14 @@ func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql strin
 		return "SELECT name FROM system.tables WHERE 1 = 0", true, nil
 	}
 
-	// Look up processor ID for this database.
-	processorID, ok := dbProcessors[targetDB]
-	if !ok {
-		if targetDB == currentDB && currentProcessorID != "" {
-			processorID = currentProcessorID
-		} else {
-			// Database not in processor map → caller should passthrough as-is.
-			return sql, false, nil
-		}
+	// Resolve processorID: per-connection context takes priority over explicit mapping.
+	var processorID string
+	if targetDB == currentDB && currentProcessorID != "" {
+		processorID = currentProcessorID
+	} else if pid, ok := dbProcessors[targetDB]; ok {
+		processorID = pid
+	} else {
+		return sql, false, nil
 	}
 
 	// Send ShowTablesRewrite request directly.
