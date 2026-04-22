@@ -61,7 +61,7 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 	// SHOW TABLES FROM <other_db> where <other_db> != session's current database.
 	if processorID, ok := dbProcessors[targetDB]; ok {
 		return fmt.Sprintf(
-			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%' ESCAPE '\\'",
+			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%' ESCAPE '!'",
 			escapeSQLString(targetDB),
 			escapeSQLString(escapeSQLLike(processorID)),
 		)
