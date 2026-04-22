@@ -60,11 +60,14 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 	// Use explicit database literal (not currentDatabase()) to correctly handle
 	// SHOW TABLES FROM <other_db> where <other_db> != session's current database.
 	if processorID, ok := dbProcessors[targetDB]; ok {
+		// Use a subquery to filter rows first, then apply multiIf in the outer query.
+		// ClickHouse allows SELECT aliases to be referenced in WHERE, so if both the
+		// outer column and the alias are named "name", the WHERE clause would see the
+		// aliased (already-stripped) value and filter incorrectly.
 		return fmt.Sprintf(
-			"SELECT multiIf(startsWith(name, '%[2]s_'), substring(name, length('%[2]s_') + 1), startsWith(name, '%[2]s'), substring(name, length('%[2]s') + 1), name) AS name FROM system.tables WHERE database = '%[1]s' AND name LIKE '%[3]s%%'",
+			"SELECT multiIf(startsWith(name, '%[2]s_'), substring(name, length('%[2]s_') + 1), startsWith(name, '%[2]s'), substring(name, length('%[2]s') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = '%[1]s' AND startsWith(name, '%[2]s'))",
 			escapeSQLString(targetDB),
 			escapeSQLString(processorID),
-			escapeSQLString(escapeSQLLike(processorID)),
 		)
 	}
 
