@@ -1698,19 +1698,15 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				// Try rewriter first (AST-based, more accurate)
 				if p.rewriter != nil && !isRoute && len(processorToDatabase) > 0 {
 					rewrittenSQL, physicalDB, err := p.rewriter.RewriteUse(ctx, eq.Body, processorToDatabase)
-					if err == nil && rewrittenSQL != "" && rewrittenSQL != eq.Body {
+					if err == nil && rewrittenSQL != "" && physicalDB != "" && physicalDB != rawTarget {
 						eq.Body = rewrittenSQL
-						if physicalDB != "" {
-							pendingDB = physicalDB
-						} else {
-							pendingDB = rawTarget
-						}
+						pendingDB = physicalDB
 						log.Infof("[conn %d] streaming: USE rewrite (via rewriter): %q -> %q (pendingDB=%q)", id, rawTarget, eq.Body, pendingDB)
 						useHandled = true
 					} else if err != nil {
 						log.Warnf("[conn %d] streaming: USE rewrite via rewriter failed: %v, falling back to regex", id, err)
-					} else if rewrittenSQL == eq.Body {
-						log.Infof("[conn %d] streaming: USE rewrite via rewriter returned unchanged SQL, falling back to regex", id)
+					} else if physicalDB == rawTarget {
+						log.Infof("[conn %d] streaming: USE rewrite via rewriter returned unchanged db %q, falling back to regex", id, rawTarget)
 					}
 				}
 				// Fallback: regex-based rewriting
