@@ -1727,8 +1727,13 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 						pendingDB = actualDB
 						pendingProcessorID = ""
 						log.Infof("[conn %d] streaming: USE rewrite (regex fallback): %q -> USE %q", id, rawTarget, actualDB)
+					} else if _, isKnownDB := p.cfg.DatabaseProcessors[rawTarget]; isKnownDB {
+						// Client typed a known physical database name directly — forward as-is, no processorID context.
+						pendingDB = rawTarget
+						pendingProcessorID = ""
+						log.Infof("[conn %d] streaming: USE detected (known physical db): pendingDB=%q", id, pendingDB)
 					} else if p.cfg.DefaultProcessorDatabase != "" {
-						// processorID not in explicit map — fall back to default database.
+						// Unknown target, not a known DB — treat as processorID, route to default database.
 						eq.Body = "USE " + p.cfg.DefaultProcessorDatabase
 						pendingDB = p.cfg.DefaultProcessorDatabase
 						pendingProcessorID = rawTarget

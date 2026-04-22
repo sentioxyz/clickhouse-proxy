@@ -45,9 +45,11 @@ func isShowTables(sql string) bool {
 func rewriteShowTablesWithProcessor(sql, currentDB, currentProcessorID string, dbProcessors map[string]string) string {
 	// Parse optional FROM/IN <db> override inside the SQL itself.
 	targetDB := currentDB
+	targetFromSQL := false
 	m := showTablesRegex.FindStringSubmatch(strings.TrimSpace(sql))
 	if len(m) > 1 && m[1] != "" {
 		targetDB = strings.Trim(m[1], "`\"")
+		targetFromSQL = true
 	}
 
 	// Case 1: No database context — return empty result set.
@@ -56,12 +58,12 @@ func rewriteShowTablesWithProcessor(sql, currentDB, currentProcessorID string, d
 	}
 
 	// Resolve which processorID to use for filtering.
-	// currentProcessorID takes priority: it means the client reached this database via
-	// "USE <processorID>" with DefaultProcessorDatabase, so we must filter by that specific
-	// processorID even if targetDB also has an explicit entry in dbProcessors.
+	// currentProcessorID is only used when the FROM clause did not override the database.
+	// If FROM/IN explicitly names a database, use the dbProcessors mapping for that database
+	// (so SHOW TABLES FROM sentio_coinbase always uses "coinbase", regardless of connection state).
 	processorID := ""
-	if targetDB == currentDB && currentProcessorID != "" {
-		processorID = currentProcessorID // Case 3: per-connection processor context (highest priority)
+	if !targetFromSQL && currentProcessorID != "" {
+		processorID = currentProcessorID // Case 3: per-connection processor context
 	} else if pid, ok := dbProcessors[targetDB]; ok {
 		processorID = pid // Case 2: explicit mapping
 	}
