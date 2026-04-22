@@ -101,6 +101,13 @@ type Config struct {
 	//   "sentio_coinbase": "coinbase"
 	//   "sentio_ethereum": "ethereum"
 	DatabaseProcessors map[string]string `json:"database_processors" yaml:"database_processors"`
+
+	// DefaultProcessorDatabase is the fallback ClickHouse database for processor IDs
+	// that are not explicitly listed in DatabaseProcessors. When a client executes
+	// "USE <processorID>" and the processorID has no explicit mapping, the proxy
+	// rewrites it to "USE <DefaultProcessorDatabase>" and tracks the processorID
+	// for that connection so SHOW TABLES still filters correctly.
+	DefaultProcessorDatabase string `json:"default_processor_database" yaml:"default_processor_database"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON

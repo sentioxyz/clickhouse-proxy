@@ -1201,6 +1201,11 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	currentDB := hello.Database
 	// pendingDB holds the target database of an in-flight USE statement awaiting server confirmation.
 	var pendingDB string
+	// currentProcessorID holds the processor ID for connections using the default database.
+	// Set when a client does "USE <processorID>" that maps to DefaultProcessorDatabase.
+	// Cleared when the client switches to an explicitly-mapped or pass-through database.
+	var currentProcessorID string
+	var pendingProcessorID string
 	// processorToDatabase is the reverse of cfg.DatabaseProcessors (processorID → database).
 	// Built once per connection for O(1) USE-rewrite lookups.
 	processorToDatabase := make(map[string]string, len(p.cfg.DatabaseProcessors))
@@ -1628,11 +1633,13 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				if pendingDB != "" {
 					if sig.IsEndOfStream {
 						currentDB = pendingDB
-						log.Infof("[conn %d] streaming: currentDB confirmed: %q", id, currentDB)
+						currentProcessorID = pendingProcessorID
+						log.Infof("[conn %d] streaming: currentDB confirmed: %q processorID=%q", id, currentDB, currentProcessorID)
 					} else {
 						log.Infof("[conn %d] streaming: USE %q failed (server exception), keeping currentDB=%q", id, pendingDB, currentDB)
 					}
 					pendingDB = ""
+					pendingProcessorID = ""
 				}
 			default:
 			}
@@ -1663,11 +1670,13 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				if pendingDB != "" {
 					if sig.IsEndOfStream {
 						currentDB = pendingDB
-						log.Infof("[conn %d] streaming: currentDB confirmed (post-read): %q", id, currentDB)
+						currentProcessorID = pendingProcessorID
+						log.Infof("[conn %d] streaming: currentDB confirmed (post-read): %q processorID=%q", id, currentDB, currentProcessorID)
 					} else {
 						log.Infof("[conn %d] streaming: USE %q failed (server exception), keeping currentDB=%q", id, pendingDB, currentDB)
 					}
 					pendingDB = ""
+					pendingProcessorID = ""
 				}
 			default:
 			}
@@ -1701,6 +1710,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 					if err == nil && rewrittenSQL != "" && physicalDB != "" && physicalDB != rawTarget {
 						eq.Body = rewrittenSQL
 						pendingDB = physicalDB
+						pendingProcessorID = ""
 						log.Infof("[conn %d] streaming: USE rewrite (via rewriter): %q -> %q (pendingDB=%q)", id, rawTarget, eq.Body, pendingDB)
 						useHandled = true
 					} else if err != nil {
@@ -1712,13 +1722,21 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				// Fallback: regex-based rewriting
 				if !useHandled {
 					if actualDB, ok := processorToDatabase[rawTarget]; ok {
-						// Client used processorID — rewrite to actual database name
+						// Client used a known processorID — rewrite to its explicit database.
 						eq.Body = "USE " + actualDB
 						pendingDB = actualDB
+						pendingProcessorID = ""
 						log.Infof("[conn %d] streaming: USE rewrite (regex fallback): %q -> USE %q", id, rawTarget, actualDB)
+					} else if p.cfg.DefaultProcessorDatabase != "" {
+						// processorID not in explicit map — fall back to default database.
+						eq.Body = "USE " + p.cfg.DefaultProcessorDatabase
+						pendingDB = p.cfg.DefaultProcessorDatabase
+						pendingProcessorID = rawTarget
+						log.Infof("[conn %d] streaming: USE rewrite (default db): %q -> USE %q (processorID=%q)", id, rawTarget, p.cfg.DefaultProcessorDatabase, rawTarget)
 					} else {
-						// Client typed an actual DB name (or unknown) — forward as-is
+						// Client typed an actual DB name (or unknown, no default) — forward as-is.
 						pendingDB = rawTarget
+						pendingProcessorID = ""
 						log.Infof("[conn %d] streaming: USE detected, pendingDB=%q", id, pendingDB)
 					}
 				}
@@ -1793,7 +1811,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			if isShowTables(eq.Body) {
 				// Try rewriter first (AST-based, more accurate)
 				if p.rewriter != nil && !isRoute {
-					rewrittenSQL, handled, err := p.rewriter.RewriteShowTables(ctx, eq.Body, currentDB, p.cfg.DatabaseProcessors)
+					rewrittenSQL, handled, err := p.rewriter.RewriteShowTables(ctx, eq.Body, currentDB, currentProcessorID, p.cfg.DatabaseProcessors)
 					if err == nil && handled {
 						log.Infof("[conn %d] streaming: SHOW TABLES rewrite (via rewriter, currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewrittenSQL)
 						eq.Body = rewrittenSQL
@@ -1808,7 +1826,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				}
 				// Fallback: regex-based rewriting
 				if !showTablesHandled {
-					rewritten := rewriteShowTablesWithProcessor(eq.Body, currentDB, p.cfg.DatabaseProcessors)
+					rewritten := rewriteShowTablesWithProcessor(eq.Body, currentDB, currentProcessorID, p.cfg.DatabaseProcessors)
 					if rewritten != "" {
 						// Case 1 (empty currentDB→empty result) or Case 2 (prefix filter)
 						log.Infof("[conn %d] streaming: SHOW TABLES rewrite (regex fallback, currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewritten)

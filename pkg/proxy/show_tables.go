@@ -29,21 +29,20 @@ func isShowTables(sql string) bool {
 //  1. If the SQL contains FROM/IN <db>, that <db> takes priority.
 //  2. Otherwise, fall back to the connection-level currentDB.
 //
-// Three cases after targetDB is resolved:
+// Four cases after targetDB is resolved:
 //
-//  1. targetDB is empty (no USE executed, Hello carried no database, AND no FROM/IN):
-//     → return "SELECT name FROM system.tables WHERE 1 = 0" (empty result set).
+//  1. targetDB is empty: → "SELECT name FROM system.tables WHERE 1 = 0".
 //     Security: do not leak table names without a known database context.
 //
-//  2. targetDB is found in dbProcessors (it is a processor database):
-//     → return SELECT filtered by processorID prefix, with explicit database = '<targetDB>'.
-//     IMPORTANT: we use an explicit database literal instead of currentDatabase()
-//     because the FROM/IN clause may target a different database than the session's
-//     current one, making currentDatabase() incorrect.
+//  2. targetDB is found in dbProcessors: → SELECT filtered by that processorID prefix.
 //
-//  3. targetDB is not found in dbProcessors (e.g. "system", "default"):
+//  3. targetDB is not in dbProcessors, but currentProcessorID is set (the connection
+//     reached this database via "USE <processorID>" with DefaultProcessorDatabase):
+//     → SELECT filtered by currentProcessorID prefix in targetDB.
+//
+//  4. targetDB not in dbProcessors and no currentProcessorID:
 //     → return "" as a sentinel meaning "no rewrite", caller passes through.
-func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[string]string) string {
+func rewriteShowTablesWithProcessor(sql, currentDB, currentProcessorID string, dbProcessors map[string]string) string {
 	// Parse optional FROM/IN <db> override inside the SQL itself.
 	targetDB := currentDB
 	m := showTablesRegex.FindStringSubmatch(strings.TrimSpace(sql))
@@ -56,10 +55,15 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 		return "SELECT name FROM system.tables WHERE 1 = 0"
 	}
 
-	// Case 2: Database has a configured processor — apply prefix filter.
-	// Use explicit database literal (not currentDatabase()) to correctly handle
-	// SHOW TABLES FROM <other_db> where <other_db> != session's current database.
-	if processorID, ok := dbProcessors[targetDB]; ok {
+	// Resolve which processorID to use for filtering.
+	processorID := ""
+	if pid, ok := dbProcessors[targetDB]; ok {
+		processorID = pid // Case 2: explicit mapping
+	} else if targetDB == currentDB && currentProcessorID != "" {
+		processorID = currentProcessorID // Case 3: default database with tracked processorID
+	}
+
+	if processorID != "" {
 		// Use a subquery to filter rows first, then apply multiIf in the outer query.
 		// ClickHouse allows SELECT aliases to be referenced in WHERE, so if both the
 		// outer column and the alias are named "name", the WHERE clause would see the
@@ -71,8 +75,7 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 		)
 	}
 
-	// Case 3: Database not in config (system / default / non-processor DB).
-	// Return "" as sentinel: caller will forward original SHOW TABLES unchanged.
+	// Case 4: Database not in config and no processorID context — passthrough.
 	return ""
 }
 

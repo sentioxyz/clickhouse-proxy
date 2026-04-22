@@ -39,7 +39,7 @@ type Rewriter interface {
 	// Returns (rewritten_sql, handled, error).
 	// handled=true means the SQL was rewritten (or should return empty result).
 	// handled=false means passthrough (db not in processor map).
-	RewriteShowTables(ctx context.Context, sql string, currentDB string, dbProcessors map[string]string) (string, bool, error)
+	RewriteShowTables(ctx context.Context, sql string, currentDB string, currentProcessorID string, dbProcessors map[string]string) (string, bool, error)
 	// Close closes the gRPC connection
 	Close() error
 }
@@ -672,7 +672,7 @@ func (r *SentioNetworkRewriter) RewriteUse(ctx context.Context, sql string, dbMa
 //
 // Compatible with old rewriters that don't support ShowTablesRewrite: those will return
 // a gRPC error for the unknown op, which the caller treats as "use regex fallback".
-func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, dbProcessors map[string]string) (string, bool, error) {
+func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, currentProcessorID string, dbProcessors map[string]string) (string, bool, error) {
 	// Determine targetDB: FROM/IN <db> in SQL takes priority, else fall back to currentDB.
 	// This mirrors the existing regex logic in rewriteShowTablesWithProcessor.
 	targetDB := currentDB
@@ -688,8 +688,12 @@ func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql strin
 	// Look up processor ID for this database.
 	processorID, ok := dbProcessors[targetDB]
 	if !ok {
-		// Database not in processor map → caller should passthrough as-is.
-		return sql, false, nil
+		if targetDB == currentDB && currentProcessorID != "" {
+			processorID = currentProcessorID
+		} else {
+			// Database not in processor map → caller should passthrough as-is.
+			return sql, false, nil
+		}
 	}
 
 	// Send ShowTablesRewrite request directly.
@@ -826,7 +830,7 @@ func (n NoopRewriter) RewriteUse(ctx context.Context, sql string, dbMap map[stri
 	return sql, "", nil
 }
 
-func (n NoopRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, dbProcessors map[string]string) (string, bool, error) {
+func (n NoopRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, currentProcessorID string, dbProcessors map[string]string) (string, bool, error) {
 	return sql, false, nil
 }
 
