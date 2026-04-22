@@ -666,7 +666,35 @@ func (r *SentioNetworkRewriter) RewriteUse(ctx context.Context, sql string, dbMa
 
 // RewriteShowTables rewrites SHOW TABLES using the sql-rewriter's ShowTablesRewrite op.
 // Returns (rewritten_sql, handled, error).
+// handled=true  → rewritten_sql should be used.
+// handled=false → caller should passthrough (DB not in processor map).
+// error != nil  → rewriter unavailable/doesn't support op; caller should use regex fallback.
+//
+// Compatible with old rewriters that don't support ShowTablesRewrite: those will return
+// a gRPC error for the unknown op, which the caller treats as "use regex fallback".
 func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, dbProcessors map[string]string) (string, bool, error) {
+	// Determine targetDB: FROM/IN <db> in SQL takes priority, else fall back to currentDB.
+	// This mirrors the existing regex logic in rewriteShowTablesWithProcessor.
+	targetDB := currentDB
+	if m := showTablesRegex.FindStringSubmatch(strings.TrimSpace(sql)); len(m) > 1 && m[1] != "" {
+		targetDB = strings.Trim(m[1], "`\"")
+	}
+
+	// No database context → return empty result set (security: don't leak table names).
+	if targetDB == "" {
+		return "SELECT name FROM system.tables WHERE 1 = 0", true, nil
+	}
+
+	// Look up processor ID for this database.
+	processorID, ok := dbProcessors[targetDB]
+	if !ok {
+		// Database not in processor map → caller should passthrough as-is.
+		return sql, false, nil
+	}
+
+	// Send ShowTablesRewrite request directly.
+	// Old rewriters that don't support this op will return an error, causing the
+	// caller to fall back to the regex path (rewriteShowTablesWithProcessor).
 	timeout := r.config.Timeout
 	if timeout == 0 {
 		timeout = 5 * time.Second
@@ -674,51 +702,7 @@ func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql strin
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// First, parse the SQL to check if it's a SHOW TABLES and extract FROM <db> if present.
-	// We send the SQL without rewrite options first to get the statement_type and let the
-	// rewriter parse the FROM clause accurately via AST.
-	parseReq := &pb.RewriteSQLRequest{
-		Sql:     sql,
-		Options: nil, // no rewrite options, just parse
-	}
-	parseResp, err := r.grpcClient.Rewrite(ctxWithTimeout, parseReq)
-	if err != nil {
-		return "", false, fmt.Errorf("gRPC RewriteShowTables parse call failed: %w", err)
-	}
-	if parseResp.Code != pb.RewriteCode_Success {
-		return "", false, fmt.Errorf("rewriter SHOW TABLES parse error: %s", parseResp.Message)
-	}
-
-	// Verify it's actually a SHOW TABLES type
-	if parseResp.StatementType != "SHOW_TABLES" {
-		return sql, false, nil
-	}
-
-	// Determine targetDB: the rewriter's parsed SQL may contain FROM <db>,
-	// but for simplicity we use the same logic as the current proxy:
-	// Extract FROM/IN <db> from the original SQL, fall back to currentDB.
-	targetDB := currentDB
-	if m := showTablesRegex.FindStringSubmatch(strings.TrimSpace(sql)); len(m) > 1 && m[1] != "" {
-		targetDB = strings.Trim(m[1], "`\"")
-	}
-
-	// No database context → return empty result set
-	if targetDB == "" {
-		return "SELECT name FROM system.tables WHERE 1 = 0", true, nil
-	}
-
-	// Look up processor ID for this database
-	processorID, ok := dbProcessors[targetDB]
-	if !ok {
-		// Database not in processor map → passthrough
-		return sql, false, nil
-	}
-
-	// Send ShowTablesRewrite request
-	ctxWithTimeout2, cancel2 := context.WithTimeout(ctx, timeout)
-	defer cancel2()
-
-	rewriteReq := &pb.RewriteSQLRequest{
+	req := &pb.RewriteSQLRequest{
 		Sql: sql,
 		Options: []*pb.RewriteOption{
 			{
@@ -733,16 +717,24 @@ func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql strin
 		},
 	}
 
-	rewriteResp, err := r.grpcClient.Rewrite(ctxWithTimeout2, rewriteReq)
+	resp, err := r.grpcClient.Rewrite(ctxWithTimeout, req)
 	if err != nil {
-		return "", false, fmt.Errorf("gRPC RewriteShowTables rewrite call failed: %w", err)
+		return "", false, fmt.Errorf("gRPC RewriteShowTables call failed: %w", err)
 	}
-	if rewriteResp.Code != pb.RewriteCode_Success {
-		return "", false, fmt.Errorf("rewriter SHOW TABLES rewrite error: %s", rewriteResp.Message)
+	if resp.Code != pb.RewriteCode_Success {
+		return "", false, fmt.Errorf("rewriter SHOW TABLES error: %s", resp.Message)
 	}
 
-	log.Debugf("RewriteShowTables: %q -> %q", sql, rewriteResp.SqlAfterRewrite)
-	return rewriteResp.SqlAfterRewrite, true, nil
+	// Old rewriters silently ignore unknown ops (default: break in switch) and return
+	// the original SQL unchanged with code=Success. Detect this by checking whether
+	// the response actually contains a rewritten SELECT from system.tables.
+	// If not, fall back to the regex path.
+	if !strings.Contains(resp.SqlAfterRewrite, "system.tables") {
+		return "", false, fmt.Errorf("rewriter returned original SQL unchanged (old rewriter, op not supported), using regex fallback")
+	}
+
+	log.Debugf("RewriteShowTables: %q -> %q", sql, resp.SqlAfterRewrite)
+	return resp.SqlAfterRewrite, true, nil
 }
 
 // extractDBFromUseSQL extracts the database name from a "USE <db>" SQL string.
