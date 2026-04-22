@@ -1754,7 +1754,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				rewritten := rewriteShowTablesWithProcessor(eq.Body, currentDB, p.cfg.DatabaseProcessors)
 				if rewritten != "" {
 					// Case 1 (empty currentDB→empty result) or Case 2 (prefix filter)
-					log.Infof("[conn %d] streaming: SHOW TABLES rewrite (db=%q): %q -> %q", id, currentDB, eq.Body, rewritten)
+					log.Infof("[conn %d] streaming: SHOW TABLES rewrite (currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewritten)
 					eq.Body = rewritten
 					showTablesHandled = true
 				} else {

@@ -25,14 +25,21 @@ func isShowTables(sql string) bool {
 // rewriteShowTablesWithProcessor rewrites a SHOW TABLES statement into a
 // SELECT from system.tables with processor-prefix filtering.
 //
-// Three cases:
+// targetDB resolution order:
+//  1. If the SQL contains FROM/IN <db>, that <db> takes priority.
+//  2. Otherwise, fall back to the connection-level currentDB.
 //
-//  1. targetDB is empty (no USE executed, Hello carried no database):
+// Three cases after targetDB is resolved:
+//
+//  1. targetDB is empty (no USE executed, Hello carried no database, AND no FROM/IN):
 //     → return "SELECT name FROM system.tables WHERE 1 = 0" (empty result set).
 //     Security: do not leak table names without a known database context.
 //
 //  2. targetDB is found in dbProcessors (it is a processor database):
-//     → return SELECT filtered by processorID prefix.
+//     → return SELECT filtered by processorID prefix, with explicit database = '<targetDB>'.
+//     IMPORTANT: we use an explicit database literal instead of currentDatabase()
+//     because the FROM/IN clause may target a different database than the session's
+//     current one, making currentDatabase() incorrect.
 //
 //  3. targetDB is not found in dbProcessors (e.g. "system", "default"):
 //     → return "" as a sentinel meaning "no rewrite", caller passes through.
@@ -50,16 +57,25 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 	}
 
 	// Case 2: Database has a configured processor — apply prefix filter.
+	// Use explicit database literal (not currentDatabase()) to correctly handle
+	// SHOW TABLES FROM <other_db> where <other_db> != session's current database.
 	if processorID, ok := dbProcessors[targetDB]; ok {
 		return fmt.Sprintf(
-			"SELECT name FROM system.tables WHERE database = currentDatabase() AND name LIKE '%s%%'",
-			escapeSQLLike(processorID),
+			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%'",
+			escapeSQLString(targetDB),
+			escapeSQLString(escapeSQLLike(processorID)),
 		)
 	}
 
 	// Case 3: Database not in config (system / default / non-processor DB).
 	// Return "" as sentinel: caller will forward original SHOW TABLES unchanged.
 	return ""
+}
+
+// escapeSQLString escapes single quotes for safe embedding in a SQL string literal.
+// ClickHouse uses standard SQL escaping: ' → ''
+func escapeSQLString(s string) string {
+	return strings.ReplaceAll(s, "'", "''")
 }
 
 // escapeSQLLike escapes the special LIKE characters %, _ and \ in a pattern value.
