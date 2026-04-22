@@ -424,13 +424,18 @@ func (x *RewriteCommonTableExprArgs) GetCteMap() map[string]*RewriteCommonTableE
 }
 
 // DatabaseNameRewrite rewrites USE <db> statements.
-// The map key is the virtual database name (e.g. processorID),
-// value is the physical database name.
+// Three branches evaluated in order:
+//  1. database_map hit (processorID → physical): "USE <physical>"
+//  2. known_physical_databases hit: leave SQL unchanged
+//  3. default_database non-empty: "USE <default_database>",
+//     response.matched_processor_id = <target>
 type RewriteDatabaseNameArgs struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	DatabaseMap   map[string]string      `protobuf:"bytes,1,rep,name=database_map,json=databaseMap,proto3" json:"database_map,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state                  protoimpl.MessageState `protogen:"open.v1"`
+	DatabaseMap            map[string]string      `protobuf:"bytes,1,rep,name=database_map,json=databaseMap,proto3" json:"database_map,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	KnownPhysicalDatabases []string               `protobuf:"bytes,2,rep,name=known_physical_databases,json=knownPhysicalDatabases,proto3" json:"known_physical_databases,omitempty"`
+	DefaultDatabase        string                 `protobuf:"bytes,3,opt,name=default_database,json=defaultDatabase,proto3" json:"default_database,omitempty"`
+	unknownFields          protoimpl.UnknownFields
+	sizeCache              protoimpl.SizeCache
 }
 
 func (x *RewriteDatabaseNameArgs) Reset() {
@@ -470,14 +475,41 @@ func (x *RewriteDatabaseNameArgs) GetDatabaseMap() map[string]string {
 	return nil
 }
 
+func (x *RewriteDatabaseNameArgs) GetKnownPhysicalDatabases() []string {
+	if x != nil {
+		return x.KnownPhysicalDatabases
+	}
+	return nil
+}
+
+func (x *RewriteDatabaseNameArgs) GetDefaultDatabase() string {
+	if x != nil {
+		return x.DefaultDatabase
+	}
+	return ""
+}
+
 // ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
-// processor_id is used as prefix filter for table names.
+// The server parses the AST's FROM/IN clause itself and resolves the target
+// database + processor_id using the context below.
+// Resolution order:
+//
+//	targetDB := FROM_clause > current_db > database (legacy)
+//	empty targetDB             → empty-result sentinel SELECT
+//	current_processor_id, if targetDB == current_db and SQL had no FROM
+//	else db_processors[targetDB]
+//	else                       → response.show_tables_passthrough = true
 type RewriteShowTablesArgs struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Database      string                 `protobuf:"bytes,1,opt,name=database,proto3" json:"database,omitempty"`                          // physical database to query
-	ProcessorId   string                 `protobuf:"bytes,2,opt,name=processor_id,json=processorId,proto3" json:"processor_id,omitempty"` // processor prefix for LIKE filter
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Legacy pre-resolved pair; new callers should leave these empty and fill
+	// current_db + current_processor_id + db_processors instead.
+	Database           string            `protobuf:"bytes,1,opt,name=database,proto3" json:"database,omitempty"`
+	ProcessorId        string            `protobuf:"bytes,2,opt,name=processor_id,json=processorId,proto3" json:"processor_id,omitempty"`
+	CurrentDb          string            `protobuf:"bytes,3,opt,name=current_db,json=currentDb,proto3" json:"current_db,omitempty"`
+	CurrentProcessorId string            `protobuf:"bytes,4,opt,name=current_processor_id,json=currentProcessorId,proto3" json:"current_processor_id,omitempty"`
+	DbProcessors       map[string]string `protobuf:"bytes,5,rep,name=db_processors,json=dbProcessors,proto3" json:"db_processors,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"` // physicalDB → processorID
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *RewriteShowTablesArgs) Reset() {
@@ -522,6 +554,27 @@ func (x *RewriteShowTablesArgs) GetProcessorId() string {
 		return x.ProcessorId
 	}
 	return ""
+}
+
+func (x *RewriteShowTablesArgs) GetCurrentDb() string {
+	if x != nil {
+		return x.CurrentDb
+	}
+	return ""
+}
+
+func (x *RewriteShowTablesArgs) GetCurrentProcessorId() string {
+	if x != nil {
+		return x.CurrentProcessorId
+	}
+	return ""
+}
+
+func (x *RewriteShowTablesArgs) GetDbProcessors() map[string]string {
+	if x != nil {
+		return x.DbProcessors
+	}
+	return nil
 }
 
 type RewriteSettingsArgs struct {
@@ -797,8 +850,14 @@ type RewriteSQLResponse struct {
 	SqlAfterRewrite            string                 `protobuf:"bytes,3,opt,name=sql_after_rewrite,json=sqlAfterRewrite,proto3" json:"sql_after_rewrite,omitempty"`
 	OriginalAccessedTableNames []string               `protobuf:"bytes,4,rep,name=original_accessed_table_names,json=originalAccessedTableNames,proto3" json:"original_accessed_table_names,omitempty"`
 	StatementType              string                 `protobuf:"bytes,5,opt,name=statement_type,json=statementType,proto3" json:"statement_type,omitempty"` // "SELECT", "USE", "SHOW_TABLES", etc.
-	unknownFields              protoimpl.UnknownFields
-	sizeCache                  protoimpl.SizeCache
+	// USE DatabaseNameRewrite: original target when the default_database
+	// fallback branch fired; caller tracks it as the connection's processor_id.
+	MatchedProcessorId string `protobuf:"bytes,6,opt,name=matched_processor_id,json=matchedProcessorId,proto3" json:"matched_processor_id,omitempty"`
+	// SHOW TABLES: true when the rewriter asks caller to pass original SQL
+	// through (targetDB has no processor mapping and no processor context).
+	ShowTablesPassthrough bool `protobuf:"varint,7,opt,name=show_tables_passthrough,json=showTablesPassthrough,proto3" json:"show_tables_passthrough,omitempty"`
+	unknownFields         protoimpl.UnknownFields
+	sizeCache             protoimpl.SizeCache
 }
 
 func (x *RewriteSQLResponse) Reset() {
@@ -864,6 +923,20 @@ func (x *RewriteSQLResponse) GetStatementType() string {
 		return x.StatementType
 	}
 	return ""
+}
+
+func (x *RewriteSQLResponse) GetMatchedProcessorId() string {
+	if x != nil {
+		return x.MatchedProcessorId
+	}
+	return ""
+}
+
+func (x *RewriteSQLResponse) GetShowTablesPassthrough() bool {
+	if x != nil {
+		return x.ShowTablesPassthrough
+	}
+	return false
 }
 
 type RewriteErrorMessageRequest struct {
@@ -1235,7 +1308,7 @@ type RewriteSettingsArgs_Setting struct {
 
 func (x *RewriteSettingsArgs_Setting) Reset() {
 	*x = RewriteSettingsArgs_Setting{}
-	mi := &file_protos_rewriter_proto_msgTypes[21]
+	mi := &file_protos_rewriter_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1247,7 +1320,7 @@ func (x *RewriteSettingsArgs_Setting) String() string {
 func (*RewriteSettingsArgs_Setting) ProtoMessage() {}
 
 func (x *RewriteSettingsArgs_Setting) ProtoReflect() protoreflect.Message {
-	mi := &file_protos_rewriter_proto_msgTypes[21]
+	mi := &file_protos_rewriter_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1394,15 +1467,24 @@ const file_protos_rewriter_proto_rawDesc = "" +
 	"\x03sql\x18\x02 \x01(\tR\x03sql\x1ao\n" +
 	"\vCteMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12J\n" +
-	"\x05value\x18\x02 \x01(\v24.rewriter.RewriteCommonTableExprArgs.CommonTableExprR\x05value:\x028\x01\"\xb0\x01\n" +
+	"\x05value\x18\x02 \x01(\v24.rewriter.RewriteCommonTableExprArgs.CommonTableExprR\x05value:\x028\x01\"\x95\x02\n" +
 	"\x17RewriteDatabaseNameArgs\x12U\n" +
-	"\fdatabase_map\x18\x01 \x03(\v22.rewriter.RewriteDatabaseNameArgs.DatabaseMapEntryR\vdatabaseMap\x1a>\n" +
+	"\fdatabase_map\x18\x01 \x03(\v22.rewriter.RewriteDatabaseNameArgs.DatabaseMapEntryR\vdatabaseMap\x128\n" +
+	"\x18known_physical_databases\x18\x02 \x03(\tR\x16knownPhysicalDatabases\x12)\n" +
+	"\x10default_database\x18\x03 \x01(\tR\x0fdefaultDatabase\x1a>\n" +
 	"\x10DatabaseMapEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"V\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xc0\x02\n" +
 	"\x15RewriteShowTablesArgs\x12\x1a\n" +
 	"\bdatabase\x18\x01 \x01(\tR\bdatabase\x12!\n" +
-	"\fprocessor_id\x18\x02 \x01(\tR\vprocessorId\"\xb4\x02\n" +
+	"\fprocessor_id\x18\x02 \x01(\tR\vprocessorId\x12\x1d\n" +
+	"\n" +
+	"current_db\x18\x03 \x01(\tR\tcurrentDb\x120\n" +
+	"\x14current_processor_id\x18\x04 \x01(\tR\x12currentProcessorId\x12V\n" +
+	"\rdb_processors\x18\x05 \x03(\v21.rewriter.RewriteShowTablesArgs.DbProcessorsEntryR\fdbProcessors\x1a?\n" +
+	"\x11DbProcessorsEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\xb4\x02\n" +
 	"\x13RewriteSettingsArgs\x12A\n" +
 	"\bsettings\x18\x01 \x03(\v2%.rewriter.RewriteSettingsArgs.SettingR\bsettings\x1a\xd9\x01\n" +
 	"\aSetting\x12\x10\n" +
@@ -1428,13 +1510,15 @@ const file_protos_rewriter_proto_rawDesc = "" +
 	"\x05value\"X\n" +
 	"\x11RewriteSQLRequest\x12\x10\n" +
 	"\x03sql\x18\x01 \x01(\tR\x03sql\x121\n" +
-	"\aoptions\x18\x02 \x03(\v2\x17.rewriter.RewriteOptionR\aoptions\"\xef\x01\n" +
+	"\aoptions\x18\x02 \x03(\v2\x17.rewriter.RewriteOptionR\aoptions\"\xd9\x02\n" +
 	"\x12RewriteSQLResponse\x12)\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x15.rewriter.RewriteCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12*\n" +
 	"\x11sql_after_rewrite\x18\x03 \x01(\tR\x0fsqlAfterRewrite\x12A\n" +
 	"\x1doriginal_accessed_table_names\x18\x04 \x03(\tR\x1aoriginalAccessedTableNames\x12%\n" +
-	"\x0estatement_type\x18\x05 \x01(\tR\rstatementType\"\x86\x01\n" +
+	"\x0estatement_type\x18\x05 \x01(\tR\rstatementType\x120\n" +
+	"\x14matched_processor_id\x18\x06 \x01(\tR\x12matchedProcessorId\x126\n" +
+	"\x17show_tables_passthrough\x18\a \x01(\bR\x15showTablesPassthrough\"\x86\x01\n" +
 	"\x1aRewriteErrorMessageRequest\x12\x10\n" +
 	"\x03sql\x18\x01 \x01(\tR\x03sql\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x121\n" +
@@ -1479,7 +1563,7 @@ func file_protos_rewriter_proto_rawDescGZIP() []byte {
 }
 
 var file_protos_rewriter_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_protos_rewriter_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_protos_rewriter_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
 var file_protos_rewriter_proto_goTypes = []any{
 	(RewriteOp)(0),                                 // 0: rewriter.RewriteOp
 	(SettingType)(0),                               // 1: rewriter.SettingType
@@ -1505,7 +1589,8 @@ var file_protos_rewriter_proto_goTypes = []any{
 	(*RewriteCommonTableExprArgs_CommonTableExpr)(nil), // 21: rewriter.RewriteCommonTableExprArgs.CommonTableExpr
 	nil,                                 // 22: rewriter.RewriteCommonTableExprArgs.CteMapEntry
 	nil,                                 // 23: rewriter.RewriteDatabaseNameArgs.DatabaseMapEntry
-	(*RewriteSettingsArgs_Setting)(nil), // 24: rewriter.RewriteSettingsArgs.Setting
+	nil,                                 // 24: rewriter.RewriteShowTablesArgs.DbProcessorsEntry
+	(*RewriteSettingsArgs_Setting)(nil), // 25: rewriter.RewriteSettingsArgs.Setting
 }
 var file_protos_rewriter_proto_depIdxs = []int32{
 	17, // 0: rewriter.RewriteTableNameArgs.table_map:type_name -> rewriter.RewriteTableNameArgs.TableMapEntry
@@ -1514,32 +1599,33 @@ var file_protos_rewriter_proto_depIdxs = []int32{
 	20, // 3: rewriter.RewriteLimitArgs.replace_limit:type_name -> rewriter.RewriteLimitArgs.ReplaceLimit
 	22, // 4: rewriter.RewriteCommonTableExprArgs.cte_map:type_name -> rewriter.RewriteCommonTableExprArgs.CteMapEntry
 	23, // 5: rewriter.RewriteDatabaseNameArgs.database_map:type_name -> rewriter.RewriteDatabaseNameArgs.DatabaseMapEntry
-	24, // 6: rewriter.RewriteSettingsArgs.settings:type_name -> rewriter.RewriteSettingsArgs.Setting
-	0,  // 7: rewriter.RewriteOption.op:type_name -> rewriter.RewriteOp
-	3,  // 8: rewriter.RewriteOption.table_name_args:type_name -> rewriter.RewriteTableNameArgs
-	4,  // 9: rewriter.RewriteOption.limit_args:type_name -> rewriter.RewriteLimitArgs
-	5,  // 10: rewriter.RewriteOption.offset_args:type_name -> rewriter.RewriteOffsetArgs
-	9,  // 11: rewriter.RewriteOption.settings_args:type_name -> rewriter.RewriteSettingsArgs
-	6,  // 12: rewriter.RewriteOption.common_table_expr_args:type_name -> rewriter.RewriteCommonTableExprArgs
-	7,  // 13: rewriter.RewriteOption.database_name_args:type_name -> rewriter.RewriteDatabaseNameArgs
-	8,  // 14: rewriter.RewriteOption.show_tables_args:type_name -> rewriter.RewriteShowTablesArgs
-	10, // 15: rewriter.RewriteSQLRequest.options:type_name -> rewriter.RewriteOption
-	2,  // 16: rewriter.RewriteSQLResponse.code:type_name -> rewriter.RewriteCode
-	10, // 17: rewriter.RewriteErrorMessageRequest.options:type_name -> rewriter.RewriteOption
-	2,  // 18: rewriter.RewriteErrorMessageResponse.code:type_name -> rewriter.RewriteCode
-	15, // 19: rewriter.RewriteTableNameArgs.RemoteTableMapEntry.value:type_name -> rewriter.RewriteTableNameArgs.RemoteTable
-	16, // 20: rewriter.RewriteTableNameArgs.TableWithDatabaseMapEntry.value:type_name -> rewriter.RewriteTableNameArgs.TableWithDatabase
-	21, // 21: rewriter.RewriteCommonTableExprArgs.CteMapEntry.value:type_name -> rewriter.RewriteCommonTableExprArgs.CommonTableExpr
-	1,  // 22: rewriter.RewriteSettingsArgs.Setting.type:type_name -> rewriter.SettingType
-	11, // 23: rewriter.RewriterService.Rewrite:input_type -> rewriter.RewriteSQLRequest
-	13, // 24: rewriter.RewriterService.RewriteErrorMessage:input_type -> rewriter.RewriteErrorMessageRequest
-	12, // 25: rewriter.RewriterService.Rewrite:output_type -> rewriter.RewriteSQLResponse
-	14, // 26: rewriter.RewriterService.RewriteErrorMessage:output_type -> rewriter.RewriteErrorMessageResponse
-	25, // [25:27] is the sub-list for method output_type
-	23, // [23:25] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	24, // 6: rewriter.RewriteShowTablesArgs.db_processors:type_name -> rewriter.RewriteShowTablesArgs.DbProcessorsEntry
+	25, // 7: rewriter.RewriteSettingsArgs.settings:type_name -> rewriter.RewriteSettingsArgs.Setting
+	0,  // 8: rewriter.RewriteOption.op:type_name -> rewriter.RewriteOp
+	3,  // 9: rewriter.RewriteOption.table_name_args:type_name -> rewriter.RewriteTableNameArgs
+	4,  // 10: rewriter.RewriteOption.limit_args:type_name -> rewriter.RewriteLimitArgs
+	5,  // 11: rewriter.RewriteOption.offset_args:type_name -> rewriter.RewriteOffsetArgs
+	9,  // 12: rewriter.RewriteOption.settings_args:type_name -> rewriter.RewriteSettingsArgs
+	6,  // 13: rewriter.RewriteOption.common_table_expr_args:type_name -> rewriter.RewriteCommonTableExprArgs
+	7,  // 14: rewriter.RewriteOption.database_name_args:type_name -> rewriter.RewriteDatabaseNameArgs
+	8,  // 15: rewriter.RewriteOption.show_tables_args:type_name -> rewriter.RewriteShowTablesArgs
+	10, // 16: rewriter.RewriteSQLRequest.options:type_name -> rewriter.RewriteOption
+	2,  // 17: rewriter.RewriteSQLResponse.code:type_name -> rewriter.RewriteCode
+	10, // 18: rewriter.RewriteErrorMessageRequest.options:type_name -> rewriter.RewriteOption
+	2,  // 19: rewriter.RewriteErrorMessageResponse.code:type_name -> rewriter.RewriteCode
+	15, // 20: rewriter.RewriteTableNameArgs.RemoteTableMapEntry.value:type_name -> rewriter.RewriteTableNameArgs.RemoteTable
+	16, // 21: rewriter.RewriteTableNameArgs.TableWithDatabaseMapEntry.value:type_name -> rewriter.RewriteTableNameArgs.TableWithDatabase
+	21, // 22: rewriter.RewriteCommonTableExprArgs.CteMapEntry.value:type_name -> rewriter.RewriteCommonTableExprArgs.CommonTableExpr
+	1,  // 23: rewriter.RewriteSettingsArgs.Setting.type:type_name -> rewriter.SettingType
+	11, // 24: rewriter.RewriterService.Rewrite:input_type -> rewriter.RewriteSQLRequest
+	13, // 25: rewriter.RewriterService.RewriteErrorMessage:input_type -> rewriter.RewriteErrorMessageRequest
+	12, // 26: rewriter.RewriterService.Rewrite:output_type -> rewriter.RewriteSQLResponse
+	14, // 27: rewriter.RewriterService.RewriteErrorMessage:output_type -> rewriter.RewriteErrorMessageResponse
+	26, // [26:28] is the sub-list for method output_type
+	24, // [24:26] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_protos_rewriter_proto_init() }
@@ -1560,7 +1646,7 @@ func file_protos_rewriter_proto_init() {
 		(*RewriteOption_DatabaseNameArgs)(nil),
 		(*RewriteOption_ShowTablesArgs)(nil),
 	}
-	file_protos_rewriter_proto_msgTypes[21].OneofWrappers = []any{
+	file_protos_rewriter_proto_msgTypes[22].OneofWrappers = []any{
 		(*RewriteSettingsArgs_Setting_StringValue)(nil),
 		(*RewriteSettingsArgs_Setting_BoolValue)(nil),
 		(*RewriteSettingsArgs_Setting_IntValue)(nil),
@@ -1572,7 +1658,7 @@ func file_protos_rewriter_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_protos_rewriter_proto_rawDesc), len(file_protos_rewriter_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   22,
+			NumMessages:   23,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

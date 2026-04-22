@@ -1704,19 +1704,33 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			if m := useDBRegexp.FindStringSubmatch(eq.Body); m != nil {
 				rawTarget := strings.Trim(m[1], "`\"")
 				useHandled := false
-				// Try rewriter first (AST-based, more accurate)
-				if p.rewriter != nil && !isRoute && len(processorToDatabase) > 0 {
-					rewrittenSQL, physicalDB, err := p.rewriter.RewriteUse(ctx, eq.Body, processorToDatabase)
-					if err == nil && rewrittenSQL != "" && physicalDB != "" && physicalDB != rawTarget {
+				// Try rewriter first (AST-based, more accurate). It handles the full
+				// three-branch semantics (processorID mapping / known physical DB /
+				// default-DB fallback) in one call.
+				if p.rewriter != nil && !isRoute {
+					// Collect known physical DB names (keys of cfg.DatabaseProcessors).
+					knownPhysicalDBs := make([]string, 0, len(p.cfg.DatabaseProcessors))
+					for db := range p.cfg.DatabaseProcessors {
+						knownPhysicalDBs = append(knownPhysicalDBs, db)
+					}
+					rewrittenSQL, physicalDB, matchedPID, err := p.rewriter.RewriteUse(
+						ctx, eq.Body, processorToDatabase, knownPhysicalDBs, p.cfg.DefaultProcessorDatabase)
+					if err == nil && rewrittenSQL != "" {
 						eq.Body = rewrittenSQL
-						pendingDB = physicalDB
-						pendingProcessorID = ""
-						log.Infof("[conn %d] streaming: USE rewrite (via rewriter): %q -> %q (pendingDB=%q)", id, rawTarget, eq.Body, pendingDB)
+						// physicalDB is derived from the rewritten SQL; if the server
+						// left the SQL unchanged (case 2 "known physical" or case 4
+						// "no match"), physicalDB == rawTarget.
+						if physicalDB != "" {
+							pendingDB = physicalDB
+						} else {
+							pendingDB = rawTarget
+						}
+						pendingProcessorID = matchedPID
+						log.Infof("[conn %d] streaming: USE rewrite (via rewriter): %q -> %q (pendingDB=%q, pendingProcessorID=%q)",
+							id, rawTarget, eq.Body, pendingDB, pendingProcessorID)
 						useHandled = true
 					} else if err != nil {
 						log.Warnf("[conn %d] streaming: USE rewrite via rewriter failed: %v, falling back to regex", id, err)
-					} else if physicalDB == rawTarget {
-						log.Infof("[conn %d] streaming: USE rewrite via rewriter returned unchanged db %q, falling back to regex", id, rawTarget)
 					}
 				}
 				// Fallback: regex-based rewriting

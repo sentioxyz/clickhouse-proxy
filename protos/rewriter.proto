@@ -56,17 +56,35 @@ message RewriteCommonTableExprArgs {
 }
 
 // DatabaseNameRewrite rewrites USE <db> statements.
-// The map key is the virtual database name (e.g. processorID),
-// value is the physical database name.
+// Three branches evaluated in order:
+//   1. database_map hit (processorID → physical): "USE <physical>"
+//   2. known_physical_databases hit: leave SQL unchanged
+//   3. default_database non-empty: "USE <default_database>",
+//      response.matched_processor_id = <target>
 message RewriteDatabaseNameArgs {
     map<string, string> database_map = 1;
+    repeated string known_physical_databases = 2;
+    string default_database = 3;
 }
 
 // ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
-// processor_id is used as prefix filter for table names.
+// The server parses the AST's FROM/IN clause itself and resolves the target
+// database + processor_id using the context below.
+// Resolution order:
+//   targetDB := FROM_clause > current_db > database (legacy)
+//   empty targetDB             → empty-result sentinel SELECT
+//   current_processor_id, if targetDB == current_db and SQL had no FROM
+//   else db_processors[targetDB]
+//   else                       → response.show_tables_passthrough = true
 message RewriteShowTablesArgs {
-    string database = 1;        // physical database to query
-    string processor_id = 2;    // processor prefix for LIKE filter
+    // Legacy pre-resolved pair; new callers should leave these empty and fill
+    // current_db + current_processor_id + db_processors instead.
+    string database = 1;
+    string processor_id = 2;
+
+    string current_db = 3;
+    string current_processor_id = 4;
+    map<string, string> db_processors = 5;  // physicalDB → processorID
 }
 
 enum SettingType {
@@ -120,6 +138,14 @@ message RewriteSQLResponse {
     string sql_after_rewrite = 3;
     repeated string original_accessed_table_names = 4;
     string statement_type = 5;  // "SELECT", "USE", "SHOW_TABLES", etc.
+
+    // USE DatabaseNameRewrite: original target when the default_database
+    // fallback branch fired; caller tracks it as the connection's processor_id.
+    string matched_processor_id = 6;
+
+    // SHOW TABLES: true when the rewriter asks caller to pass original SQL
+    // through (targetDB has no processor mapping and no processor context).
+    bool show_tables_passthrough = 7;
 }
 
 service RewriterService {
