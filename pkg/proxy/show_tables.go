@@ -65,7 +65,7 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 		// outer column and the alias are named "name", the WHERE clause would see the
 		// aliased (already-stripped) value and filter incorrectly.
 		return fmt.Sprintf(
-			"SELECT multiIf(startsWith(name, '%[2]s_'), substring(name, length('%[2]s_') + 1), startsWith(name, '%[2]s'), substring(name, length('%[2]s') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = '%[1]s' AND startsWith(name, '%[2]s'))",
+			"SELECT multiIf(startsWith(name, '%[2]s_'), substring(name, length('%[2]s_') + 1), startsWith(name, '%[2]s.'), substring(name, length('%[2]s.') + 1), startsWith(name, '%[2]s'), substring(name, length('%[2]s') + 1), name) AS name FROM (SELECT name FROM system.tables WHERE database = '%[1]s' AND startsWith(name, '%[2]s'))",
 			escapeSQLString(targetDB),
 			escapeSQLString(processorID),
 		)
