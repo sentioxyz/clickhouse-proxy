@@ -1672,15 +1672,35 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			// post-rewrite actual database (confirmed or rolled back via queryDoneCh).
 			if m := useDBRegexp.FindStringSubmatch(eq.Body); m != nil {
 				rawTarget := strings.Trim(m[1], "`\"")
-				if actualDB, ok := processorToDatabase[rawTarget]; ok {
-					// Client used processorID — rewrite to actual database name
-					eq.Body = "USE " + actualDB
-					pendingDB = actualDB
-					log.Infof("[conn %d] streaming: USE rewrite: %q -> USE %q", id, rawTarget, actualDB)
-				} else {
-					// Client typed an actual DB name (or unknown) — forward as-is
-					pendingDB = rawTarget
-					log.Infof("[conn %d] streaming: USE detected, pendingDB=%q", id, pendingDB)
+				useHandled := false
+				// Try rewriter first (AST-based, more accurate)
+				if p.rewriter != nil && !isRoute && len(processorToDatabase) > 0 {
+					rewrittenSQL, physicalDB, err := p.rewriter.RewriteUse(ctx, eq.Body, processorToDatabase)
+					if err == nil && rewrittenSQL != "" {
+						eq.Body = rewrittenSQL
+						if physicalDB != "" {
+							pendingDB = physicalDB
+						} else {
+							pendingDB = rawTarget
+						}
+						log.Infof("[conn %d] streaming: USE rewrite (via rewriter): %q -> %q (pendingDB=%q)", id, rawTarget, eq.Body, pendingDB)
+						useHandled = true
+					} else if err != nil {
+						log.Warnf("[conn %d] streaming: USE rewrite via rewriter failed: %v, falling back to regex", id, err)
+					}
+				}
+				// Fallback: regex-based rewriting
+				if !useHandled {
+					if actualDB, ok := processorToDatabase[rawTarget]; ok {
+						// Client used processorID — rewrite to actual database name
+						eq.Body = "USE " + actualDB
+						pendingDB = actualDB
+						log.Infof("[conn %d] streaming: USE rewrite (regex fallback): %q -> USE %q", id, rawTarget, actualDB)
+					} else {
+						// Client typed an actual DB name (or unknown) — forward as-is
+						pendingDB = rawTarget
+						log.Infof("[conn %d] streaming: USE detected, pendingDB=%q", id, pendingDB)
+					}
 				}
 			}
 
@@ -1751,16 +1771,34 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			// never leaks table names beyond the processor's own prefix.
 			showTablesHandled := false
 			if isShowTables(eq.Body) {
-				rewritten := rewriteShowTablesWithProcessor(eq.Body, currentDB, p.cfg.DatabaseProcessors)
-				if rewritten != "" {
-					// Case 1 (empty currentDB→empty result) or Case 2 (prefix filter)
-					log.Infof("[conn %d] streaming: SHOW TABLES rewrite (currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewritten)
-					eq.Body = rewritten
-					showTablesHandled = true
-				} else {
-					// Case 3: rewritten=="" means DB is not in database_processors → passthrough
-					log.Infof("[conn %d] streaming: SHOW TABLES passthrough (db=%q not in database_processors)", id, currentDB)
-					showTablesHandled = true // still skip generic rewriter for SHOW TABLES
+				// Try rewriter first (AST-based, more accurate)
+				if p.rewriter != nil && !isRoute {
+					rewrittenSQL, handled, err := p.rewriter.RewriteShowTables(ctx, eq.Body, currentDB, p.cfg.DatabaseProcessors)
+					if err == nil && handled {
+						log.Infof("[conn %d] streaming: SHOW TABLES rewrite (via rewriter, currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewrittenSQL)
+						eq.Body = rewrittenSQL
+						showTablesHandled = true
+					} else if err == nil && !handled {
+						// Rewriter says passthrough (db not in processor map)
+						log.Infof("[conn %d] streaming: SHOW TABLES passthrough via rewriter (db=%q not in database_processors)", id, currentDB)
+						showTablesHandled = true // still skip generic rewriter for SHOW TABLES
+					} else if err != nil {
+						log.Warnf("[conn %d] streaming: SHOW TABLES rewrite via rewriter failed: %v, falling back to regex", id, err)
+					}
+				}
+				// Fallback: regex-based rewriting
+				if !showTablesHandled {
+					rewritten := rewriteShowTablesWithProcessor(eq.Body, currentDB, p.cfg.DatabaseProcessors)
+					if rewritten != "" {
+						// Case 1 (empty currentDB→empty result) or Case 2 (prefix filter)
+						log.Infof("[conn %d] streaming: SHOW TABLES rewrite (regex fallback, currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewritten)
+						eq.Body = rewritten
+						showTablesHandled = true
+					} else {
+						// Case 3: rewritten=="" means DB is not in database_processors → passthrough
+						log.Infof("[conn %d] streaming: SHOW TABLES passthrough (regex fallback, db=%q not in database_processors)", id, currentDB)
+						showTablesHandled = true // still skip generic rewriter for SHOW TABLES
+					}
 				}
 			}
 

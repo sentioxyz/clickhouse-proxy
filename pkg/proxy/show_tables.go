@@ -15,7 +15,7 @@ import (
 //	SHOW TABLES LIKE '<pattern>'
 //	combinations of the above
 var showTablesRegex = regexp.MustCompile(
-	`(?i)^\s*SHOW\s+(?:FULL\s+)?TABLES(?:\s+(?:FROM|IN)\s+(\S+))?(?:\s+LIKE\s+'[^']*')?\s*$`)
+	`(?i)^\s*SHOW\s+(?:FULL\s+)?TABLES(?:\s+(?:FROM|IN)\s+([^\s;]+))?(?:\s+LIKE\s+'[^']*')?\s*;?\s*$`)
 
 // isShowTables returns true if the SQL is a SHOW TABLES statement.
 func isShowTables(sql string) bool {
@@ -61,7 +61,7 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 	// SHOW TABLES FROM <other_db> where <other_db> != session's current database.
 	if processorID, ok := dbProcessors[targetDB]; ok {
 		return fmt.Sprintf(
-			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%'",
+			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%' ESCAPE '\\'",
 			escapeSQLString(targetDB),
 			escapeSQLString(escapeSQLLike(processorID)),
 		)
