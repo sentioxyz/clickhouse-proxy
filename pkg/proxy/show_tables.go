@@ -61,7 +61,7 @@ func rewriteShowTablesWithProcessor(sql, currentDB string, dbProcessors map[stri
 	// SHOW TABLES FROM <other_db> where <other_db> != session's current database.
 	if processorID, ok := dbProcessors[targetDB]; ok {
 		return fmt.Sprintf(
-			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%' ESCAPE '!'",
+			"SELECT name FROM system.tables WHERE database = '%s' AND name LIKE '%s%%'",
 			escapeSQLString(targetDB),
 			escapeSQLString(escapeSQLLike(processorID)),
 		)
@@ -78,18 +78,13 @@ func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-// likeEscapeChar is the ESCAPE character used in LIKE patterns.
-// We use '!' instead of '\' because backslash is ClickHouse's own string literal
-// escape character — embedding '\' in a single-quoted string requires '\\', which
-// creates error-prone double-escaping. '!' has no special meaning in ClickHouse
-// string literals, so it survives the literal parsing unchanged.
-const likeEscapeChar = "!"
-
-// escapeSQLLike escapes the special LIKE characters %, _ and the escape char itself
-// so they are treated as literals under ESCAPE '!'.
+// escapeSQLLike escapes the special LIKE characters %, _ and \ in a pattern value.
+// We must double-escape the backslash ('\\%', '\\_') because ClickHouse uses '\'
+// as the string literal escape character. To pass '\_' to the LIKE engine, the
+// SQL string literal must contain '\\_'.
 func escapeSQLLike(s string) string {
-	s = strings.ReplaceAll(s, likeEscapeChar, likeEscapeChar+likeEscapeChar) // ! → !!
-	s = strings.ReplaceAll(s, `%`, likeEscapeChar+`%`)                       // % → !%
-	s = strings.ReplaceAll(s, `_`, likeEscapeChar+`_`)                       // _ → !_
+	s = strings.ReplaceAll(s, `\`, `\\\\`)
+	s = strings.ReplaceAll(s, `%`, `\\%`)
+	s = strings.ReplaceAll(s, `_`, `\\_`)
 	return s
 }
