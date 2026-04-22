@@ -78,10 +78,18 @@ func escapeSQLString(s string) string {
 	return strings.ReplaceAll(s, "'", "''")
 }
 
-// escapeSQLLike escapes the special LIKE characters %, _ and \ in a pattern value.
+// likeEscapeChar is the ESCAPE character used in LIKE patterns.
+// We use '!' instead of '\' because backslash is ClickHouse's own string literal
+// escape character — embedding '\' in a single-quoted string requires '\\', which
+// creates error-prone double-escaping. '!' has no special meaning in ClickHouse
+// string literals, so it survives the literal parsing unchanged.
+const likeEscapeChar = "!"
+
+// escapeSQLLike escapes the special LIKE characters %, _ and the escape char itself
+// so they are treated as literals under ESCAPE '!'.
 func escapeSQLLike(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `%`, `\%`)
-	s = strings.ReplaceAll(s, `_`, `\_`)
+	s = strings.ReplaceAll(s, likeEscapeChar, likeEscapeChar+likeEscapeChar) // ! → !!
+	s = strings.ReplaceAll(s, `%`, likeEscapeChar+`%`)                       // % → !%
+	s = strings.ReplaceAll(s, `_`, likeEscapeChar+`_`)                       // _ → !_
 	return s
 }
