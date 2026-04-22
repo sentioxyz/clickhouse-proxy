@@ -1651,6 +1651,28 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		}
 		code := proto.ClientCode(codeByte)
 
+		// Second non-blocking check after ReadByte: the upstream EndOfStream signal may have
+		// arrived while ReadByte was blocking (waiting for the client's next packet). The
+		// check at the top of the loop ran before ReadByte and missed it, so we check again
+		// here to ensure currentDB is updated before processing the next query.
+		if expectState == expectData && queryDoneCh != nil {
+			select {
+			case sig := <-queryDoneCh:
+				expectState = expectQuery
+				queryCompression = proto.CompressionDisabled
+				if pendingDB != "" {
+					if sig.IsEndOfStream {
+						currentDB = pendingDB
+						log.Infof("[conn %d] streaming: currentDB confirmed (post-read): %q", id, currentDB)
+					} else {
+						log.Infof("[conn %d] streaming: USE %q failed (server exception), keeping currentDB=%q", id, pendingDB, currentDB)
+					}
+					pendingDB = ""
+				}
+			default:
+			}
+		}
+
 		switch code {
 		case proto.ClientCodeQuery:
 			// Use custom Query decoder (supports all protocol versions, precisely aligned with ClickHouse TCPHandler)
@@ -1676,7 +1698,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				// Try rewriter first (AST-based, more accurate)
 				if p.rewriter != nil && !isRoute && len(processorToDatabase) > 0 {
 					rewrittenSQL, physicalDB, err := p.rewriter.RewriteUse(ctx, eq.Body, processorToDatabase)
-					if err == nil && rewrittenSQL != "" {
+					if err == nil && rewrittenSQL != "" && rewrittenSQL != eq.Body {
 						eq.Body = rewrittenSQL
 						if physicalDB != "" {
 							pendingDB = physicalDB
@@ -1687,6 +1709,8 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 						useHandled = true
 					} else if err != nil {
 						log.Warnf("[conn %d] streaming: USE rewrite via rewriter failed: %v, falling back to regex", id, err)
+					} else if rewrittenSQL == eq.Body {
+						log.Infof("[conn %d] streaming: USE rewrite via rewriter returned unchanged SQL, falling back to regex", id)
 					}
 				}
 				// Fallback: regex-based rewriting
