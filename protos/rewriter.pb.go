@@ -246,7 +246,7 @@ func (x *RewriteTableNameArgs) GetTableWithDatabaseMap() map[string]*RewriteTabl
 type RewriteLimitArgs struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Deprecated: Marked as deprecated in protos/rewriter.proto.
-	Limit int32 `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"`
+	Limit int32 `protobuf:"varint,1,opt,name=limit,proto3" json:"limit,omitempty"` // use oneof value instead
 	// Types that are valid to be assigned to Value:
 	//
 	//	*RewriteLimitArgs_ReplaceLimit_
@@ -324,11 +324,11 @@ type isRewriteLimitArgs_Value interface {
 }
 
 type RewriteLimitArgs_ReplaceLimit_ struct {
-	ReplaceLimit *RewriteLimitArgs_ReplaceLimit `protobuf:"bytes,2,opt,name=replace_limit,json=replaceLimit,proto3,oneof"`
+	ReplaceLimit *RewriteLimitArgs_ReplaceLimit `protobuf:"bytes,2,opt,name=replace_limit,json=replaceLimit,proto3,oneof"` // replace limit if original limit is 0 or greater than [threshold].
 }
 
 type RewriteLimitArgs_ForceLimit struct {
-	ForceLimit int32 `protobuf:"varint,3,opt,name=force_limit,json=forceLimit,proto3,oneof"`
+	ForceLimit int32 `protobuf:"varint,3,opt,name=force_limit,json=forceLimit,proto3,oneof"` // force replace any limit to this value, no matter what the original limit is.
 }
 
 func (*RewriteLimitArgs_ReplaceLimit_) isRewriteLimitArgs_Value() {}
@@ -424,11 +424,13 @@ func (x *RewriteCommonTableExprArgs) GetCteMap() map[string]*RewriteCommonTableE
 }
 
 // DatabaseNameRewrite rewrites USE <db> statements.
-// Three branches evaluated in order:
-//  1. database_map hit (processorID → physical): "USE <physical>"
-//  2. known_physical_databases hit: leave SQL unchanged
-//  3. default_database non-empty: "USE <default_database>",
-//     response.matched_processor_id = <target>
+// Three branches, evaluated in order (matches proxy regex semantics):
+//  1. database_map hit (virtual/processorID → physical):
+//     → "USE <physical>"
+//  2. known_physical_databases hit (target is already a real DB name):
+//     → leave SQL unchanged, but caller still tracks target as current DB
+//  3. default_database non-empty (fallback for unmapped names):
+//     → "USE <default_database>", response.matched_processor_id = <target>
 type RewriteDatabaseNameArgs struct {
 	state                  protoimpl.MessageState `protogen:"open.v1"`
 	DatabaseMap            map[string]string      `protobuf:"bytes,1,rep,name=database_map,json=databaseMap,proto3" json:"database_map,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
@@ -490,19 +492,23 @@ func (x *RewriteDatabaseNameArgs) GetDefaultDatabase() string {
 }
 
 // ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
-// The server parses the AST's FROM/IN clause itself and resolves the target
-// database + processor_id using the context below.
-// Resolution order:
+// The C++ side parses the AST's FROM/IN clause itself and resolves the
+// effective target database + processor_id using the full context below.
 //
-//	targetDB := FROM_clause > current_db > database (legacy)
-//	empty targetDB             → empty-result sentinel SELECT
-//	current_processor_id, if targetDB == current_db and SQL had no FROM
-//	else db_processors[targetDB]
-//	else                       → response.show_tables_passthrough = true
+// Resolution order (matches proxy regex semantics):
+//
+//	targetDB := SHOW_TABLES_FROM_clause, else current_db
+//	if targetDB == "":                              → empty-result sentinel SELECT
+//	elif targetDB == current_db AND current_processor_id != "":
+//	                                                → use current_processor_id
+//	elif db_processors[targetDB] exists:            → use that processorID
+//	else:                                           → passthrough (response.show_tables_passthrough=true)
 type RewriteShowTablesArgs struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Legacy pre-resolved pair; new callers should leave these empty and fill
-	// current_db + current_processor_id + db_processors instead.
+	// Deprecated: pre-resolved database/processor from caller.
+	// New callers should set current_db + db_processors + current_processor_id
+	// and let the server resolve. Kept for backward compat: if set and the
+	// new fields are empty, behaves as before.
 	Database           string            `protobuf:"bytes,1,opt,name=database,proto3" json:"database,omitempty"`
 	ProcessorId        string            `protobuf:"bytes,2,opt,name=processor_id,json=processorId,proto3" json:"processor_id,omitempty"`
 	CurrentDb          string            `protobuf:"bytes,3,opt,name=current_db,json=currentDb,proto3" json:"current_db,omitempty"`
@@ -850,14 +856,24 @@ type RewriteSQLResponse struct {
 	SqlAfterRewrite            string                 `protobuf:"bytes,3,opt,name=sql_after_rewrite,json=sqlAfterRewrite,proto3" json:"sql_after_rewrite,omitempty"`
 	OriginalAccessedTableNames []string               `protobuf:"bytes,4,rep,name=original_accessed_table_names,json=originalAccessedTableNames,proto3" json:"original_accessed_table_names,omitempty"`
 	StatementType              string                 `protobuf:"bytes,5,opt,name=statement_type,json=statementType,proto3" json:"statement_type,omitempty"` // "SELECT", "USE", "SHOW_TABLES", etc.
-	// USE DatabaseNameRewrite: original target when the default_database
-	// fallback branch fired; caller tracks it as the connection's processor_id.
+	// USE DatabaseNameRewrite: when the default_database fallback branch fired,
+	// this is the original target name (caller uses it as the connection's
+	// current processor_id so SHOW TABLES still filters correctly).
 	MatchedProcessorId string `protobuf:"bytes,6,opt,name=matched_processor_id,json=matchedProcessorId,proto3" json:"matched_processor_id,omitempty"`
-	// SHOW TABLES: true when the rewriter asks caller to pass original SQL
-	// through (targetDB has no processor mapping and no processor context).
+	// SHOW TABLES: true when the rewriter decided the caller should pass the
+	// original SQL through (targetDB has no processor mapping and no
+	// per-connection processor context). sql_after_rewrite is the original SQL
+	// in this case.
 	ShowTablesPassthrough bool `protobuf:"varint,7,opt,name=show_tables_passthrough,json=showTablesPassthrough,proto3" json:"show_tables_passthrough,omitempty"`
-	unknownFields         protoimpl.UnknownFields
-	sizeCache             protoimpl.SizeCache
+	// Set for single-table write operations (CREATE/DROP/ALTER TABLE, INSERT,
+	// UPDATE, DELETE). Format: "db.table" if the DB was specified in the SQL,
+	// otherwise bare "table". Empty for non-write statements. Unsupported
+	// variants (CREATE View/Database, DROP DATABASE, TRUNCATE, RENAME,
+	// multi-table DROP, INSERT INTO FUNCTION, etc.) return code=RewriteError
+	// and leave this field empty.
+	WriteTargetTable string `protobuf:"bytes,8,opt,name=write_target_table,json=writeTargetTable,proto3" json:"write_target_table,omitempty"`
+	unknownFields    protoimpl.UnknownFields
+	sizeCache        protoimpl.SizeCache
 }
 
 func (x *RewriteSQLResponse) Reset() {
@@ -937,6 +953,13 @@ func (x *RewriteSQLResponse) GetShowTablesPassthrough() bool {
 		return x.ShowTablesPassthrough
 	}
 	return false
+}
+
+func (x *RewriteSQLResponse) GetWriteTargetTable() string {
+	if x != nil {
+		return x.WriteTargetTable
+	}
+	return ""
 }
 
 type RewriteErrorMessageRequest struct {
@@ -1510,7 +1533,7 @@ const file_protos_rewriter_proto_rawDesc = "" +
 	"\x05value\"X\n" +
 	"\x11RewriteSQLRequest\x12\x10\n" +
 	"\x03sql\x18\x01 \x01(\tR\x03sql\x121\n" +
-	"\aoptions\x18\x02 \x03(\v2\x17.rewriter.RewriteOptionR\aoptions\"\xd9\x02\n" +
+	"\aoptions\x18\x02 \x03(\v2\x17.rewriter.RewriteOptionR\aoptions\"\x87\x03\n" +
 	"\x12RewriteSQLResponse\x12)\n" +
 	"\x04code\x18\x01 \x01(\x0e2\x15.rewriter.RewriteCodeR\x04code\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\x12*\n" +
@@ -1518,7 +1541,8 @@ const file_protos_rewriter_proto_rawDesc = "" +
 	"\x1doriginal_accessed_table_names\x18\x04 \x03(\tR\x1aoriginalAccessedTableNames\x12%\n" +
 	"\x0estatement_type\x18\x05 \x01(\tR\rstatementType\x120\n" +
 	"\x14matched_processor_id\x18\x06 \x01(\tR\x12matchedProcessorId\x126\n" +
-	"\x17show_tables_passthrough\x18\a \x01(\bR\x15showTablesPassthrough\"\x86\x01\n" +
+	"\x17show_tables_passthrough\x18\a \x01(\bR\x15showTablesPassthrough\x12,\n" +
+	"\x12write_target_table\x18\b \x01(\tR\x10writeTargetTable\"\x86\x01\n" +
 	"\x1aRewriteErrorMessageRequest\x12\x10\n" +
 	"\x03sql\x18\x01 \x01(\tR\x03sql\x12#\n" +
 	"\rerror_message\x18\x02 \x01(\tR\ferrorMessage\x121\n" +
