@@ -1793,6 +1793,19 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 					return
 				}
 
+				// User-db CREATE DATABASE interception. Runs after signature
+				// validation so we always know who "owns" the new database,
+				// and before balance/usage accounting because this DDL
+				// doesn't bill against query SU. On match, the proxy calls
+				// a randomly picked indexer's sentio-node to submit the
+				// on-chain createUserDatabase tx, then closes this query
+				// by sending EndOfStream directly back to the client —
+				// nothing is forwarded to upstream ClickHouse.
+				if dbName, ok := isCreateDatabase(eq.Body); ok {
+					p.handleCreateDatabase(ctx, clientConn, id, dbName, signerAddr)
+					return
+				}
+
 				// Query usage: check balance and report usage (same as non-streaming path)
 				if signerAddr != "" && p.usageClient != nil {
 					payer := signerAddr
