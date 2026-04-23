@@ -179,11 +179,10 @@ func main() {
 		privateKeyHex := cfg.RelayPrivateKeyHex
 
 		// Create table rewriter factory backed by sentio-core TableMapper.
-		// TablePatternCompatible preserves the pre-#88 physical layout
-		// (`${processorID}_${category}_${name}` tables inside the shared
-		// `testnet` database) so existing processors keep resolving to the
-		// tables the indexer actually provisioned. Replica is 0 because
-		// Compatible pattern ignores the replica index.
+		// In sentio-network (this binary runs as the per-indexer proxy next
+		// to sentio-node), tables are always provisioned under the NetworkV1
+		// layout — `${processorID}_${replica}.${suffix}`. Compatible is for
+		// the legacy single-tenant deployment path and is never correct here.
 		tableRewriterFactory := func(ctx context.Context, processorId string,
 			indexerInfo proxy.IndexerInfo, processorInfo proxy.ProcessorInfo) (proxy.SentioNetworkTableRewriter, error) {
 			const processorReplica = 0
@@ -191,7 +190,7 @@ func main() {
 				privateKeyHex,
 				processorId,
 				processorReplica,
-				processormodels.TablePatternCompatible,
+				processormodels.TablePatternNetworkV1,
 				ckhMgr,
 				indexerInfo,
 				processorInfo,
