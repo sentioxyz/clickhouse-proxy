@@ -13,6 +13,7 @@ import (
 	ckhmanager "sentioxyz/sentio-core/common/clickhousemanager"
 	log "sentioxyz/sentio-core/common/log"
 	"sentioxyz/sentio-core/network/sqlrewriter"
+	processormodels "sentioxyz/sentio-core/service/processor/models"
 
 	"github.com/sentioxyz/clickhouse-proxy/pkg/cluster"
 	proxy "github.com/sentioxyz/clickhouse-proxy/pkg/proxy"
@@ -177,10 +178,21 @@ func main() {
 		}
 		privateKeyHex := cfg.RelayPrivateKeyHex
 
-		// Create table rewriter factory backed by sentio-core TableMapper
+		// Create table rewriter factory backed by sentio-core TableMapper.
+		// Mirrors sentio-node standalone.go: proxy only serves replica 0 of
+		// any processor and assumes the network-v1 table naming convention.
 		tableRewriterFactory := func(ctx context.Context, processorId string,
 			indexerInfo proxy.IndexerInfo, processorInfo proxy.ProcessorInfo) (proxy.SentioNetworkTableRewriter, error) {
-			return sqlrewriter.NewTableMapper(privateKeyHex, processorId, ckhMgr, indexerInfo, processorInfo)
+			const processorReplica = 0
+			return sqlrewriter.NewTableMapper(
+				privateKeyHex,
+				processorId,
+				processorReplica,
+				processormodels.TablePatternNetworkV1,
+				ckhMgr,
+				indexerInfo,
+				processorInfo,
+			)
 		}
 		log.Infof("using sentio-core TableMapper, ckh_manager_config=%s", cfg.CkhManagerConfigPath)
 
