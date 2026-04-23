@@ -179,8 +179,11 @@ func main() {
 		privateKeyHex := cfg.RelayPrivateKeyHex
 
 		// Create table rewriter factory backed by sentio-core TableMapper.
-		// Mirrors sentio-node standalone.go: proxy only serves replica 0 of
-		// any processor and assumes the network-v1 table naming convention.
+		// TablePatternCompatible preserves the pre-#88 physical layout
+		// (`${processorID}_${category}_${name}` tables inside the shared
+		// `testnet` database) so existing processors keep resolving to the
+		// tables the indexer actually provisioned. Replica is 0 because
+		// Compatible pattern ignores the replica index.
 		tableRewriterFactory := func(ctx context.Context, processorId string,
 			indexerInfo proxy.IndexerInfo, processorInfo proxy.ProcessorInfo) (proxy.SentioNetworkTableRewriter, error) {
 			const processorReplica = 0
@@ -188,7 +191,7 @@ func main() {
 				privateKeyHex,
 				processorId,
 				processorReplica,
-				processormodels.TablePatternNetworkV1,
+				processormodels.TablePatternCompatible,
 				ckhMgr,
 				indexerInfo,
 				processorInfo,
