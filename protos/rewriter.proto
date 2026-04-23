@@ -1,6 +1,6 @@
 syntax = "proto3";
 
-package rewriter;
+package rewriter; // Don't change this
 option go_package = "github.com/sentioxyz/clickhouse-proxy/protos";
 
 enum RewriteOp {
@@ -31,15 +31,15 @@ message RewriteTableNameArgs {
 }
 
 message RewriteLimitArgs {
-    int32 limit = 1 [deprecated = true];
+    int32 limit = 1 [deprecated = true]; // use oneof value instead
 
     message ReplaceLimit {
         int32 threshold = 1;
         int32 replace_to = 2;
     }
     oneof value {
-        ReplaceLimit replace_limit = 2;
-        int32 force_limit = 3;
+        ReplaceLimit replace_limit = 2; // replace limit if original limit is 0 or greater than [threshold].
+        int32 force_limit = 3; // force replace any limit to this value, no matter what the original limit is.
     }
 }
 
@@ -56,11 +56,13 @@ message RewriteCommonTableExprArgs {
 }
 
 // DatabaseNameRewrite rewrites USE <db> statements.
-// Three branches evaluated in order:
-//   1. database_map hit (processorID → physical): "USE <physical>"
-//   2. known_physical_databases hit: leave SQL unchanged
-//   3. default_database non-empty: "USE <default_database>",
-//      response.matched_processor_id = <target>
+// Three branches, evaluated in order (matches proxy regex semantics):
+//   1. database_map hit (virtual/processorID → physical):
+//        → "USE <physical>"
+//   2. known_physical_databases hit (target is already a real DB name):
+//        → leave SQL unchanged, but caller still tracks target as current DB
+//   3. default_database non-empty (fallback for unmapped names):
+//        → "USE <default_database>", response.matched_processor_id = <target>
 message RewriteDatabaseNameArgs {
     map<string, string> database_map = 1;
     repeated string known_physical_databases = 2;
@@ -68,17 +70,21 @@ message RewriteDatabaseNameArgs {
 }
 
 // ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
-// The server parses the AST's FROM/IN clause itself and resolves the target
-// database + processor_id using the context below.
-// Resolution order:
-//   targetDB := FROM_clause > current_db > database (legacy)
-//   empty targetDB             → empty-result sentinel SELECT
-//   current_processor_id, if targetDB == current_db and SQL had no FROM
-//   else db_processors[targetDB]
-//   else                       → response.show_tables_passthrough = true
+// The C++ side parses the AST's FROM/IN clause itself and resolves the
+// effective target database + processor_id using the full context below.
+//
+// Resolution order (matches proxy regex semantics):
+//   targetDB := SHOW_TABLES_FROM_clause, else current_db
+//   if targetDB == "":                              → empty-result sentinel SELECT
+//   elif targetDB == current_db AND current_processor_id != "":
+//                                                   → use current_processor_id
+//   elif db_processors[targetDB] exists:            → use that processorID
+//   else:                                           → passthrough (response.show_tables_passthrough=true)
 message RewriteShowTablesArgs {
-    // Legacy pre-resolved pair; new callers should leave these empty and fill
-    // current_db + current_processor_id + db_processors instead.
+    // Deprecated: pre-resolved database/processor from caller.
+    // New callers should set current_db + db_processors + current_processor_id
+    // and let the server resolve. Kept for backward compat: if set and the
+    // new fields are empty, behaves as before.
     string database = 1;
     string processor_id = 2;
 
@@ -139,13 +145,24 @@ message RewriteSQLResponse {
     repeated string original_accessed_table_names = 4;
     string statement_type = 5;  // "SELECT", "USE", "SHOW_TABLES", etc.
 
-    // USE DatabaseNameRewrite: original target when the default_database
-    // fallback branch fired; caller tracks it as the connection's processor_id.
+    // USE DatabaseNameRewrite: when the default_database fallback branch fired,
+    // this is the original target name (caller uses it as the connection's
+    // current processor_id so SHOW TABLES still filters correctly).
     string matched_processor_id = 6;
 
-    // SHOW TABLES: true when the rewriter asks caller to pass original SQL
-    // through (targetDB has no processor mapping and no processor context).
+    // SHOW TABLES: true when the rewriter decided the caller should pass the
+    // original SQL through (targetDB has no processor mapping and no
+    // per-connection processor context). sql_after_rewrite is the original SQL
+    // in this case.
     bool show_tables_passthrough = 7;
+
+    // Set for single-table write operations (CREATE/DROP/ALTER TABLE, INSERT,
+    // UPDATE, DELETE). Format: "db.table" if the DB was specified in the SQL,
+    // otherwise bare "table". Empty for non-write statements. Unsupported
+    // variants (CREATE View/Database, DROP DATABASE, TRUNCATE, RENAME,
+    // multi-table DROP, INSERT INTO FUNCTION, etc.) return code=RewriteError
+    // and leave this field empty.
+    string write_target_table = 8;
 }
 
 service RewriterService {
