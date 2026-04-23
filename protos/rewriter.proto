@@ -9,6 +9,8 @@ enum RewriteOp {
     OffsetRewrite = 2;
     SettingsRewrite = 3;
     CommonTableExprRewrite = 4;
+    DatabaseNameRewrite = 5;
+    ShowTablesRewrite = 6;
 }
 
 message RewriteTableNameArgs {
@@ -53,6 +55,38 @@ message RewriteCommonTableExprArgs {
     map<string, CommonTableExpr> cte_map = 1;
 }
 
+// DatabaseNameRewrite rewrites USE <db> statements.
+// Three branches evaluated in order:
+//   1. database_map hit (processorID → physical): "USE <physical>"
+//   2. known_physical_databases hit: leave SQL unchanged
+//   3. default_database non-empty: "USE <default_database>",
+//      response.matched_processor_id = <target>
+message RewriteDatabaseNameArgs {
+    map<string, string> database_map = 1;
+    repeated string known_physical_databases = 2;
+    string default_database = 3;
+}
+
+// ShowTablesRewrite rewrites SHOW TABLES into a filtered SELECT.
+// The server parses the AST's FROM/IN clause itself and resolves the target
+// database + processor_id using the context below.
+// Resolution order:
+//   targetDB := FROM_clause > current_db > database (legacy)
+//   empty targetDB             → empty-result sentinel SELECT
+//   current_processor_id, if targetDB == current_db and SQL had no FROM
+//   else db_processors[targetDB]
+//   else                       → response.show_tables_passthrough = true
+message RewriteShowTablesArgs {
+    // Legacy pre-resolved pair; new callers should leave these empty and fill
+    // current_db + current_processor_id + db_processors instead.
+    string database = 1;
+    string processor_id = 2;
+
+    string current_db = 3;
+    string current_processor_id = 4;
+    map<string, string> db_processors = 5;  // physicalDB → processorID
+}
+
 enum SettingType {
     String = 0;
     Bool = 1;
@@ -82,6 +116,8 @@ message RewriteOption {
         RewriteOffsetArgs offset_args = 4;
         RewriteSettingsArgs settings_args = 5;
         RewriteCommonTableExprArgs common_table_expr_args = 6;
+        RewriteDatabaseNameArgs database_name_args = 7;
+        RewriteShowTablesArgs show_tables_args = 8;
     }
 }
 
@@ -101,6 +137,15 @@ message RewriteSQLResponse {
     string message = 2;
     string sql_after_rewrite = 3;
     repeated string original_accessed_table_names = 4;
+    string statement_type = 5;  // "SELECT", "USE", "SHOW_TABLES", etc.
+
+    // USE DatabaseNameRewrite: original target when the default_database
+    // fallback branch fired; caller tracks it as the connection's processor_id.
+    string matched_processor_id = 6;
+
+    // SHOW TABLES: true when the rewriter asks caller to pass original SQL
+    // through (targetDB has no processor mapping and no processor context).
+    bool show_tables_passthrough = 7;
 }
 
 service RewriterService {

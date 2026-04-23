@@ -91,6 +91,23 @@ type Config struct {
 	SidecarMode          bool   `json:"sidecar_mode" yaml:"sidecar_mode"`
 	SidecarUpstream      string `json:"sidecar_upstream" yaml:"sidecar_upstream"`                  // Remote server-side proxy address (required when sidecar_mode=true)
 	SidecarPrivateKeyHex string `json:"sidecar_private_key_hex" yaml:"sidecar_private_key_hex"`    // Sidecar's own Ethereum private key for JWS signing (required when sidecar_mode=true)
+
+	// DatabaseProcessors maps ClickHouse database names to their processor IDs.
+	// Used for:
+	//   1. SHOW TABLES filtering — only tables prefixed with the processorID are shown.
+	//   2. USE rewriting — client can use "USE <processorID>" and the proxy rewrites it
+	//      to "USE <database>" transparently.
+	// Example:
+	//   "sentio_coinbase": "coinbase"
+	//   "sentio_ethereum": "ethereum"
+	DatabaseProcessors map[string]string `json:"database_processors" yaml:"database_processors"`
+
+	// DefaultProcessorDatabase is the fallback ClickHouse database for processor IDs
+	// that are not explicitly listed in DatabaseProcessors. When a client executes
+	// "USE <processorID>" and the processorID has no explicit mapping, the proxy
+	// rewrites it to "USE <DefaultProcessorDatabase>" and tracks the processorID
+	// for that connection so SHOW TABLES still filters correctly.
+	DefaultProcessorDatabase string `json:"default_processor_database" yaml:"default_processor_database"`
 }
 
 // Duration wraps time.Duration to allow human-friendly strings in JSON

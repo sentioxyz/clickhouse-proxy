@@ -43,6 +43,9 @@ var packetNames = map[uint64]string{
 // Pre-compiled regex to avoid recompilation on every call
 var useRegexp = regexp.MustCompile(`(?i)\buse\b`)
 
+// useDBRegexp matches a USE <db> statement and captures the target database name.
+var useDBRegexp = regexp.MustCompile(`(?i)^\s*USE\s+([^\s;]+)`)
+
 // Known server -> client packet types in ClickHouse native protocol.
 var serverPacketNames = map[uint64]string{
 	0:  "Hello",
@@ -95,6 +98,14 @@ const (
 	// defaultStreamingBufSize is the default bufio.Reader buffer size in streaming mode (128KB)
 	defaultStreamingBufSize = 131072
 )
+
+// queryDoneSignal is sent from copyUpstreamToClientFromReader to copyClientToUpstreamStreaming
+// to notify that the current query has completed on the server side.
+// IsEndOfStream distinguishes EndOfStream(5) from Exception(2), which is needed to
+// decide whether a pending USE <db> switch was successful.
+type queryDoneSignal struct {
+	IsEndOfStream bool // true = EndOfStream(5), false = Exception(2)
+}
 
 // connWithReader wraps a net.Conn with a custom io.Reader for the Read method.
 // Used to prepend rewritten Hello bytes to the connection stream.
@@ -692,7 +703,7 @@ func (p *Proxy) handleConnection(ctx context.Context, id int64, clientConn net.C
 		handshakeDone := make(chan struct{})
 		var upstreamConn net.Conn // set by copyClientToUpstreamStreaming after Hello parsing
 		var upstreamBr *bufio.Reader
-		queryDoneCh := make(chan struct{}, 8)
+		queryDoneCh := make(chan queryDoneSignal, 8)
 		var srvSendChunked, clientRecvChunked string
 
 		var closeOnce sync.Once
@@ -744,7 +755,7 @@ func (p *Proxy) copyUpstreamToClient(id int64, clientConn, upstreamConn net.Conn
 
 // copyUpstreamToClientFromReader reads data from upstream and forwards it to the client.
 // If upstreamBr is not nil, reads from bufio.Reader (streaming mode, to prevent losing cached data after ServerHello).
-func (p *Proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCh chan struct{}, srvSendChunked, clientRecvChunked string) {
+func (p *Proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamConn net.Conn, upstreamBr *bufio.Reader, queryDoneCh chan queryDoneSignal, srvSendChunked, clientRecvChunked string) {
 	// Wrap Reader/Writer according to chunked negotiation results
 	// srvSendChunked: whether server sends to proxy using chunked (requires ChunkedReader for deframing)
 	// clientRecvChunked: whether client expects chunked from proxy (requires ChunkedWriter for framing)
@@ -793,7 +804,7 @@ func (p *Proxy) copyUpstreamToClientFromReader(id int64, clientConn, upstreamCon
 			// Use buffered channel with non-blocking send to avoid signal loss
 			if queryDoneCh != nil && (pkt == "EndOfStream" || pkt == "Exception") {
 				select {
-				case queryDoneCh <- struct{}{}:
+				case queryDoneCh <- queryDoneSignal{IsEndOfStream: pkt == "EndOfStream"}:
 				default:
 					// Skip when channel is full (should not happen since buffer=8)
 					log.Warnf("[conn %d] queryDoneCh full, signal dropped", id)
@@ -1128,7 +1139,7 @@ func (p *Proxy) handleDataBlock(
 	return nil
 }
 
-func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn net.Conn, upstreamConnOut *net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan struct{}, srvSendChunkedOut, clientRecvChunkedOut *string) {
+func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, clientConn net.Conn, upstreamConnOut *net.Conn, handshakeDone chan struct{}, upstreamBrOut **bufio.Reader, queryDoneCh chan queryDoneSignal, srvSendChunkedOut, clientRecvChunkedOut *string) {
 	// Ensure handshakeDone is closed when function exits, preventing copyUpstreamToClient goroutine from blocking forever
 	handshakeClosed := false
 	defer func() {
@@ -1185,7 +1196,23 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 	clientRevision := hello.ProtocolVersion
 	clientUser := hello.User
 	clientPassword := hello.Password
-	log.Infof("[conn %d] streaming: Hello decoded, client=%s user=%s revision=%d", id, hello.Name, clientUser, clientRevision)
+	// currentDB tracks the active database for this connection, confirmed by server EndOfStream.
+	// Initialized from Hello.Database; updated atomically after each successful USE statement.
+	currentDB := hello.Database
+	// pendingDB holds the target database of an in-flight USE statement awaiting server confirmation.
+	var pendingDB string
+	// currentProcessorID holds the processor ID for connections using the default database.
+	// Set when a client does "USE <processorID>" that maps to DefaultProcessorDatabase.
+	// Cleared when the client switches to an explicitly-mapped or pass-through database.
+	var currentProcessorID string
+	var pendingProcessorID string
+	// processorToDatabase is the reverse of cfg.DatabaseProcessors (processorID → database).
+	// Built once per connection for O(1) USE-rewrite lookups.
+	processorToDatabase := make(map[string]string, len(p.cfg.DatabaseProcessors))
+	for db, proc := range p.cfg.DatabaseProcessors {
+		processorToDatabase[proc] = db
+	}
+	log.Infof("[conn %d] streaming: Hello decoded, client=%s user=%s db=%q revision=%d", id, hello.Name, clientUser, currentDB, clientRevision)
 
 	// Record handshake start time
 	handshakeStart := time.Now()
@@ -1599,9 +1626,21 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		// Non-blocking select: process signal if available, otherwise continue
 		if expectState == expectData && queryDoneCh != nil {
 			select {
-			case <-queryDoneCh:
+			case sig := <-queryDoneCh:
 				expectState = expectQuery
 				queryCompression = proto.CompressionDisabled
+				// Resolve pending USE: confirm on EndOfStream, roll back on Exception.
+				if pendingDB != "" {
+					if sig.IsEndOfStream {
+						currentDB = pendingDB
+						currentProcessorID = pendingProcessorID
+						log.Infof("[conn %d] streaming: currentDB confirmed: %q processorID=%q", id, currentDB, currentProcessorID)
+					} else {
+						log.Infof("[conn %d] streaming: USE %q failed (server exception), keeping currentDB=%q", id, pendingDB, currentDB)
+					}
+					pendingDB = ""
+					pendingProcessorID = ""
+				}
 			default:
 			}
 		}
@@ -1619,6 +1658,30 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 		}
 		code := proto.ClientCode(codeByte)
 
+		// Second non-blocking check after ReadByte: the upstream EndOfStream signal may have
+		// arrived while ReadByte was blocking (waiting for the client's next packet). The
+		// check at the top of the loop ran before ReadByte and missed it, so we check again
+		// here to ensure currentDB is updated before processing the next query.
+		if expectState == expectData && queryDoneCh != nil {
+			select {
+			case sig := <-queryDoneCh:
+				expectState = expectQuery
+				queryCompression = proto.CompressionDisabled
+				if pendingDB != "" {
+					if sig.IsEndOfStream {
+						currentDB = pendingDB
+						currentProcessorID = pendingProcessorID
+						log.Infof("[conn %d] streaming: currentDB confirmed (post-read): %q processorID=%q", id, currentDB, currentProcessorID)
+					} else {
+						log.Infof("[conn %d] streaming: USE %q failed (server exception), keeping currentDB=%q", id, pendingDB, currentDB)
+					}
+					pendingDB = ""
+					pendingProcessorID = ""
+				}
+			default:
+			}
+		}
+
 		switch code {
 		case proto.ClientCodeQuery:
 			// Use custom Query decoder (supports all protocol versions, precisely aligned with ClickHouse TCPHandler)
@@ -1633,6 +1696,70 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.stats.inc("Query")
 
 			originalSQL := eq.Body
+
+			// USE <target> detection and optional rewriting.
+			// If target matches a processorID, rewrite eq.Body to USE <actualDatabase>
+			// so ClickHouse sees the real database name. pendingDB is always set to the
+			// post-rewrite actual database (confirmed or rolled back via queryDoneCh).
+			if m := useDBRegexp.FindStringSubmatch(eq.Body); m != nil {
+				rawTarget := strings.Trim(m[1], "`\"")
+				useHandled := false
+				// Try rewriter first (AST-based, more accurate). It handles the full
+				// three-branch semantics (processorID mapping / known physical DB /
+				// default-DB fallback) in one call.
+				if p.rewriter != nil && !isRoute {
+					// Collect known physical DB names (keys of cfg.DatabaseProcessors).
+					knownPhysicalDBs := make([]string, 0, len(p.cfg.DatabaseProcessors))
+					for db := range p.cfg.DatabaseProcessors {
+						knownPhysicalDBs = append(knownPhysicalDBs, db)
+					}
+					rewrittenSQL, physicalDB, matchedPID, err := p.rewriter.RewriteUse(
+						ctx, eq.Body, processorToDatabase, knownPhysicalDBs, p.cfg.DefaultProcessorDatabase)
+					if err == nil && rewrittenSQL != "" {
+						eq.Body = rewrittenSQL
+						// physicalDB is derived from the rewritten SQL; if the server
+						// left the SQL unchanged (case 2 "known physical" or case 4
+						// "no match"), physicalDB == rawTarget.
+						if physicalDB != "" {
+							pendingDB = physicalDB
+						} else {
+							pendingDB = rawTarget
+						}
+						pendingProcessorID = matchedPID
+						log.Infof("[conn %d] streaming: USE rewrite (via rewriter): %q -> %q (pendingDB=%q, pendingProcessorID=%q)",
+							id, rawTarget, eq.Body, pendingDB, pendingProcessorID)
+						useHandled = true
+					} else if err != nil {
+						log.Warnf("[conn %d] streaming: USE rewrite via rewriter failed: %v, falling back to regex", id, err)
+					}
+				}
+				// Fallback: regex-based rewriting
+				if !useHandled {
+					if actualDB, ok := processorToDatabase[rawTarget]; ok {
+						// Client used a known processorID — rewrite to its explicit database.
+						eq.Body = "USE " + actualDB
+						pendingDB = actualDB
+						pendingProcessorID = ""
+						log.Infof("[conn %d] streaming: USE rewrite (regex fallback): %q -> USE %q", id, rawTarget, actualDB)
+					} else if _, isKnownDB := p.cfg.DatabaseProcessors[rawTarget]; isKnownDB {
+						// Client typed a known physical database name directly — forward as-is, no processorID context.
+						pendingDB = rawTarget
+						pendingProcessorID = ""
+						log.Infof("[conn %d] streaming: USE detected (known physical db): pendingDB=%q", id, pendingDB)
+					} else if p.cfg.DefaultProcessorDatabase != "" {
+						// Unknown target, not a known DB — treat as processorID, route to default database.
+						eq.Body = "USE " + p.cfg.DefaultProcessorDatabase
+						pendingDB = p.cfg.DefaultProcessorDatabase
+						pendingProcessorID = rawTarget
+						log.Infof("[conn %d] streaming: USE rewrite (default db): %q -> USE %q (processorID=%q)", id, rawTarget, p.cfg.DefaultProcessorDatabase, rawTarget)
+					} else {
+						// Client typed an actual DB name (or unknown, no default) — forward as-is.
+						pendingDB = rawTarget
+						pendingProcessorID = ""
+						log.Infof("[conn %d] streaming: USE detected, pendingDB=%q", id, pendingDB)
+					}
+				}
+			}
 
 			// R4-2: Streaming mode must call Validator for signature verification
 			// Non-streaming mode calls p.validator.ValidateQuery in copyClientToUpstream,
@@ -1658,6 +1785,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 					UpstreamAddr: p.cfg.Upstream,
 					SQL:          eq.Body,
 					Settings:     settingsMap,
+					Database:     currentDB,
 				}
 				signerAddr, err := p.validator.ValidateQuery(ctx, meta)
 				if err != nil {
@@ -1695,8 +1823,44 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			eq.Settings = stripAuthTokenSettings(eq.Settings)
 			eq.OldSettings = stripAuthTokenOldSettings(eq.OldSettings)
 
-			// SQL rewriting (skip for __route__ connections and per-query skip_rewrite flag)
-			if p.rewriter != nil && !isRoute && !skipRewrite {
+			// SHOW TABLES interception: rewrite to processor-prefix-filtered SELECT.
+			// This runs before the generic sentio-network rewriter to ensure SHOW TABLES
+			// never leaks table names beyond the processor's own prefix.
+			showTablesHandled := false
+			if isShowTables(eq.Body) {
+				// Try rewriter first (AST-based, more accurate)
+				if p.rewriter != nil && !isRoute {
+					rewrittenSQL, handled, err := p.rewriter.RewriteShowTables(ctx, eq.Body, currentDB, currentProcessorID, p.cfg.DatabaseProcessors)
+					if err == nil && handled {
+						log.Infof("[conn %d] streaming: SHOW TABLES rewrite (via rewriter, currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewrittenSQL)
+						eq.Body = rewrittenSQL
+						showTablesHandled = true
+					} else if err == nil && !handled {
+						// Rewriter says passthrough (db not in processor map)
+						log.Infof("[conn %d] streaming: SHOW TABLES passthrough via rewriter (db=%q not in database_processors)", id, currentDB)
+						showTablesHandled = true // still skip generic rewriter for SHOW TABLES
+					} else if err != nil {
+						log.Warnf("[conn %d] streaming: SHOW TABLES rewrite via rewriter failed: %v, falling back to regex", id, err)
+					}
+				}
+				// Fallback: regex-based rewriting
+				if !showTablesHandled {
+					rewritten := rewriteShowTablesWithProcessor(eq.Body, currentDB, currentProcessorID, p.cfg.DatabaseProcessors)
+					if rewritten != "" {
+						// Case 1 (empty currentDB→empty result) or Case 2 (prefix filter)
+						log.Infof("[conn %d] streaming: SHOW TABLES rewrite (regex fallback, currentDB=%q): %q -> %q", id, currentDB, eq.Body, rewritten)
+						eq.Body = rewritten
+						showTablesHandled = true
+					} else {
+						// Case 3: rewritten=="" means DB is not in database_processors → passthrough
+						log.Infof("[conn %d] streaming: SHOW TABLES passthrough (regex fallback, db=%q not in database_processors)", id, currentDB)
+						showTablesHandled = true // still skip generic rewriter for SHOW TABLES
+					}
+				}
+			}
+
+			// SQL rewriting (skip for __route__ connections, per-query skip_rewrite flag, or handled SHOW TABLES)
+			if p.rewriter != nil && !isRoute && !skipRewrite && !showTablesHandled {
 				rewriteStart := time.Now()
 				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body, clientUser, clientPassword)
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
@@ -1965,7 +2129,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 // R1-1 Fix: Use doneCh to control goroutine lifecycle, preventing goroutine leaks.
 // When forwardUntilQueryDone returns, close doneCh to notify read goroutine to exit.
 // Read goroutine checks doneCh before sending to readCh, avoiding sends to a channel with no consumer.
-func (p *Proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCh chan struct{}) bool {
+func (p *Proxy) forwardUntilQueryDone(id int64, br *bufio.Reader, clientConn net.Conn, upstreamWriter io.Writer, queryDoneCh chan queryDoneSignal) bool {
 	type readResult struct {
 		data []byte
 		err  error

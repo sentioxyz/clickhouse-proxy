@@ -31,6 +31,20 @@ type Rewriter interface {
 	// used for remote() function calls.
 	// If the SQL does not contain Sentio-Network mode table names, return the original SQL
 	Rewrite(ctx context.Context, sql string, user string, password string) (string, error)
+	// RewriteUse rewrites USE <db> using the DatabaseNameRewrite op (three branches).
+	//   dbMap                — virtual (processorID) → physical DB.
+	//   knownPhysicalDBs     — physical DB names the proxy knows about.
+	//   defaultDB            — fallback database for unmapped names (empty = disabled).
+	// Returns (rewrittenSQL, physicalDB, matchedProcessorID, error):
+	//   - physicalDB                 — target DB to track as pending.
+	//   - matchedProcessorID non-""  — default-DB fallback fired; caller sets
+	//                                  the connection's processorID to this.
+	RewriteUse(ctx context.Context, sql string, dbMap map[string]string, knownPhysicalDBs []string, defaultDB string) (string, string, string, error)
+	// RewriteShowTables rewrites SHOW TABLES using processor prefix filtering.
+	// Returns (rewritten_sql, handled, error).
+	// handled=true means the SQL was rewritten (or should return empty result).
+	// handled=false means passthrough (db not in processor map).
+	RewriteShowTables(ctx context.Context, sql string, currentDB string, currentProcessorID string, dbProcessors map[string]string) (string, bool, error)
 	// Close closes the gRPC connection
 	Close() error
 }
@@ -610,6 +624,122 @@ func (r *SentioNetworkRewriter) Close() error {
 	return nil
 }
 
+// RewriteUse rewrites USE <db> using the sql-rewriter's DatabaseNameRewrite op.
+// See Rewriter.RewriteUse for the three-branch semantics.
+// Returns (rewritten_sql, physical_db, matched_processor_id, error).
+func (r *SentioNetworkRewriter) RewriteUse(ctx context.Context, sql string, dbMap map[string]string, knownPhysicalDBs []string, defaultDB string) (string, string, string, error) {
+	timeout := r.config.Timeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	dbMapProto := make(map[string]string, len(dbMap))
+	for k, v := range dbMap {
+		dbMapProto[k] = v
+	}
+
+	req := &pb.RewriteSQLRequest{
+		Sql: sql,
+		Options: []*pb.RewriteOption{
+			{
+				Op: pb.RewriteOp_DatabaseNameRewrite,
+				Value: &pb.RewriteOption_DatabaseNameArgs{
+					DatabaseNameArgs: &pb.RewriteDatabaseNameArgs{
+						DatabaseMap:            dbMapProto,
+						KnownPhysicalDatabases: knownPhysicalDBs,
+						DefaultDatabase:        defaultDB,
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := r.grpcClient.Rewrite(ctxWithTimeout, req)
+	if err != nil {
+		return "", "", "", fmt.Errorf("gRPC RewriteUse call failed: %w", err)
+	}
+	if resp.Code != pb.RewriteCode_Success {
+		return "", "", "", fmt.Errorf("rewriter USE error: %s", resp.Message)
+	}
+
+	physicalDB := extractDBFromUseSQL(resp.SqlAfterRewrite)
+	matchedPID := resp.MatchedProcessorId
+	log.Debugf("RewriteUse: %q -> %q (physicalDB=%q, matchedProcessorID=%q)", sql, resp.SqlAfterRewrite, physicalDB, matchedPID)
+	return resp.SqlAfterRewrite, physicalDB, matchedPID, nil
+}
+
+// RewriteShowTables rewrites SHOW TABLES using the sql-rewriter's ShowTablesRewrite op.
+// The server parses FROM/IN via the AST and resolves the effective targetDB and
+// processorID from current_db + current_processor_id + db_processors.
+// Returns (rewritten_sql, handled, error).
+// handled=true  → rewritten_sql should be used.
+// handled=false → caller should passthrough (server said show_tables_passthrough=true,
+//                 i.e. DB not in processor map and no processor context).
+// error != nil  → rewriter unavailable/doesn't support op; caller should use regex fallback.
+func (r *SentioNetworkRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, currentProcessorID string, dbProcessors map[string]string) (string, bool, error) {
+	timeout := r.config.Timeout
+	if timeout == 0 {
+		timeout = 5 * time.Second
+	}
+	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+
+	dbProcessorsProto := make(map[string]string, len(dbProcessors))
+	for k, v := range dbProcessors {
+		dbProcessorsProto[k] = v
+	}
+
+	req := &pb.RewriteSQLRequest{
+		Sql: sql,
+		Options: []*pb.RewriteOption{
+			{
+				Op: pb.RewriteOp_ShowTablesRewrite,
+				Value: &pb.RewriteOption_ShowTablesArgs{
+					ShowTablesArgs: &pb.RewriteShowTablesArgs{
+						CurrentDb:          currentDB,
+						CurrentProcessorId: currentProcessorID,
+						DbProcessors:       dbProcessorsProto,
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := r.grpcClient.Rewrite(ctxWithTimeout, req)
+	if err != nil {
+		return "", false, fmt.Errorf("gRPC RewriteShowTables call failed: %w", err)
+	}
+	if resp.Code != pb.RewriteCode_Success {
+		return "", false, fmt.Errorf("rewriter SHOW TABLES error: %s", resp.Message)
+	}
+
+	// Old rewriters silently ignore unknown ops and return the original SQL with
+	// code=Success. Detect this (no system.tables + no passthrough flag set) and
+	// fall back to the regex path.
+	if !resp.ShowTablesPassthrough && !strings.Contains(resp.SqlAfterRewrite, "system.tables") {
+		return "", false, fmt.Errorf("rewriter returned original SQL unchanged (old rewriter, op not supported), using regex fallback")
+	}
+
+	if resp.ShowTablesPassthrough {
+		log.Debugf("RewriteShowTables: passthrough (currentDB=%q)", currentDB)
+		return resp.SqlAfterRewrite, false, nil
+	}
+
+	log.Debugf("RewriteShowTables: %q -> %q", sql, resp.SqlAfterRewrite)
+	return resp.SqlAfterRewrite, true, nil
+}
+
+// extractDBFromUseSQL extracts the database name from a "USE <db>" SQL string.
+func extractDBFromUseSQL(sql string) string {
+	s := strings.TrimSpace(sql)
+	if m := useDBRegexp.FindStringSubmatch(s); m != nil {
+		return strings.Trim(m[1], "`\"")
+	}
+	return ""
+}
+
 // resolveCallbackAddr determines the address that ClickHouse should use to connect
 // back to this proxy when executing remote() calls.
 //
@@ -684,6 +814,14 @@ type NoopRewriter struct{}
 
 func (n NoopRewriter) Rewrite(ctx context.Context, sql string, user string, password string) (string, error) {
 	return sql, nil
+}
+
+func (n NoopRewriter) RewriteUse(ctx context.Context, sql string, dbMap map[string]string, knownPhysicalDBs []string, defaultDB string) (string, string, string, error) {
+	return sql, "", "", nil
+}
+
+func (n NoopRewriter) RewriteShowTables(ctx context.Context, sql string, currentDB string, currentProcessorID string, dbProcessors map[string]string) (string, bool, error) {
+	return sql, false, nil
 }
 
 func (n NoopRewriter) Close() error {
