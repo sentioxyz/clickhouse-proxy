@@ -2,8 +2,16 @@ package proxy
 
 import (
 	"context"
+	"fmt"
+	"net"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
+
+	pb "github.com/sentioxyz/clickhouse-proxy/protos"
+
+	"google.golang.org/grpc"
 )
 
 func TestParseSentioNetworkTables(t *testing.T) {
@@ -107,11 +115,21 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 	state.ProcessorInfos["coinbase"] = ProcessorInfo{ProcessorId: "coinbase"}
 	state.ProcessorInfos["pancakeswap123"] = ProcessorInfo{ProcessorId: "pancakeswap123"}
 
+	mockAddr, stopMock := startMockRewriterService(t)
+	defer stopMock()
+
 	config := RewriterConfig{
-		Enabled:        true,
+		Enabled:     true,
+		ServiceAddr: mockAddr,
+		// Upstream matches coinbase's indexer (localhost:9001), so that
+		// processor is treated as local; pancakeswap123 (12.34.56.78:9001)
+		// falls on the remote branch.
+		Upstream: "localhost:9001",
+		Listen:   ":19001",
+		Timeout:  2 * time.Second,
 	}
 
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
+	rewriter, err := NewSentioNetworkRewriter(config, state, networkV1MockTableRewriterFactory())
 	if err != nil {
 		t.Fatalf("failed to create rewriter: %v", err)
 	}
@@ -164,13 +182,14 @@ func TestSentioNetworkRewriter_Rewrite(t *testing.T) {
 				if result == tt.sql {
 					t.Error("expected SQL to be rewritten, but got original")
 				}
-				if tt.containsLocal && !containsString(result, "sentio.coinbase") {
-					t.Logf("result: %s", result)
-					// Local table should be rewritten to sentio.prefix_table format
+				// NetworkV1: physical table name carries "${processorId}_${replica}."
+				// inside a single identifier, so the rewritten SQL must mention
+				// "coinbase_0.transfer" regardless of what ClickHouse DB wraps it.
+				if tt.containsLocal && !containsString(result, "coinbase_0.transfer") {
+					t.Errorf("expected local rewrite to reference coinbase_0.transfer, got %q", result)
 				}
 				if tt.containsRemote && !containsString(result, "remote(") {
-					t.Logf("result: %s", result)
-					// Remote table should be rewritten to remote() function
+					t.Errorf("expected remote rewrite via remote(), got %q", result)
 				}
 			} else {
 				if result != tt.sql {
@@ -204,9 +223,9 @@ func TestFilterSentioNetworkTables(t *testing.T) {
 
 	expectedTables := map[string]bool{
 		"sentio_coinbase.transfer": true,
-		"system.numbers":          true,
-		"SYSTEM.processes":        true,
-		"pancakeswap.Withdrawl":   true,
+		"system.numbers":           true,
+		"SYSTEM.processes":         true,
+		"pancakeswap.Withdrawl":    true,
 	}
 
 	for _, pt := range filtered {
@@ -259,6 +278,26 @@ func mockTableRewriterFactory(database string) SentioNetworkTableRewriterFactory
 	}
 }
 
+// networkV1MockTableRewriterFactory mimics NetworkV1 semantics:
+//   - Database() is the ClickHouse connection DB (same across processors — "default" here).
+//   - All() values bake the "${processorId}_${replica}." prefix into a single
+//     identifier, because timeseries.Store.BuildTableNameWithoutDatabase
+//     concatenates TableNamePrefix + TableSuffix (the period is part of the
+//     raw table name, not a DB/table separator).
+func networkV1MockTableRewriterFactory() SentioNetworkTableRewriterFactory {
+	return func(ctx context.Context, processorId string,
+		_ IndexerInfo, _ ProcessorInfo) (SentioNetworkTableRewriter, error) {
+		prefix := fmt.Sprintf("%s_0.", processorId)
+		return &mockTableRewriter{
+			database: "default",
+			mappings: map[string]string{
+				"transfer":  prefix + "transfer",
+				"Withdrawl": prefix + "Withdrawl",
+			},
+		}, nil
+	}
+}
+
 // TestBuildRewriteMappings_UnknownProcessorSkipped verifies that when a processorId
 // is not found in NetworkState (Redis), buildRewriteMappings silently skips it
 // instead of returning an error. Known processors are still rewritten.
@@ -279,9 +318,9 @@ func TestBuildRewriteMappings_UnknownProcessorSkipped(t *testing.T) {
 	mockFactory := func(ctx context.Context, processorId string,
 		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
 		return &mockTableRewriter{
-			database: "sentio",
+			database: "default",
 			mappings: map[string]string{
-				"transfer": "transfer",
+				"transfer": "coinbase_0.transfer",
 			},
 		}, nil
 	}
@@ -294,7 +333,7 @@ func TestBuildRewriteMappings_UnknownProcessorSkipped(t *testing.T) {
 
 	tables := []ParsedTable{
 		{FullMatch: "sentio_coinbase.transfer", ProcessorId: "coinbase", TableName: "transfer"},
-		{FullMatch: "system.numbers", ProcessorId: "system", TableName: "numbers"},           // unknown
+		{FullMatch: "system.numbers", ProcessorId: "system", TableName: "numbers"},               // unknown
 		{FullMatch: "unknown_db.some_table", ProcessorId: "unknown_db", TableName: "some_table"}, // unknown
 	}
 
@@ -338,15 +377,17 @@ func TestBuildRewriteMappings_AllMappings(t *testing.T) {
 	}
 	state.ProcessorInfos["myproc"] = ProcessorInfo{ProcessorId: "myproc"}
 
-	// Mock factory: "transfer" → "w6B0Uyvq_event_Transfer", "orders" → "w6B0Uyvq_event_Orders"
-	// "unknown_table" is NOT in the mapping
+	// Mock factory (NetworkV1): Database() is the CH connection DB ("default"),
+	// physical table names carry the "${processorId}_${replica}." prefix inside
+	// a single identifier (matches timeseries.Store.BuildTableNameWithoutDatabase).
+	// "unknown_table" is NOT in the mapping.
 	mockFactory := func(ctx context.Context, processorId string,
 		indexerInfo IndexerInfo, processorInfo ProcessorInfo) (SentioNetworkTableRewriter, error) {
 		return &mockTableRewriter{
-			database: "sentio",
+			database: "default",
 			mappings: map[string]string{
-				"transfer": "w6B0Uyvq_event_Transfer",
-				"orders":   "w6B0Uyvq_event_Orders",
+				"transfer": "myproc_0.event_Transfer",
+				"orders":   "myproc_0.event_Orders",
 			},
 		}, nil
 	}
@@ -369,16 +410,27 @@ func TestBuildRewriteMappings_AllMappings(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	// "transfer" and "orders" should be rewritten
+	// "transfer" and "orders" should be rewritten: Database stays the CH
+	// connection DB, Table carries the processor/replica prefix.
 	if td, ok := tableWithDB["sentio_myproc.transfer"]; !ok {
 		t.Error("expected sentio_myproc.transfer in tableWithDatabaseMap")
-	} else if td.Table != "w6B0Uyvq_event_Transfer" {
-		t.Errorf("expected physical table w6B0Uyvq_event_Transfer, got %s", td.Table)
+	} else {
+		if td.Database != "default" {
+			t.Errorf("expected database default, got %s", td.Database)
+		}
+		if td.Table != "myproc_0.event_Transfer" {
+			t.Errorf("expected physical table myproc_0.event_Transfer, got %s", td.Table)
+		}
 	}
 	if td, ok := tableWithDB["sentio_myproc.orders"]; !ok {
 		t.Error("expected sentio_myproc.orders in tableWithDatabaseMap")
-	} else if td.Table != "w6B0Uyvq_event_Orders" {
-		t.Errorf("expected physical table w6B0Uyvq_event_Orders, got %s", td.Table)
+	} else {
+		if td.Database != "default" {
+			t.Errorf("expected database default, got %s", td.Database)
+		}
+		if td.Table != "myproc_0.event_Orders" {
+			t.Errorf("expected physical table myproc_0.event_Orders, got %s", td.Table)
+		}
 	}
 
 	// "unknown_table" should NOT be in the map (silently skipped)
@@ -494,5 +546,79 @@ func TestResolveCallbackAddr(t *testing.T) {
 				t.Errorf("expected localhost fallback for upstream=%q, got %s", tt.upstream, result)
 			}
 		})
+	}
+}
+
+// mockRewriterServer is a minimal in-process gRPC implementation of
+// RewriterServiceServer used by TestSentioNetworkRewriter_Rewrite. It is not
+// trying to faithfully reproduce the C++ sql-rewriter; it only supplies the
+// two behaviors SentioNetworkRewriter depends on:
+//
+//	Phase 1 (Options == nil): return all "db.table" references in the SQL as
+//	                          OriginalAccessedTableNames.
+//	Phase 2 (TableNameRewrite): apply the TableWithDatabaseMap / RemoteTableMap
+//	                            substitutions with plain ReplaceAll.
+type mockRewriterServer struct {
+	pb.UnimplementedRewriterServiceServer
+}
+
+var mockTableRefPattern = regexp.MustCompile(`[A-Za-z_][\w-]*\.[A-Za-z_][\w-]*`)
+
+func (s *mockRewriterServer) Rewrite(_ context.Context, req *pb.RewriteSQLRequest) (*pb.RewriteSQLResponse, error) {
+	if len(req.Options) == 0 {
+		seen := make(map[string]bool)
+		var names []string
+		for _, m := range mockTableRefPattern.FindAllString(req.Sql, -1) {
+			if seen[m] {
+				continue
+			}
+			seen[m] = true
+			names = append(names, m)
+		}
+		return &pb.RewriteSQLResponse{
+			Code:                       pb.RewriteCode_Success,
+			OriginalAccessedTableNames: names,
+		}, nil
+	}
+
+	out := req.Sql
+	for _, opt := range req.Options {
+		if opt.Op != pb.RewriteOp_TableNameRewrite {
+			continue
+		}
+		args := opt.GetTableNameArgs()
+		if args == nil {
+			continue
+		}
+		for original, td := range args.TableWithDatabaseMap {
+			out = strings.ReplaceAll(out, original, fmt.Sprintf("%s.%s", td.Database, td.Table))
+		}
+		for original, rt := range args.RemoteTableMap {
+			out = strings.ReplaceAll(out, original,
+				fmt.Sprintf("remote('%s', '%s', '%s', '%s', '%s')",
+					rt.Addr, rt.Database, rt.Table, rt.User, rt.Password))
+		}
+	}
+	return &pb.RewriteSQLResponse{
+		Code:            pb.RewriteCode_Success,
+		SqlAfterRewrite: out,
+	}, nil
+}
+
+// startMockRewriterService launches an in-process gRPC rewriter on 127.0.0.1:0
+// and returns its address plus a stop function. SentioNetworkRewriter uses
+// grpc.DialContext with WithBlock, so a real TCP listener is the simplest way
+// to give it something to connect to.
+func startMockRewriterService(t *testing.T) (string, func()) {
+	t.Helper()
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("failed to listen for mock rewriter: %v", err)
+	}
+	srv := grpc.NewServer()
+	pb.RegisterRewriterServiceServer(srv, &mockRewriterServer{})
+	go func() { _ = srv.Serve(lis) }()
+	return lis.Addr().String(), func() {
+		srv.Stop()
 	}
 }
