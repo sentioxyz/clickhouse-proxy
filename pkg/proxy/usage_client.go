@@ -29,6 +29,14 @@ type UsageClient struct {
 	redisClient *redis.Client
 }
 
+// Conn returns the underlying gRPC connection. The same listener on
+// sentio-node serves multiple services (QueryUsageService,
+// DatabaseRegistryService); callers that need a sibling stub can build
+// one on this conn instead of dialing a second time.
+func (c *UsageClient) Conn() *grpc.ClientConn {
+	return c.grpcConn
+}
+
 // NewUsageClient creates a new UsageClient connected to the sentio-node QueryUsageService.
 func NewUsageClient(sentioNodeAddr string, redisClient *redis.Client) (*UsageClient, error) {
 	conn, err := grpc.NewClient(sentioNodeAddr,

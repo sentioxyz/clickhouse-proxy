@@ -13,6 +13,7 @@ go_library(
         "@sentioxyz_sentio_core//common/clickhousemanager",
         "@sentioxyz_sentio_core//common/log",
         "@sentioxyz_sentio_core//network/sqlrewriter",
+        "@sentioxyz_sentio_core//service/processor/models",
     ],
 )
 

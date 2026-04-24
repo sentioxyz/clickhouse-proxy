@@ -16,6 +16,7 @@ go_library(
         "sidecar.go",
         "show_tables.go",
         "usage_client.go",
+        "user_db.go",
         "validator.go",
     ],
     importpath = "github.com/sentioxyz/clickhouse-proxy/pkg/proxy",
@@ -24,6 +25,7 @@ go_library(
         "//pkg/cluster",
         "//protos",
         "@com_github_clickhouse_ch_go//proto",
+        "@com_github_clickhouse_clickhouse_go_v2//:clickhouse-go",
         "@sentioxyz_sentio_core//common/clickhousemanager",
         "@com_github_ethereum_go_ethereum//crypto",
         "@com_github_prometheus_client_golang//prometheus",
@@ -39,6 +41,7 @@ go_library(
         "@sentioxyz_sentio_core//common/statemirror",
         "@sentioxyz_sentio_core//network/registry",
         "@sentioxyz_sentio_core//network/state",
+        "@sentioxyz_sentio_core//service/database_registry/protos",
         "@sentioxyz_sentio_core//service/usage/protos",
     ],
 )
@@ -70,6 +73,7 @@ go_test(
         "round5_audit_test.go",
         "route_test.go",
         "skip_rewrite_test.go",
+        "user_db_test.go",
         "validator_test.go",
     ],
     data = [
