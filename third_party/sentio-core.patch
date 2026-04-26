@@ -1,5 +1,5 @@
---- a/MODULE.bazel	2026-02-23 15:12:56
-+++ b/MODULE.bazel	2026-02-23 15:12:56
+--- a/MODULE.bazel	2026-04-23 21:25:43
++++ b/MODULE.bazel	2026-04-23 21:25:43
 @@ -76,26 +76,6 @@
  go_deps = use_extension("@gazelle//:extensions.bzl", "go_deps")
  

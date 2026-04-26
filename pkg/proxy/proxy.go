@@ -152,7 +152,7 @@ type Proxy struct {
 	relaySigner  *RelaySigner  // Signs relay JWS tokens for __route__ connections
 	sidecarSigner *RelaySigner // Signs JWS tokens in sidecar mode (separate key from relaySigner)
 	networkState NetworkState  // Used by forwarding-only mode to discover bound proxy targets
-	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled)
+	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled); also carries the gRPC conn reused for DatabaseRegistryService on CREATE DATABASE intercepts
 	clusterMgr   *cluster.Manager // Cluster manager for multi-replica routing (nil = legacy single-upstream)
 	credProvider CredentialProvider // Provides ClickHouse credentials for upstream connections (nil = passthrough client creds)
 	// compressedBufPool removed: proto.Reader.ReadRaw always returns a newly allocated slice,
@@ -1791,6 +1791,38 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				if err != nil {
 					log.Infof("[conn %d] streaming: query rejected by validator: %v", id, err)
 					return
+				}
+
+				// User-db CREATE DATABASE interception. Runs after signature
+				// validation so we always know who "owns" the new database,
+				// and before balance/usage accounting because this DDL
+				// doesn't bill against query SU. On match, the proxy calls
+				// a randomly picked indexer's sentio-node to submit the
+				// on-chain createUserDatabase tx, then closes this query
+				// by sending EndOfStream directly back to the client —
+				// nothing is forwarded to upstream ClickHouse.
+				// User-db DDL interception only fires when the proxy is wired
+				// to a sentio-node (usageClient carries the gRPC channel to
+				// DatabaseRegistryService) and to a NetworkState (so DROP
+				// can resolve the bound indexer). Standalone deployments
+				// without those — local dev, the CI integration suite, any
+				// straight CH-pass-through use — fall through to upstream
+				// so a regular `CREATE DATABASE foo` actually creates a
+				// physical CH database.
+				if p.usageClient != nil && p.networkState != nil {
+					if dbName, ok := isCreateDatabase(eq.Body); ok {
+						p.handleCreateDatabase(ctx, clientConn, id, eq.Body, dbName, signerAddr, settingsMap)
+						return
+					}
+
+					// Symmetric to CREATE, but the routing target is the
+					// indexer the database is bound to (DatabaseInfo.IndexerId
+					// looked up from state) — only that indexer's sentio-node
+					// can issue the deleteDatabase tx.
+					if dbName, ok := isDropDatabase(eq.Body); ok {
+						p.handleDropDatabase(ctx, clientConn, id, eq.Body, dbName, signerAddr, settingsMap)
+						return
+					}
 				}
 
 				// Query usage: check balance and report usage (same as non-streaming path)
