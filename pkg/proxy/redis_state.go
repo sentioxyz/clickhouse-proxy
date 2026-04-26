@@ -98,6 +98,43 @@ func (r *RedisNetworkState) GetProcessorInfo(processorId string) (ProcessorInfo,
 	}, true
 }
 
+func (r *RedisNetworkState) GetDatabase(databaseId string) (DatabaseInfo, bool) {
+	ctx := context.Background()
+	value, ok, err := r.mirror.Get(ctx, statemirror.MappingDatabases, databaseId)
+	if err != nil || !ok {
+		return DatabaseInfo{}, false
+	}
+	var info state.DatabaseInfo
+	if err := decodeJSON(value, &info); err != nil {
+		log.Warnf("Redis: failed to decode DatabaseInfo for %q: %v", databaseId, err)
+		return DatabaseInfo{}, false
+	}
+	return info, true
+}
+
+// GetDatabasePermissions returns the materialized writer-set: outer key is
+// account address (case may be EIP-55 or lowercase depending on the
+// producer; callers should compare case-insensitively), inner map is
+// databaseId → permission string ("write" for writers).
+func (r *RedisNetworkState) GetDatabasePermissions() map[string]map[string]string {
+	ctx := context.Background()
+	all, err := r.mirror.GetAll(ctx, statemirror.MappingDatabasePermissions)
+	if err != nil {
+		log.Warnf("Redis: failed to get all database permissions: %v", err)
+		return nil
+	}
+	result := make(map[string]map[string]string, len(all))
+	for account, value := range all {
+		var perms map[string]string
+		if err := decodeJSON(value, &perms); err != nil {
+			log.Warnf("Redis: failed to decode database permissions for %s: %v", account, err)
+			continue
+		}
+		result[account] = perms
+	}
+	return result
+}
+
 func (r *RedisNetworkState) GetAllIndexerInfos() map[uint64]IndexerInfo {
 	ctx := context.Background()
 	all, err := r.mirror.GetAll(ctx, statemirror.MappingIndexerInfos)

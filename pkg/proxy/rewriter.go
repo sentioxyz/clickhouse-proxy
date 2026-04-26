@@ -60,12 +60,20 @@ type NetworkState interface {
 	// GetAllIndexerInfos returns all IndexerInfos in the network state.
 	// Used by forwarding-only proxies to discover available targets.
 	GetAllIndexerInfos() map[uint64]IndexerInfo
+	// GetDatabase retrieves on-chain DatabaseInfo for the given id.
+	// Used by DROP DATABASE intercept to resolve owner + bound indexer.
+	GetDatabase(databaseId string) (DatabaseInfo, bool)
+	// GetDatabasePermissions returns the materialized writer-set indexed
+	// by account address (case may vary). Used by DROP DATABASE intercept
+	// to authorize non-owner writers.
+	GetDatabasePermissions() map[string]map[string]string
 }
 
 // Use sentio-core types directly (same field definitions)
 type IndexerInfo = state.IndexerInfo
 type ProcessorAllocation = state.ProcessorAllocation
 type ProcessorInfo = state.ProcessorInfo
+type DatabaseInfo = state.DatabaseInfo
 
 // RewriterConfig is the rewriter configuration
 type RewriterConfig struct {
@@ -834,6 +842,8 @@ type InMemoryNetworkState struct {
 	ProcessorAllocations map[string][]ProcessorAllocation
 	IndexerInfos         map[uint64]IndexerInfo
 	ProcessorInfos       map[string]ProcessorInfo
+	Databases            map[string]DatabaseInfo
+	DatabasePermissions  map[string]map[string]string
 }
 
 func NewInMemoryNetworkState() *InMemoryNetworkState {
@@ -841,6 +851,8 @@ func NewInMemoryNetworkState() *InMemoryNetworkState {
 		ProcessorAllocations: make(map[string][]ProcessorAllocation),
 		IndexerInfos:         make(map[uint64]IndexerInfo),
 		ProcessorInfos:       make(map[string]ProcessorInfo),
+		Databases:            make(map[string]DatabaseInfo),
+		DatabasePermissions:  make(map[string]map[string]string),
 	}
 }
 
@@ -871,6 +883,27 @@ func (s *InMemoryNetworkState) GetAllIndexerInfos() map[uint64]IndexerInfo {
 	cp := make(map[uint64]IndexerInfo, len(s.IndexerInfos))
 	for k, v := range s.IndexerInfos {
 		cp[k] = v
+	}
+	return cp
+}
+
+func (s *InMemoryNetworkState) GetDatabase(databaseId string) (DatabaseInfo, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	info, ok := s.Databases[databaseId]
+	return info, ok
+}
+
+func (s *InMemoryNetworkState) GetDatabasePermissions() map[string]map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	cp := make(map[string]map[string]string, len(s.DatabasePermissions))
+	for k, v := range s.DatabasePermissions {
+		inner := make(map[string]string, len(v))
+		for ik, iv := range v {
+			inner[ik] = iv
+		}
+		cp[k] = inner
 	}
 	return cp
 }
