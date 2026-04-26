@@ -13,7 +13,7 @@ bazel_dep(name = "sentio-core", version = "0.0.0", repo_name = "sentioxyz_sentio
 # When used as a dependency, the parent module's override takes precedence.
 git_override(
     module_name = "sentio-core",
-    commit = "aeab366aecf8703a477521ab687c6ad3512ea123",
+    commit = "21fa6c2e9e96c51570f10b278efbfbc951a72393",
     patch_strip = 1,
     patches = ["//third_party:sentio-core.patch"],
     remote = "https://github.com/sentioxyz/sentio-core",

@@ -66,6 +66,7 @@ type NetworkState interface {
 type IndexerInfo = state.IndexerInfo
 type ProcessorAllocation = state.ProcessorAllocation
 type ProcessorInfo = state.ProcessorInfo
+type DatabaseInfo = state.DatabaseInfo
 
 // RewriterConfig is the rewriter configuration
 type RewriterConfig struct {

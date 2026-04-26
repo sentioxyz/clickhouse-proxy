@@ -12,7 +12,9 @@ go_library(
         "@com_github_redis_go_redis_v9//:go-redis",
         "@sentioxyz_sentio_core//common/clickhousemanager",
         "@sentioxyz_sentio_core//common/log",
+        "@sentioxyz_sentio_core//common/statemirror",
         "@sentioxyz_sentio_core//network/sqlrewriter",
+        "@sentioxyz_sentio_core//network/state",
         "@sentioxyz_sentio_core//service/processor/models",
     ],
 )

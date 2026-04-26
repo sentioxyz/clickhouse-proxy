@@ -12,6 +12,7 @@ import (
 	"net"
 	"regexp"
 	log "sentioxyz/sentio-core/common/log"
+	"sentioxyz/sentio-core/network/state"
 	"strconv"
 	"strings"
 	"sync"
@@ -152,6 +153,7 @@ type Proxy struct {
 	relaySigner  *RelaySigner  // Signs relay JWS tokens for __route__ connections
 	sidecarSigner *RelaySigner // Signs JWS tokens in sidecar mode (separate key from relaySigner)
 	networkState NetworkState  // Used by forwarding-only mode to discover bound proxy targets
+	coreState    state.State   // Full sentio-core state.State for user-db lookups (GetDatabase, GetDatabasePermissions); nil if not configured
 	usageClient  *UsageClient  // Query usage reporting to sentio-node (nil if disabled); also carries the gRPC conn reused for DatabaseRegistryService on CREATE DATABASE intercepts
 	clusterMgr   *cluster.Manager // Cluster manager for multi-replica routing (nil = legacy single-upstream)
 	credProvider CredentialProvider // Provides ClickHouse credentials for upstream connections (nil = passthrough client creds)
@@ -184,6 +186,15 @@ func (p *Proxy) SetRelaySigner(s *RelaySigner) {
 // SetNetworkState sets the network state for forwarding-only mode.
 func (p *Proxy) SetNetworkState(ns NetworkState) {
 	p.networkState = ns
+}
+
+// SetCoreState wires the full sentio-core state.State used by user-db
+// intercepts (DROP DATABASE) to resolve DatabaseInfo + permissions and
+// to call state.IsDatabaseWriter. Optional — leaving it nil disables the
+// DROP DATABASE intercept (the proxy returns PROXY_ERROR rather than
+// guessing).
+func (p *Proxy) SetCoreState(s state.State) {
+	p.coreState = s
 }
 
 // SetUsageClient sets the query usage client for billing integration.
@@ -1803,6 +1814,16 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				// nothing is forwarded to upstream ClickHouse.
 				if dbName, ok := isCreateDatabase(eq.Body); ok {
 					p.handleCreateDatabase(ctx, clientConn, id, eq.Body, dbName, signerAddr, settingsMap)
+					return
+				}
+
+				// User-db DROP DATABASE interception. Symmetric to the
+				// CREATE branch above, but the routing target is the
+				// indexer the database is bound to (DatabaseInfo.IndexerId
+				// looked up from state) — only that indexer's sentio-node
+				// can issue the deleteDatabase tx.
+				if dbName, ok := isDropDatabase(eq.Body); ok {
+					p.handleDropDatabase(ctx, clientConn, id, eq.Body, dbName, signerAddr, settingsMap)
 					return
 				}
 

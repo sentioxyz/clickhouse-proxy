@@ -12,7 +12,9 @@ import (
 	"github.com/redis/go-redis/v9"
 	ckhmanager "sentioxyz/sentio-core/common/clickhousemanager"
 	log "sentioxyz/sentio-core/common/log"
+	"sentioxyz/sentio-core/common/statemirror"
 	"sentioxyz/sentio-core/network/sqlrewriter"
+	"sentioxyz/sentio-core/network/state"
 	processormodels "sentioxyz/sentio-core/service/processor/models"
 
 	"github.com/sentioxyz/clickhouse-proxy/pkg/cluster"
@@ -154,11 +156,11 @@ func main() {
 
 	// Load network state
 	var networkState proxy.NetworkState
-	state, err := proxy.NewRedisNetworkState(redisClient)
+	redisState, err := proxy.NewRedisNetworkState(redisClient)
 	if err != nil {
 		log.Fatalf("failed to initialize Redis network state: %v", err)
 	}
-	networkState = state
+	networkState = redisState
 
 	// Load ClickHouse manager (shared by rewriter and credential provider)
 	var ckhMgr ckhmanager.Manager
@@ -246,6 +248,27 @@ func main() {
 	p := proxy.NewProxy(cfg, validator, rewriter)
 	p.SetNetworkState(networkState)
 	p.SetClusterManager(clusterMgr)
+
+	// Build a read-only sentio-core state.State backed by the same Redis
+	// mirror so the DROP DATABASE intercept can resolve DatabaseInfo +
+	// permissions via state.IsDatabaseWriter. PlainState is just an
+	// in-memory cache; SyncMirror() inside NewStateMirrored populates it
+	// from Redis up front, and StateMirrored writes-through on mutations
+	// (which we never do from this binary).
+	plainState := &state.PlainState{
+		ProcessorAllocations: map[string]map[uint64]state.ProcessorAllocation{},
+		ProcessorInfos:       map[string]state.ProcessorInfo{},
+		IndexerInfos:         map[uint64]state.IndexerInfo{},
+		HostedProcessors:     map[string]bool{},
+		Databases:            map[string]state.DatabaseInfo{},
+		DatabasePermissions:  map[string]map[string]string{},
+	}
+	mirror := statemirror.NewRedisMirror(redisClient)
+	coreState, err := state.NewStateMirrored(context.Background(), plainState, mirror)
+	if err != nil {
+		log.Fatalf("failed to build core state mirror: %v", err)
+	}
+	p.SetCoreState(coreState)
 
 	// Wire cluster manager to rewriter for multi-replica isLocal detection
 	if clusterMgr != nil {
