@@ -155,7 +155,6 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
     ],
     "auth_max_token_age": "1m",
     "auth_allow_no_auth": false,
-    "relay_private_key_hex": "0x12345678901234567890123456...",
 
     // === SQL 重写配置 ===
     "rewriter_service_addr": "localhost:50051",
@@ -223,7 +222,6 @@ proxy 支持 JSON 格式的配置文件。配置的加载顺序为：
 | `auth_allowed_addresses` | []string | 否 | `[]` | 允许执行查询的以太坊地址列表 |
 | `auth_max_token_age` | duration | 否 | `1m` | JWS token 最大有效期 |
 | `auth_allow_no_auth` | bool | 否 | `false` | 是否允许不携带 token 的请求通过 |
-| `relay_private_key_hex` | string | 否 | （空） | 用于签发 relay JWS token 的以太坊私钥，在 proxy 间 `__route__` 连接中使用。集群内所有 proxy 应使用相同的私钥，对应地址须在 `auth_allowed_addresses` 中 |
 
 #### SQL 重写配置
 

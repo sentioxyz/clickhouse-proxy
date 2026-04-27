@@ -155,7 +155,6 @@ Example configuration with authentication enabled:
     ],
     "auth_max_token_age": "1m",
     "auth_allow_no_auth": false,
-    "relay_private_key_hex": "0x12345678901234567890123456...",
 
     // === SQL Rewriter ===
     "rewriter_service_addr": "localhost:50051",
@@ -223,7 +222,6 @@ Example configuration for Sidecar mode:
 | `auth_allowed_addresses` | []string | No | `[]` | List of Ethereum addresses allowed to execute queries |
 | `auth_max_token_age` | duration | No | `1m` | Maximum age of JWS tokens |
 | `auth_allow_no_auth` | bool | No | `false` | Allow requests without an auth token to pass through |
-| `relay_private_key_hex` | string | No | (empty) | Ethereum private key for signing relay JWS tokens in proxy-to-proxy (`__route__`) connections. All proxies in a cluster should share the same key. The corresponding address must be in `auth_allowed_addresses` |
 
 #### SQL Rewriter
 
