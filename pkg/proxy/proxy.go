@@ -2578,6 +2578,16 @@ func (p *Proxy) handleServerClientWithAuth(id int64, br *bufio.Reader, chReader 
 				<-done
 				return
 			}
+			// Gate: only registered indexer signers are accepted for
+			// relay (__route__) arrivals. This ensures the originator
+			// is a known indexer per on-chain state, eliminating the
+			// need for a shared relay secret.
+			if !isIndexerSigner(p.networkState, signerAddr) {
+				log.Infof("[conn %d] server-auth: signer %s is not a registered indexer, rejecting", id, signerAddr)
+				upstreamConn.Close()
+				<-done
+				return
+			}
 			log.Infof("[conn %d] server-auth: relay token validated, signer=%s sql_len=%d", id, signerAddr, len(eq.Body))
 			if p.cfg.LogQueries {
 				log.Infof("[conn %d] server-auth: Query: %q", id, eq.Body)

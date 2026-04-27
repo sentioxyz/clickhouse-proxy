@@ -31,12 +31,6 @@ type Config struct {
 	AuthMaxTokenAge      Duration `json:"auth_max_token_age"     yaml:"auth_max_token_age"`
 	AuthAllowNoAuth      bool     `json:"auth_allow_no_auth"     yaml:"auth_allow_no_auth"` // If true, requests without auth token are allowed
 
-	// RelayPrivateKeyHex is the Ethereum private key used by proxies to sign
-	// relay JWS tokens for proxy-to-proxy (__route__) connections.
-	// All proxies in the cluster should share the same key.
-	// The corresponding address must be in AuthAllowedAddresses.
-	RelayPrivateKeyHex string `json:"relay_private_key_hex" yaml:"relay_private_key_hex"`
-
 	// SQL Rewriter configuration
 	RewriterServiceAddr string   `json:"rewriter_service_addr" yaml:"rewriter_service_addr"` // sql-rewriter gRPC address (required when enabled)
 	RewriterTimeout     Duration `json:"rewriter_timeout"      yaml:"rewriter_timeout"`      // Rewrite timeout

@@ -72,6 +72,7 @@ go_test(
         "round4_audit_test.go",
         "round5_audit_test.go",
         "route_test.go",
+        "server_auth_indexer_gate_test.go",
         "skip_rewrite_test.go",
         "user_db_test.go",
         "validator_test.go",
@@ -90,5 +91,6 @@ go_test(
         "@com_github_segmentio_asm//bswap",
         "@io_opentelemetry_go_otel_trace//:trace",
         "@org_golang_google_grpc//:grpc",
+        "@sentioxyz_sentio_core//network/state",
     ],
 )

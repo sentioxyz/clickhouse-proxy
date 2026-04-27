@@ -976,7 +976,7 @@ func runPhaseAuthInvalid() bool {
 
 // ========== Phase 4: Auth Relay ==========
 // Tests proxy-to-proxy relay token propagation.
-// Requires: Auth Proxy1 (39001) with rewriter + Auth Proxy2 (39002), both with relay_private_key_hex.
+// Requires: Auth Proxy1 (39001) with rewriter + Auth Proxy2 (39002), relay signing derived from indexer PRIVATE_KEY.
 // Queries using sentio_remote_proc.* tables go through:
 //
 //	Client → Proxy1 (JWS) → CH1 → __route__ → Proxy1 (relay JWS) → Proxy2 (validate) → CH2

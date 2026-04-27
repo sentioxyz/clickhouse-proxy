@@ -177,18 +177,20 @@ func main() {
 		if ckhMgr == nil {
 			log.Fatalf("ckh_manager_config_path is required for SQL rewriter table mapping")
 		}
-		privateKeyHex := cfg.RelayPrivateKeyHex
-
 		// Create table rewriter factory backed by sentio-core TableMapper.
 		// In sentio-network (this binary runs as the per-indexer proxy next
 		// to sentio-node), tables are always provisioned under the NetworkV1
 		// layout — `${processorID}_${replica}.${suffix}`. Compatible is for
 		// the legacy single-tenant deployment path and is never correct here.
+		//
+		// NOTE: The standalone clickhouse-proxy binary has no notion of an
+		// indexer identity, so no Payer key is passed. The TableMapper's
+		// empty-key guard handles this correctly (no Payer resolution).
 		tableRewriterFactory := func(ctx context.Context, processorId string,
 			indexerInfo proxy.IndexerInfo, processorInfo proxy.ProcessorInfo) (proxy.SentioNetworkTableRewriter, error) {
 			const processorReplica = 0
 			return sqlrewriter.NewTableMapper(
-				privateKeyHex,
+				"",
 				processorId,
 				processorReplica,
 				processormodels.TablePatternNetworkV1,
@@ -257,7 +259,7 @@ func main() {
 
 	// Initialize credential provider for automatic credential replacement
 	if cfg.CredentialReplaceEnabled && ckhMgr != nil {
-		credProvider := proxy.NewCkhManagerCredentialProvider(ckhMgr, cfg.RelayPrivateKeyHex)
+		credProvider := proxy.NewCkhManagerCredentialProvider(ckhMgr, "")
 		p.SetCredentialProvider(credProvider)
 		if rw, ok := rewriter.(*proxy.SentioNetworkRewriter); ok && rw != nil {
 			rw.SetCredentialProvider(credProvider)
@@ -265,15 +267,10 @@ func main() {
 		log.Infof("credential replacement enabled via ckh_manager_config")
 	}
 
-	// Initialize relay JWS signer for proxy-to-proxy (__route__) token propagation
-	if cfg.RelayPrivateKeyHex != "" {
-		signer, err := proxy.NewRelaySigner(cfg.RelayPrivateKeyHex)
-		if err != nil {
-			log.Fatalf("failed to create relay signer: %v", err)
-		}
-		p.SetRelaySigner(signer)
-		log.Infof("relay JWS signer enabled, address=%s", signer.Address())
-	}
+	// NOTE: The standalone clickhouse-proxy binary does not set a relay
+	// signer. Relay signing is handled by sentio-node's standalone mode,
+	// which derives the key from the indexer's on-chain identity (PRIVATE_KEY).
+	// The existing relaySigner == nil fallback in handleRouteWithRelay applies.
 
 	// Initialize query usage client for billing integration
 	if cfg.QueryUsageEnabled && cfg.SentioNodeAddr != "" {
