@@ -18,7 +18,7 @@ func TestRelaySigner_SignAndValidate(t *testing.T) {
 	}
 
 	// Create validator with the signer's address in allowlist
-	validator := NewEthValidator([]string{signer.Address()}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{signer.Address()}, 1*time.Minute, true, false, nil)
 
 	sql := "SELECT * FROM default.my_table WHERE id = 1"
 	token, err := signer.SignToken(sql)
@@ -113,7 +113,7 @@ func TestRelaySigner_WrongSQLFailsValidation(t *testing.T) {
 		t.Fatalf("failed to create relay signer: %v", err)
 	}
 
-	validator := NewEthValidator([]string{signer.Address()}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{signer.Address()}, 1*time.Minute, true, false, nil)
 
 	// Sign for "SELECT 1" but validate against "SELECT 2"
 	token, _ := signer.SignToken("SELECT 1")

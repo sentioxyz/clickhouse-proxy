@@ -53,7 +53,7 @@ func TestEthValidator_ValidToken(t *testing.T) {
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
-	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false, nil)
 
 	sql := "SELECT 1"
 	sqlHash := keccak256Hex([]byte(sql))
@@ -78,7 +78,7 @@ func TestEthValidator_MissingToken(t *testing.T) {
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
-	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false, nil)
 
 	meta := QueryMeta{
 		SQL:      "SELECT 1",
@@ -96,7 +96,7 @@ func TestEthValidator_ExpiredToken(t *testing.T) {
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
-	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false, nil)
 
 	sql := "SELECT 1"
 	sqlHash := keccak256Hex([]byte(sql))
@@ -122,7 +122,7 @@ func TestEthValidator_QueryHashMismatch(t *testing.T) {
 	privKey, _ := crypto.HexToECDSA(privKeyHex)
 	addr := crypto.PubkeyToAddress(privKey.PublicKey).Hex()
 
-	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{addr}, 1*time.Minute, true, false, nil)
 
 	sql := "SELECT 1"
 	// Wrong hash - hash of different query
@@ -145,7 +145,7 @@ func TestEthValidator_QueryHashMismatch(t *testing.T) {
 
 func TestEthValidator_UnauthorizedAddress(t *testing.T) {
 	// Validator allows a different address
-	validator := NewEthValidator([]string{"0x1234567890123456789012345678901234567890"}, 1*time.Minute, true, false)
+	validator := NewEthValidator([]string{"0x1234567890123456789012345678901234567890"}, 1*time.Minute, true, false, nil)
 
 	// Use our test key which has a different address
 	privKeyHex := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -170,7 +170,7 @@ func TestEthValidator_UnauthorizedAddress(t *testing.T) {
 
 func TestEthValidator_Disabled(t *testing.T) {
 	// Validator is disabled
-	validator := NewEthValidator(nil, 1*time.Minute, false, false)
+	validator := NewEthValidator(nil, 1*time.Minute, false, false, nil)
 
 	meta := QueryMeta{
 		SQL:      "SELECT 1",

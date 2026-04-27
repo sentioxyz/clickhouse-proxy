@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"regexp"
-	"strings"
 	"time"
 
 	"github.com/ClickHouse/ch-go/proto"
@@ -13,34 +12,8 @@ import (
 
 	log "sentioxyz/sentio-core/common/log"
 	registryProtos "sentioxyz/sentio-core/service/database_registry/protos"
+	"sentioxyz/sentio-core/network/state"
 )
-
-// writePermission must match sentio-core's state.WritePermission — the
-// string sentio-node's syncDatabaseWriters writes into the permission
-// map for accounts authorized to perform write operations on a user DB.
-const writePermission = "write"
-
-// isDatabaseWriter reports whether addr is authorized to perform write
-// operations (DROP, INSERT/UPDATE/DELETE, ALTER) on the given user
-// database. Mirrors sentio-core's state.IsDatabaseWriter: signer is a
-// writer iff it equals db.Owner OR the materialized permission map
-// records perms[dbId] == "write" for that account. Address comparison
-// is case-insensitive (state mirror values may be EIP-55 or lowercased
-// depending on the producer).
-func isDatabaseWriter(db DatabaseInfo, perms map[string]map[string]string, addr string) bool {
-	if addr == "" {
-		return false
-	}
-	if strings.EqualFold(db.Owner, addr) {
-		return true
-	}
-	for account, p := range perms {
-		if strings.EqualFold(account, addr) {
-			return p[db.DatabaseId] == writePermission
-		}
-	}
-	return false
-}
 
 // createUserDatabaseTimeout bounds the full round trip: dial the local
 // sentio-node, submit createUserDatabase, wait for the tx to mine.
@@ -284,7 +257,7 @@ func (p *Proxy) handleDropDatabase(ctx context.Context, clientConn net.Conn, id 
 			fmt.Sprintf("Database %q does not exist", dbName))
 		return true
 	}
-	if !isDatabaseWriter(db, p.networkState.GetDatabasePermissions(), userAddr) {
+	if !state.IsDatabaseWriter(p.networkState, userAddr, dbName) {
 		log.Infof("[conn %d] drop_database: %s is not authorized to drop %q (owner=%s)", id, userAddr, dbName, db.Owner)
 		sendExceptionToClient(clientConn, 497, "ACCESS_DENIED",
 			fmt.Sprintf("address %s is not authorized to drop database %q", userAddr, dbName))
