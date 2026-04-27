@@ -1,6 +1,10 @@
 package proxy
 
-import "testing"
+import (
+	"testing"
+
+	"sentioxyz/sentio-core/network/state"
+)
 
 func TestIsCreateDatabase(t *testing.T) {
 	tests := []struct {
@@ -72,36 +76,62 @@ func TestIsDropDatabase(t *testing.T) {
 	}
 }
 
-func TestIsDatabaseWriter(t *testing.T) {
-	owner := "0xAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAaAa"
-	writer := "0xBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB"
-	other := "0xCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCcCc"
+// fakeNetworkState implements NetworkState for isDatabaseWriter tests.
+type fakeNetworkState struct {
+	dbs    map[string]DatabaseInfo
+	perms  map[string]map[string]string
+	signer map[uint64]IndexerInfo
+}
 
-	db := DatabaseInfo{DatabaseId: "foo", Owner: owner}
-	perms := map[string]map[string]string{
-		// Producer may store either case; helper compares case-insensitively.
-		"0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": {"foo": writePermission},
-		"0xdddddddddddddddddddddddddddddddddddddddd": {"foo": "read"},
+func (f *fakeNetworkState) GetDatabase(id string) (DatabaseInfo, bool) {
+	db, ok := f.dbs[id]
+	return db, ok
+}
+func (f *fakeNetworkState) GetDatabasePermissions() map[string]map[string]string { return f.perms }
+func (f *fakeNetworkState) GetIndexerInfo(id uint64) (IndexerInfo, bool) {
+	info, ok := f.signer[id]
+	return info, ok
+}
+func (f *fakeNetworkState) GetProcessorAllocation(string) ([]ProcessorAllocation, bool) { return nil, false }
+func (f *fakeNetworkState) GetProcessorInfo(string) (ProcessorInfo, bool)               { return ProcessorInfo{}, false }
+func (f *fakeNetworkState) GetAllIndexerInfos() map[uint64]IndexerInfo                  { return nil }
+
+func TestIsDatabaseWriter(t *testing.T) {
+	owner := "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	writer := "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	other := "0xcccccccccccccccccccccccccccccccccccccccc"
+	indexerSigner := "0xdddddddddddddddddddddddddddddddddddddddd"
+
+	ns := &fakeNetworkState{
+		dbs: map[string]DatabaseInfo{
+			"foo": {DatabaseId: "foo", Owner: owner, IndexerId: 1},
+		},
+		perms: map[string]map[string]string{
+			writer:        {"foo": state.WritePermission},
+			indexerSigner: {"foo": "read"},
+		},
+		signer: map[uint64]IndexerInfo{
+			1: {IndexerId: 1, Signer: indexerSigner},
+		},
 	}
 
 	tests := []struct {
 		name string
-		db   DatabaseInfo
 		addr string
 		want bool
 	}{
-		{"owner exact case", db, owner, true},
-		{"owner lowercased", db, "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", true},
-		{"writer via permissions (case-insensitive)", db, writer, true},
-		{"non-writer with read permission", db, "0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", false},
-		{"unknown address", db, other, false},
-		{"empty addr", db, "", false},
-		{"empty owner, no perms", DatabaseInfo{DatabaseId: "foo"}, owner, false},
+		{"owner", owner, true},
+		{"writer via permissions", writer, true},
+		{"indexer signer", indexerSigner, true},
+		{"indexer signer uppercased", "0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", true},
+		{"non-writer with read permission", "0xDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD", false},
+		{"unknown address", other, false},
+		{"empty addr", "", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := isDatabaseWriter(tc.db, perms, tc.addr); got != tc.want {
-				t.Errorf("isDatabaseWriter(%+v, %q) = %v, want %v", tc.db, tc.addr, got, tc.want)
+			if got := state.IsDatabaseWriter(ns, tc.addr, "foo"); got != tc.want {
+				t.Errorf("IsDatabaseWriter(%q) = %v, want %v", tc.addr, got, tc.want)
 			}
 		})
 	}

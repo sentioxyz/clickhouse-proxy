@@ -98,10 +98,22 @@ type EthValidator struct {
 	Enabled bool
 	// AllowNoAuth when true allows requests without auth tokens to pass through.
 	AllowNoAuth bool
+	// NetworkState is used to accept any active indexer signer as a valid
+	// authenticated address (in addition to the static AllowedAddresses).
+	// When AllowedAddresses is empty, all addresses are accepted (legacy).
+	// When non-empty, a recovered address must be in the allowlist or match
+	// an active indexer's Signer field.
+	//
+	// TEMPORARY: SQL_sentio_admin accepts any indexer signer. This must be
+	// restricted to only the local sentio-node's indexer signer once the
+	// proxy knows its own indexer ID. The loopback bind provides implicit
+	// scope in production but is not a substitute for proper access control.
+	NetworkState NetworkState
 }
 
 // NewEthValidator creates a new EthValidator with the given allowed addresses.
-func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool, allowNoAuth bool) *EthValidator {
+// If networkState is non-nil, any active indexer signer is also accepted.
+func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool, allowNoAuth bool, networkState NetworkState) *EthValidator {
 	allowed := make(map[string]bool, len(addresses))
 	for _, addr := range addresses {
 		allowed[strings.ToLower(addr)] = true
@@ -111,6 +123,7 @@ func NewEthValidator(addresses []string, maxAge time.Duration, enabled bool, all
 		MaxTokenAge:      maxAge,
 		Enabled:          enabled,
 		AllowNoAuth:      allowNoAuth,
+		NetworkState:     networkState,
 	}
 }
 
@@ -143,6 +156,28 @@ func (v *EthValidator) ValidateQuery(ctx context.Context, meta QueryMeta) (strin
 	return v.validateJWSCompact(token, meta.SQL)
 }
 
+// isAllowedAddress reports whether addr is authorized. When the static
+// AllowedAddresses list is empty, any address is accepted (legacy behavior).
+// When non-empty, the address must appear in the list or match an active
+// indexer signer from the network state.
+func (v *EthValidator) isAllowedAddress(addr string) bool {
+	lower := strings.ToLower(addr)
+	if len(v.AllowedAddresses) == 0 {
+		return true
+	}
+	if v.AllowedAddresses[lower] {
+		return true
+	}
+	if v.NetworkState != nil {
+		for _, info := range v.NetworkState.GetAllIndexerInfos() {
+			if info.Signer != "" && strings.EqualFold(info.Signer, addr) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (v *EthValidator) validateJWSCompact(token, sql string) (string, error) {
 	header, payload, signature, err := parseJWSCompact(token)
 	if err != nil {
@@ -160,8 +195,8 @@ func (v *EthValidator) validateJWSCompact(token, sql string) (string, error) {
 		return "", fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// Check allowlist (empty allowlist = allow all authenticated addresses)
-	if len(v.AllowedAddresses) > 0 && !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
+	// Check allowlist + indexer signers
+	if !v.isAllowedAddress(recoveredAddr) {
 		return "", fmt.Errorf("address %s not in allowlist", recoveredAddr)
 	}
 
@@ -219,7 +254,7 @@ func (v *EthValidator) validateJWSJSON(token, sql string) (string, error) {
 			return "", fmt.Errorf("sig[%d]: signature verification failed: %w", i, err)
 		}
 
-		if len(v.AllowedAddresses) > 0 && !v.AllowedAddresses[strings.ToLower(recoveredAddr)] {
+		if !v.isAllowedAddress(recoveredAddr) {
 			return "", fmt.Errorf("sig[%d]: address %s not in allowlist", i, recoveredAddr)
 		}
 		authenticatedAddresses = append(authenticatedAddresses, recoveredAddr)

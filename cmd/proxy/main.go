@@ -133,15 +133,6 @@ func main() {
 
 	// ========== Server mode: full initialization ==========
 
-	// Create validator based on configuration
-	var validator proxy.Validator
-	if cfg.AuthEnabled {
-		validator = proxy.NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true, cfg.AuthAllowNoAuth)
-		log.Infof("Ethereum signature auth enabled with %d allowed addresses, allow_no_auth=%t", len(cfg.AuthAllowedAddresses), cfg.AuthAllowNoAuth)
-	}
-
-	// Create rewriter based on configuration
-	var rewriter proxy.Rewriter
 	// Initialize shared Redis client
 	if cfg.NetworkStateRedis == "" {
 		log.Fatalf("network_state_redis is required")
@@ -159,6 +150,16 @@ func main() {
 		log.Fatalf("failed to initialize Redis network state: %v", err)
 	}
 	networkState = redisState
+
+	// Create validator based on configuration
+	var validator proxy.Validator
+	if cfg.AuthEnabled {
+		validator = proxy.NewEthValidator(cfg.AuthAllowedAddresses, cfg.AuthMaxTokenAge.Duration, true, cfg.AuthAllowNoAuth, networkState)
+		log.Infof("Ethereum signature auth enabled with %d allowed addresses, allow_no_auth=%t", len(cfg.AuthAllowedAddresses), cfg.AuthAllowNoAuth)
+	}
+
+	// Create rewriter based on configuration
+	var rewriter proxy.Rewriter
 
 	// Load ClickHouse manager (shared by rewriter and credential provider)
 	var ckhMgr ckhmanager.Manager

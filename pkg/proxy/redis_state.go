@@ -81,6 +81,7 @@ func (r *RedisNetworkState) GetIndexerInfo(indexerId uint64) (IndexerInfo, bool)
 		ComputeNodeRpcPort:  info.ComputeNodeRpcPort,
 		StorageNodeRpcPort:  info.StorageNodeRpcPort,
 		ClickhouseProxyPort: info.ClickhouseProxyPort,
+		Signer:              info.Signer,
 	}, true
 }
 
@@ -160,6 +161,7 @@ func (r *RedisNetworkState) GetAllIndexerInfos() map[uint64]IndexerInfo {
 			ComputeNodeRpcPort:  info.ComputeNodeRpcPort,
 			StorageNodeRpcPort:  info.StorageNodeRpcPort,
 			ClickhouseProxyPort: info.ClickhouseProxyPort,
+			Signer:              info.Signer,
 		}
 	}
 	return result

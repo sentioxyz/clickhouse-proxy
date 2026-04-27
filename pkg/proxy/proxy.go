@@ -1696,6 +1696,7 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 			p.stats.inc("Query")
 
 			originalSQL := eq.Body
+			isAdmin := false
 
 			// USE <target> detection and optional rewriting.
 			// If target matches a processorID, rewrite eq.Body to USE <actualDatabase>
@@ -1815,12 +1816,33 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 						return
 					}
 
-					// Symmetric to CREATE, but the routing target is the
-					// indexer the database is bound to (DatabaseInfo.IndexerId
-					// looked up from state) — only that indexer's sentio-node
-					// can issue the deleteDatabase tx.
 					if dbName, ok := isDropDatabase(eq.Body); ok {
 						p.handleDropDatabase(ctx, clientConn, id, eq.Body, dbName, signerAddr, settingsMap)
+						return
+					}
+				}
+
+				// SQL_sentio_admin bypass: when set (by the local sentio-node GC),
+				// skip all rewriting and forwarding — send the query directly to
+				// the upstream ClickHouse. The setting is stripped before forwarding.
+				//
+				// TEMPORARY: any indexer signer is accepted. This should be
+				// restricted to only the local sentio-node's indexer signer
+				// once the proxy knows its own indexer ID. The loopback bind
+				// provides implicit scope in production, but this is not a
+				// substitute for proper access control.
+				isAdmin = settingsMap["SQL_sentio_admin"] == "1"
+				if isAdmin {
+					if signerAddr == "" {
+						log.Infof("[conn %d] streaming: SQL_sentio_admin rejected — no authenticated signer", id)
+						sendExceptionToClient(clientConn, 497, "ACCESS_DENIED",
+							"SQL_sentio_admin requires a signed request")
+						return
+					}
+					if !isIndexerSigner(p.networkState, signerAddr) {
+						log.Infof("[conn %d] streaming: SQL_sentio_admin rejected — %s is not an indexer signer", id, signerAddr)
+						sendExceptionToClient(clientConn, 497, "ACCESS_DENIED",
+							"SQL_sentio_admin requires an indexer signer")
 						return
 					}
 				}
@@ -1891,8 +1913,8 @@ func (p *Proxy) copyClientToUpstreamStreaming(ctx context.Context, id int64, cli
 				}
 			}
 
-			// SQL rewriting (skip for __route__ connections, per-query skip_rewrite flag, or handled SHOW TABLES)
-			if p.rewriter != nil && !isRoute && !skipRewrite && !showTablesHandled {
+			// SQL rewriting (skip for __route__ connections, admin bypass, per-query skip_rewrite flag, or handled SHOW TABLES)
+			if p.rewriter != nil && !isRoute && !isAdmin && !skipRewrite && !showTablesHandled {
 				rewriteStart := time.Now()
 				rewrittenSQL, err := p.rewriter.Rewrite(ctx, eq.Body, clientUser, clientPassword)
 				p.observer.Rewritten(time.Since(rewriteStart).Seconds())
@@ -2655,14 +2677,40 @@ func sendExceptionToClient(conn net.Conn, code int32, name string, message strin
 // When a client sets this to "1" in query settings, the proxy will bypass SQL rewriting for that query.
 const SkipRewriteSettingKey = "SQL_skip_rewrite"
 
+// sentioAdminSettingKey is the setting key that signals an admin query from
+// the co-located sentio-node GC routine. When set to "1", the proxy skips
+// SQL rewriting and proxy-to-proxy forwarding, sending the query directly
+// to the upstream ClickHouse. Requires an authenticated signer (validated
+// by EthValidator). Stripped before forwarding to ClickHouse.
+const sentioAdminSettingKey = "SQL_sentio_admin"
+
+// isIndexerSigner reports whether addr matches any active indexer's signer.
+//
+// TEMPORARY: this accepts any indexer signer. It should be restricted to
+// only the local sentio-node's indexer signer once the proxy knows its own
+// indexer ID.
+func isIndexerSigner(ns NetworkState, addr string) bool {
+	if ns == nil {
+		return false
+	}
+	for _, info := range ns.GetAllIndexerInfos() {
+		if info.Signer != "" && strings.EqualFold(info.Signer, addr) {
+			return true
+		}
+	}
+	return false
+}
+
 // proxySettingKeys is the list of proxy-specific setting keys to strip in streaming mode.
 // These settings are consumed by the proxy and must not be forwarded to ClickHouse Server.
 var proxySettingKeys = map[string]bool{
-	"x_auth_token":        true,
-	"SQL_x_auth_token":    true,
-	"SQL_x_payer":         true,
-	SkipRewriteSettingKey: true,
-	"skip_rewrite":        true,
+	"x_auth_token":          true,
+	"SQL_x_auth_token":      true,
+	"SQL_x_payer":           true,
+	"SQL_sentio_admin":      true,
+	"sentio_admin":          true,
+	SkipRewriteSettingKey:   true,
+	"skip_rewrite":          true,
 }
 
 // stripAuthTokenSettings removes auth token related settings from new-format Settings.
