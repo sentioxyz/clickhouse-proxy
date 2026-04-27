@@ -53,22 +53,17 @@ const createUserDatabaseTimeout = 90 * time.Second
 // plus a CH handshake.
 const forwardCreateDatabaseTimeout = 120 * time.Second
 
-// Custom ClickHouse settings used to carry routing metadata across a
-// proxy→proxy forward of `CREATE DATABASE`. Setting keys that start with
-// `SQL_` (validator.AuthTokenSettingKey) are already reserved for auth
-// passthrough; these two piggyback on the same passthrough mechanism.
+// sentioRoutedSettingKey is a custom ClickHouse setting that piggybacks on
+// the SQL_-prefix auth-passthrough mechanism (see validator.AuthTokenSettingKey)
+// to carry one bit of routing metadata across a proxy→proxy forward: non-empty
+// value means "this Query was forwarded by another proxy, handle locally
+// instead of forwarding again".
 //
-// sentioRoutedSettingKey: non-empty value means "this Query was forwarded
-// by another proxy, handle locally instead of forwarding again".
-//
-// sentioUserAddressSettingKey: lower-case 0x-prefixed address of the
-// original end-user signer. Needed because the forwarded Query is
-// authenticated by the forwarding proxy's relay signer, not the user —
-// so the receiver can't re-derive user_address from the auth token.
-const (
-	sentioRoutedSettingKey      = "SQL_sentio_routed"
-	sentioUserAddressSettingKey = "SQL_sentio_user_address"
-)
+// User address is NOT carried as a setting — the user's JWS auth token is
+// forwarded byte-for-byte alongside the byte-identical SQL body, so the
+// receiver's EthValidator re-derives the same signer address that the
+// sender did. Adding a separate user_address setting would be redundant.
+const sentioRoutedSettingKey = "SQL_sentio_routed"
 
 // createDatabaseRegexp matches `CREATE DATABASE <ident>` at the start of a
 // statement. Only the bare form is recognized in this first cut — no
@@ -113,7 +108,9 @@ func isDropDatabase(sql string) (string, bool) {
 //  2. Otherwise pick a random active bound proxy (pickRandomBoundProxy
 //     already excludes self). If one is available, forward the query over
 //     a fresh ClickHouse connection to that proxy with SQL_sentio_routed=1
-//     + SQL_sentio_user_address=<user> injected; stream its response back.
+//     injected (the user's JWS auth token is passed through verbatim, so
+//     the receiver's validator re-derives the same signer); stream its
+//     response back.
 //  3. If no remote proxy is available (single-indexer testnet or all
 //     remotes degraded), fall back to local submission.
 //
@@ -128,16 +125,12 @@ func (p *Proxy) handleCreateDatabase(ctx context.Context, clientConn net.Conn, i
 	}
 
 	// Receiver branch: a forwarding proxy already picked us, do not forward again.
+	// userAddr is the validator-recovered address from the forwarded JWS — the
+	// same address the original sender saw, since SQL body and token bytes are
+	// identical across the hop.
 	if _, routed := settings[sentioRoutedSettingKey]; routed {
-		owner := settings[sentioUserAddressSettingKey]
-		if owner == "" {
-			log.Errorf("[conn %d] create_database: routed query missing %s setting", id, sentioUserAddressSettingKey)
-			sendExceptionToClient(clientConn, 999, "PROXY_ERROR",
-				"forwarded CREATE DATABASE missing user_address")
-			return true
-		}
-		log.Infof("[conn %d] create_database: terminal (routed) db=%q owner=%s", id, dbName, owner)
-		p.submitCreateDatabaseLocal(ctx, clientConn, id, dbName, owner)
+		log.Infof("[conn %d] create_database: terminal (routed) db=%q owner=%s", id, dbName, userAddr)
+		p.submitCreateDatabaseLocal(ctx, clientConn, id, dbName, userAddr)
 		return true
 	}
 
@@ -162,7 +155,7 @@ func (p *Proxy) handleCreateDatabase(ctx context.Context, clientConn net.Conn, i
 	}
 
 	log.Infof("[conn %d] create_database: forwarding db=%q user=%s via %s", id, dbName, userAddr, target)
-	if err := p.forwardCreateDatabase(ctx, target, originalSQL, dbName, userAddr, authToken); err != nil {
+	if err := p.forwardCreateDatabase(ctx, target, originalSQL, dbName, authToken); err != nil {
 		log.Errorf("[conn %d] create_database: forward to %s failed: %v", id, target, err)
 		sendExceptionToClient(clientConn, 1004, "CREATE_DATABASE_FAILED",
 			fmt.Sprintf("CREATE DATABASE %s: %v", dbName, err))
@@ -204,16 +197,14 @@ func (p *Proxy) submitCreateDatabaseLocal(ctx context.Context, clientConn net.Co
 }
 
 // forwardCreateDatabase opens a fresh CH connection to the target proxy
-// and replays the CREATE DATABASE query with SQL_sentio_routed=1 +
-// SQL_sentio_user_address=<userAddr> so the receiver handles it locally
-// and records the correct owner. The original user's JWS auth token is
-// passed through verbatim, and the SQL is forwarded byte-for-byte
-// (originalSQL == eq.Body from the user's Query packet). Byte equality
-// is required because the user's token signs keccak256 of the SQL body;
-// any normalization (case, backticks, whitespace) would break the
-// receiver's hash check. No relay signer required, which matches
-// production where relay_private_key_hex is unset.
-func (p *Proxy) forwardCreateDatabase(ctx context.Context, target, originalSQL, dbName, userAddr, authToken string) error {
+// and replays the CREATE DATABASE query with SQL_sentio_routed=1 set so
+// the receiver handles it locally instead of forwarding again. The user's
+// JWS auth token is passed through verbatim and the SQL is forwarded
+// byte-for-byte (originalSQL == eq.Body from the user's Query packet);
+// byte equality is required because the token signs keccak256 of the SQL
+// body, and it lets the receiver's EthValidator re-derive the same signer
+// address the sender saw. No relay signer involved.
+func (p *Proxy) forwardCreateDatabase(ctx context.Context, target, originalSQL, dbName, authToken string) error {
 	callCtx, cancel := context.WithTimeout(ctx, forwardCreateDatabaseTimeout)
 	defer cancel()
 
@@ -221,9 +212,8 @@ func (p *Proxy) forwardCreateDatabase(ctx context.Context, target, originalSQL, 
 		Addr: []string{target},
 		Auth: chgo.Auth{Username: "default"},
 		Settings: chgo.Settings{
-			AuthTokenSettingKey:         authToken,
-			sentioRoutedSettingKey:      "1",
-			sentioUserAddressSettingKey: userAddr,
+			AuthTokenSettingKey:    authToken,
+			sentioRoutedSettingKey: "1",
 		},
 		DialTimeout: 10 * time.Second,
 	})
@@ -273,16 +263,10 @@ func (p *Proxy) handleDropDatabase(ctx context.Context, clientConn net.Conn, id 
 	}
 
 	// Receiver branch: a forwarding proxy already picked us, do not forward again.
+	// userAddr is the validator-recovered address from the forwarded JWS.
 	if _, routed := settings[sentioRoutedSettingKey]; routed {
-		owner := settings[sentioUserAddressSettingKey]
-		if owner == "" {
-			log.Errorf("[conn %d] drop_database: routed query missing %s setting", id, sentioUserAddressSettingKey)
-			sendExceptionToClient(clientConn, 999, "PROXY_ERROR",
-				"forwarded DROP DATABASE missing user_address")
-			return true
-		}
-		log.Infof("[conn %d] drop_database: terminal (routed) db=%q owner=%s", id, dbName, owner)
-		p.submitDeleteDatabaseLocal(ctx, clientConn, id, dbName, owner)
+		log.Infof("[conn %d] drop_database: terminal (routed) db=%q owner=%s", id, dbName, userAddr)
+		p.submitDeleteDatabaseLocal(ctx, clientConn, id, dbName, userAddr)
 		return true
 	}
 
@@ -332,7 +316,7 @@ func (p *Proxy) handleDropDatabase(ctx context.Context, clientConn net.Conn, id 
 	}
 
 	log.Infof("[conn %d] drop_database: forwarding db=%q user=%s via %s (indexer=%d)", id, dbName, userAddr, target, db.IndexerId)
-	if err := p.forwardDropDatabase(ctx, target, originalSQL, dbName, userAddr, authToken); err != nil {
+	if err := p.forwardDropDatabase(ctx, target, originalSQL, dbName, authToken); err != nil {
 		log.Errorf("[conn %d] drop_database: forward to %s failed: %v", id, target, err)
 		sendExceptionToClient(clientConn, 1004, "DROP_DATABASE_FAILED",
 			fmt.Sprintf("DROP DATABASE %s: %v", dbName, err))
@@ -373,12 +357,12 @@ func (p *Proxy) submitDeleteDatabaseLocal(ctx context.Context, clientConn net.Co
 }
 
 // forwardDropDatabase forwards a DROP DATABASE query to a specific peer
-// proxy with sentio_routed=1 + sentio_user_address injected. The user's
-// original auth token is passed through verbatim and originalSQL is
-// forwarded byte-for-byte (clickhouse-go's conn.Exec preserves the SQL
-// body), so the receiver's EthValidator validates the token against the
-// same SQL bytes the user signed.
-func (p *Proxy) forwardDropDatabase(ctx context.Context, target, originalSQL, dbName, userAddr, authToken string) error {
+// proxy with sentio_routed=1 set. The user's original auth token is
+// passed through verbatim and originalSQL is forwarded byte-for-byte
+// (clickhouse-go's conn.Exec preserves the SQL body), so the receiver's
+// EthValidator validates the token against the same SQL bytes the user
+// signed and recovers the same signer address.
+func (p *Proxy) forwardDropDatabase(ctx context.Context, target, originalSQL, dbName, authToken string) error {
 	callCtx, cancel := context.WithTimeout(ctx, forwardCreateDatabaseTimeout)
 	defer cancel()
 
@@ -386,9 +370,8 @@ func (p *Proxy) forwardDropDatabase(ctx context.Context, target, originalSQL, db
 		Addr: []string{target},
 		Auth: chgo.Auth{Username: "default"},
 		Settings: chgo.Settings{
-			AuthTokenSettingKey:         authToken,
-			sentioRoutedSettingKey:      "1",
-			sentioUserAddressSettingKey: userAddr,
+			AuthTokenSettingKey:    authToken,
+			sentioRoutedSettingKey: "1",
 		},
 		DialTimeout: 10 * time.Second,
 	})
