@@ -284,6 +284,13 @@ func (r *SentioNetworkRewriter) filterSentioNetworkTables(astTableNames []string
 		if strings.HasPrefix(strings.ToLower(dbPart), prefix) {
 			processorId = dbPart[len(prefix):]
 		}
+		// Strip NetworkV1 replica suffix "_<digits>" — physical dbs are
+		// "<processorId>_<replica>" but allocations are keyed by processorId.
+		if idx := strings.LastIndex(processorId, "_"); idx > 0 {
+			if _, err := strconv.Atoi(processorId[idx+1:]); err == nil {
+				processorId = processorId[:idx]
+			}
+		}
 		if processorId == "" {
 			continue
 		}
