@@ -293,6 +293,7 @@ func networkV1MockTableRewriterFactory() SentioNetworkTableRewriterFactory {
 			mappings: map[string]string{
 				"transfer":  prefix + "transfer",
 				"Withdrawl": prefix + "Withdrawl",
+				"events":    prefix + "events",
 			},
 		}, nil
 	}
@@ -609,11 +610,11 @@ func (s *mockRewriterServer) Rewrite(_ context.Context, req *pb.RewriteSQLReques
 // and returns its address plus a stop function. SentioNetworkRewriter uses
 // grpc.DialContext with WithBlock, so a real TCP listener is the simplest way
 // to give it something to connect to.
-func startMockRewriterService(t *testing.T) (string, func()) {
-	t.Helper()
+func startMockRewriterService(tb testing.TB) (string, func()) {
+	tb.Helper()
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
-		t.Fatalf("failed to listen for mock rewriter: %v", err)
+		tb.Fatalf("failed to listen for mock rewriter: %v", err)
 	}
 	srv := grpc.NewServer()
 	pb.RegisterRewriterServiceServer(srv, &mockRewriterServer{})

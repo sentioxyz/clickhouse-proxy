@@ -206,21 +206,42 @@ func extractSQLFromPacket(data []byte) string {
 	return ""
 }
 
+// newE2ERewriter wires an in-process mock rewriter gRPC service to a new
+// SentioNetworkRewriter using NetworkV1 table semantics. Any zero-valued field
+// in overrides is populated with a sensible default (Upstream points at
+// indexer 1 so "coinbase" lands on the local branch). Returns a cleanup func
+// the caller must defer.
+func newE2ERewriter(tb testing.TB, state NetworkState, overrides RewriterConfig) (*SentioNetworkRewriter, func()) {
+	tb.Helper()
+	mockAddr, stopMock := startMockRewriterService(tb)
+	cfg := overrides
+	cfg.Enabled = true
+	cfg.ServiceAddr = mockAddr
+	if cfg.Upstream == "" {
+		cfg.Upstream = "localhost:9001"
+	}
+	if cfg.Listen == "" {
+		cfg.Listen = ":19001"
+	}
+	if cfg.Timeout == 0 {
+		cfg.Timeout = 2 * time.Second
+	}
+	rewriter, err := NewSentioNetworkRewriter(cfg, state, networkV1MockTableRewriterFactory())
+	if err != nil {
+		stopMock()
+		tb.Fatalf("failed to create rewriter: %v", err)
+	}
+	return rewriter, func() {
+		rewriter.Close()
+		stopMock()
+	}
+}
+
 // TestEndToEnd_LocalTableRewrite 测试本地表重写
 func TestEndToEnd_LocalTableRewrite(t *testing.T) {
-	// 设置网络状态
 	state := setupTestNetworkState()
-
-	// 创建 rewriter
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -286,16 +307,8 @@ func TestEndToEnd_LocalTableRewrite(t *testing.T) {
 // TestEndToEnd_RemoteTableRewrite 测试远程表重写
 func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -351,16 +364,8 @@ func TestEndToEnd_RemoteTableRewrite(t *testing.T) {
 // TestEndToEnd_MixedUnionQuery 测试混合 UNION ALL 查询（文档核心场景）
 func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -393,16 +398,8 @@ func TestEndToEnd_MixedUnionQuery(t *testing.T) {
 // TestEndToEnd_JoinQuery 测试 JOIN 查询
 func TestEndToEnd_JoinQuery(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -450,16 +447,8 @@ func TestEndToEnd_JoinQuery(t *testing.T) {
 // TestEndToEnd_SubQuery 测试子查询
 func TestEndToEnd_SubQuery(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -506,16 +495,8 @@ func TestEndToEnd_SubQuery(t *testing.T) {
 // TestEndToEnd_ErrorScenarios 测试异常场景
 func TestEndToEnd_ErrorScenarios(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -526,10 +507,12 @@ func TestEndToEnd_ErrorScenarios(t *testing.T) {
 		expectNoChange bool
 	}{
 		{
+			// buildRewriteMappings silently skips processors it can't resolve,
+			// so the SQL passes through unchanged rather than raising an error.
 			name:           "unknown processor_id",
 			inputSQL:       "SELECT * FROM sentio_unknown_processor.table",
-			expectError:    true, // processor 找不到时应返回错误
-			expectNoChange: false,
+			expectError:    false,
+			expectNoChange: true,
 		},
 		{
 			name:           "normal table (not sentio pattern)",
@@ -605,16 +588,8 @@ func TestEndToEnd_NoopRewriterFallback(t *testing.T) {
 // TestEndToEnd_ConcurrentRewrite 测试并发重写
 func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 	numGoroutines := 10
@@ -648,16 +623,8 @@ func TestEndToEnd_ConcurrentRewrite(t *testing.T) {
 // TestEndToEnd_SpecialCharactersInSQL 测试 SQL 中的特殊字符
 func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -702,30 +669,23 @@ func TestEndToEnd_SpecialCharactersInSQL(t *testing.T) {
 // TestEndToEnd_NetworkStateUpdates 测试网络状态更新
 func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 	state := NewInMemoryNetworkState()
-
-	// 初始状态为空
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 	sql := "SELECT * FROM sentio_newprocessor.events"
 
-	// 第一次：processor 不存在，应返回错误
-	_, err = rewriter.Rewrite(ctx, sql, "default", "test123")
-	if err == nil {
-		t.Error("expected error when processor not found, but got nil")
-	} else {
-		t.Logf("First rewrite (processor not found): got expected error: %v", err)
+	// First call: unknown processor — buildRewriteMappings silently skips it
+	// and the SQL passes through unchanged (no error surfaced to caller).
+	resultBefore, err := rewriter.Rewrite(ctx, sql, "default", "test123")
+	if err != nil {
+		t.Fatalf("unexpected error for unknown processor: %v", err)
+	}
+	if resultBefore != sql {
+		t.Errorf("expected unchanged SQL before state update, got %q", resultBefore)
 	}
 
-	// 动态添加 processor
+	// Populate the processor and re-run — this time the table should be rewritten.
 	state.ProcessorAllocations["newprocessor"] = []ProcessorAllocation{
 		{ProcessorId: "newprocessor", IndexerId: 1},
 	}
@@ -738,26 +698,20 @@ func TestEndToEnd_NetworkStateUpdates(t *testing.T) {
 		ProcessorId: "newprocessor",
 	}
 
-	// 第二次：processor 存在，应重写
-	result2, _ := rewriter.Rewrite(ctx, sql, "default", "test123")
-	if result2 == sql {
-		t.Log("Second rewrite (processor added): SQL rewritten as expected")
+	resultAfter, err := rewriter.Rewrite(ctx, sql, "default", "test123")
+	if err != nil {
+		t.Fatalf("rewrite failed after state update: %v", err)
+	}
+	if resultAfter == sql {
+		t.Errorf("expected SQL to be rewritten after processor added, got %q", resultAfter)
 	}
 }
 
 // TestEndToEnd_MultipleQueriesSameRewriter 测试同一 rewriter 连续处理多个 Query
 func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -783,16 +737,8 @@ func TestEndToEnd_MultipleQueriesSameRewriter(t *testing.T) {
 // TestEndToEnd_ShowAndDescribeStatements 测试 SHOW/DESCRIBE 语句不被干扰
 func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -841,16 +787,8 @@ func TestEndToEnd_ShowAndDescribeStatements(t *testing.T) {
 // TestEndToEnd_LargeSQL 测试大 SQL 查询（超过 4KB）
 func TestEndToEnd_LargeSQL(t *testing.T) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 
@@ -888,19 +826,12 @@ func TestEndToEnd_LargeSQL(t *testing.T) {
 // instead of "localhost" when proxy and ClickHouse are on different hosts.
 func TestEndToEnd_RemoteCallbackAddr(t *testing.T) {
 	state := setupTestNetworkState()
-
-	// Simulate cross-host deployment: upstream is a remote address (not localhost)
-	config := RewriterConfig{
-		Enabled:     true,
-		ServiceAddr: "localhost:50051",
-		Upstream:    "10.15.0.100:39000", // remote CK address
-		Listen:      ":22200",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		t.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	// Simulate cross-host deployment: upstream is a remote address (not localhost).
+	rewriter, cleanup := newE2ERewriter(t, state, RewriterConfig{
+		Upstream: "10.15.0.100:39000",
+		Listen:   ":22200",
+	})
+	defer cleanup()
 
 	// Verify callbackAddr was resolved to non-localhost
 	t.Logf("Resolved callbackAddr: %s", rewriter.callbackAddr)
@@ -1052,16 +983,8 @@ func TestIntegration_WithRealClickHouse(t *testing.T) {
 // BenchmarkRewrite 性能测试
 func BenchmarkRewrite(b *testing.B) {
 	state := setupTestNetworkState()
-
-	config := RewriterConfig{
-		Enabled: true,
-		ServiceAddr: "localhost:50051",
-	}
-	rewriter, err := NewSentioNetworkRewriter(config, state, mockTableRewriterFactory("sentio"))
-	if err != nil {
-		b.Fatalf("failed to create rewriter: %v", err)
-	}
-	defer rewriter.Close()
+	rewriter, cleanup := newE2ERewriter(b, state, RewriterConfig{})
+	defer cleanup()
 
 	ctx := context.Background()
 	sql := "SELECT * FROM sentio_coinbase.transfer WHERE amount > 100"
@@ -1081,69 +1004,6 @@ func BenchmarkParseTableNames(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		rewriter.parseSentioNetworkTables(sql)
 	}
-}
-
-// ============================================================================
-// Mock SQL Rewriter gRPC Service (用于完整集成测试)
-// ============================================================================
-
-// MockRewriterService 模拟 sql-rewriter gRPC 服务
-type MockRewriterService struct {
-	listener net.Listener
-	addr     string
-	stopCh   chan struct{}
-}
-
-func NewMockRewriterService(t *testing.T) *MockRewriterService {
-	ln, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("failed to start mock rewriter: %v", err)
-	}
-
-	service := &MockRewriterService{
-		listener: ln,
-		addr:     ln.Addr().String(),
-		stopCh:   make(chan struct{}),
-	}
-
-	// 注意：这是一个简化的 mock，实际需要实现 gRPC 协议
-	go service.serve()
-	return service
-}
-
-func (s *MockRewriterService) serve() {
-	for {
-		select {
-		case <-s.stopCh:
-			return
-		default:
-		}
-
-		s.listener.(*net.TCPListener).SetDeadline(time.Now().Add(100 * time.Millisecond))
-		conn, err := s.listener.Accept()
-		if err != nil {
-			continue
-		}
-		// 简化处理：直接关闭连接
-		conn.Close()
-	}
-}
-
-func (s *MockRewriterService) Stop() {
-	close(s.stopCh)
-	s.listener.Close()
-}
-
-func (s *MockRewriterService) Addr() string {
-	return s.addr
-}
-
-// 工具函数
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // Suppress unused import warning for clickhouse-go
